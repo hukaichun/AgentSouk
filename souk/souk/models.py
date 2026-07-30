@@ -19,6 +19,9 @@ class AgentRegistration(BaseModel):
     name: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
     description: str = ""
     agent_card_extra: dict[str, Any] = Field(default_factory=dict)
+    # souk-internal, not exposed via the public A2A Agent Card — see
+    # agents.metadata in souk/db.py.
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RegisterBatchRequest(BaseModel):
@@ -53,3 +56,6 @@ class RunAgentInput(BaseModel):
 
     thread_id: str | None = None
     messages: list[dict[str, Any]] = Field(default_factory=list)
+    # Free-form extension data for this run, stored on its thread_history
+    # row (see souk/db.py) — not interpreted by souk itself.
+    metadata: dict[str, Any] = Field(default_factory=dict)

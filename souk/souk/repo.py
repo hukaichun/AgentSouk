@@ -29,11 +29,12 @@ async def register_agents(
         await session.execute(
             text(
                 """
-                INSERT INTO agents (name, sdk_client_id, agent_card, joined_at, last_seen_at)
-                VALUES (:name, :sdk_client_id, :agent_card, now(), now())
+                INSERT INTO agents (name, sdk_client_id, agent_card, metadata, joined_at, last_seen_at)
+                VALUES (:name, :sdk_client_id, :agent_card, :metadata, now(), now())
                 ON CONFLICT (name) DO UPDATE SET
                     sdk_client_id = EXCLUDED.sdk_client_id,
                     agent_card = EXCLUDED.agent_card,
+                    metadata = EXCLUDED.metadata,
                     last_seen_at = now()
                 """
             ),
@@ -41,6 +42,7 @@ async def register_agents(
                 "name": agent["name"],
                 "sdk_client_id": sdk_client_id,
                 "agent_card": json.dumps(card),
+                "metadata": json.dumps(agent.get("metadata", {})),
             },
         )
     await session.commit()
@@ -57,7 +59,10 @@ async def touch_agent(session: AsyncSession, name: str) -> None:
 async def get_agent(session: AsyncSession, name: str) -> dict[str, Any] | None:
     row = (
         await session.execute(
-            text("SELECT name, agent_card, joined_at, last_seen_at FROM agents WHERE name = :name"),
+            text(
+                "SELECT name, agent_card, metadata, joined_at, last_seen_at "
+                "FROM agents WHERE name = :name"
+            ),
             {"name": name},
         )
     ).mappings().first()
@@ -91,11 +96,23 @@ async def ensure_thread(
     agent_name: str,
     thread_id: str | None,
     parent_thread_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> str:
-    """Returns the thread_id to use: the given one (if it already belongs
-    to `agent_name`), or a freshly assigned one. `parent_thread_id` is only
-    applied when creating a new thread (e.g. one an A2A call spawned from
-    within another thread's run) — see threads.parent_thread_id.
+    """Returns the thread_id to use — souk always assigns the id itself
+    (see souk.ids); callers never mint their own. Three cases:
+
+    1. `thread_id` given and it already exists: reuse it (must belong to
+       `agent_name`). This is for genuine external callers that supply
+       their own opaque identifier (e.g. a real A2A client's sessionId) —
+       souk just tracks it, it doesn't generate it, so it's exempt from
+       the "db-generated" rule the same way A2A's caller-supplied task id
+       already is.
+    2. `thread_id` is None but `parent_thread_id` is given (e.g. a
+       sub-agent call spawned from within another thread's run): reuse
+       the existing child thread for this (parent_thread_id, agent_name)
+       pair if one exists, so repeated delegation calls keep talking to
+       the same sub-thread — otherwise assign a fresh souk-generated id.
+    3. Neither given: always assign a fresh souk-generated id.
     """
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
@@ -109,17 +126,42 @@ async def ensure_thread(
                 {"thread_id": thread_id},
             )
             return thread_id
+    elif parent_thread_id is not None:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    SELECT thread_id FROM threads
+                    WHERE parent_thread_id = :parent_thread_id AND agent_name = :agent_name
+                    ORDER BY created_at LIMIT 1
+                    """
+                ),
+                {"parent_thread_id": parent_thread_id, "agent_name": agent_name},
+            )
+        ).mappings().first()
+        if row is not None:
+            await session.execute(
+                text("UPDATE threads SET last_activity_at = now() WHERE thread_id = :thread_id"),
+                {"thread_id": row["thread_id"]},
+            )
+            return row["thread_id"]
+        thread_id = new_id("thread")
     else:
         thread_id = new_id("thread")
 
     await session.execute(
         text(
             """
-            INSERT INTO threads (thread_id, agent_name, parent_thread_id, created_at, last_activity_at)
-            VALUES (:thread_id, :agent_name, :parent_thread_id, now(), now())
+            INSERT INTO threads (thread_id, agent_name, parent_thread_id, metadata, created_at, last_activity_at)
+            VALUES (:thread_id, :agent_name, :parent_thread_id, :metadata, now(), now())
             """
         ),
-        {"thread_id": thread_id, "agent_name": agent_name, "parent_thread_id": parent_thread_id},
+        {
+            "thread_id": thread_id,
+            "agent_name": agent_name,
+            "parent_thread_id": parent_thread_id,
+            "metadata": json.dumps(metadata or {}),
+        },
     )
     return thread_id
 
@@ -132,8 +174,8 @@ async def append_thread_messages(
         await session.execute(
             text(
                 """
-                INSERT INTO thread_history (thread_id, run_id, kind, message_id, message_json)
-                VALUES (:thread_id, :run_id, 'message', :message_id, :message_json)
+                INSERT INTO thread_history (thread_id, run_id, kind, message_id, message_json, metadata)
+                VALUES (:thread_id, :run_id, 'message', :message_id, :message_json, :metadata)
                 ON CONFLICT (thread_id, message_id) DO NOTHING
                 """
             ),
@@ -142,6 +184,7 @@ async def append_thread_messages(
                 "run_id": run_id,
                 "message_id": message_id,
                 "message_json": json.dumps(message),
+                "metadata": json.dumps(message.get("metadata", {})),
             },
         )
 
@@ -169,6 +212,7 @@ async def create_run(
     protocol: str,
     input_json: dict[str, Any],
     assign_task_id: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     run_id = new_id("run")
     task_id = new_id("task") if assign_task_id else None
@@ -176,9 +220,9 @@ async def create_run(
         text(
             """
             INSERT INTO thread_history
-                (thread_id, run_id, kind, agent_name, protocol, status, input_json, task_id)
+                (thread_id, run_id, kind, agent_name, protocol, status, input_json, task_id, metadata)
             VALUES
-                (:thread_id, :run_id, 'run_status', :agent_name, :protocol, 'queued', :input_json, :task_id)
+                (:thread_id, :run_id, 'run_status', :agent_name, :protocol, 'queued', :input_json, :task_id, :metadata)
             """
         ),
         {
@@ -188,6 +232,7 @@ async def create_run(
             "protocol": protocol,
             "input_json": json.dumps(input_json),
             "task_id": task_id,
+            "metadata": json.dumps(metadata or {}),
         },
     )
     await session.commit()

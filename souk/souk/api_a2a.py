@@ -57,21 +57,24 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     if not task_id:
         raise HTTPException(status_code=400, detail="params.id (task id) is required")
     session_id = params.get("sessionId")
+    metadata = params.get("metadata", {})
     # Not part of core A2A — an extension field a caller can set (e.g. an
     # agent delegating to a sub-agent via souk_agent_sdk.a2a_client) to
     # link the spawned thread back to the caller's own thread. Ignored by
     # any A2A client that doesn't know about it.
-    parent_thread_id = params.get("metadata", {}).get("parentThreadId")
+    parent_thread_id = metadata.get("parentThreadId")
 
     try:
-        thread_id = await repo.ensure_thread(session, agent_name, session_id, parent_thread_id)
+        thread_id = await repo.ensure_thread(
+            session, agent_name, session_id, parent_thread_id, metadata=metadata
+        )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     messages = a2a_message_to_agui_messages(params.get("message", {}))
 
     input_json = {"thread_id": thread_id, "messages": messages}
     created = await repo.create_run(
-        session, thread_id, agent_name, "a2a", input_json, assign_task_id=False
+        session, thread_id, agent_name, "a2a", input_json, assign_task_id=False, metadata=metadata
     )
     run_id = created["run_id"]
     input_json["run_id"] = run_id

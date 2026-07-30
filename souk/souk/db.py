@@ -12,6 +12,11 @@ CREATE TABLE IF NOT EXISTS agents (
     name          TEXT PRIMARY KEY,
     sdk_client_id TEXT NOT NULL,
     agent_card    JSONB NOT NULL,
+    -- Free-form, souk-internal extension data — distinct from agent_card
+    -- (which is protocol-facing: served verbatim as the A2A Agent Card).
+    -- Not interpreted by souk itself; a place for callers/operators to
+    -- attach whatever isn't worth a dedicated column.
+    metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
     joined_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -24,6 +29,7 @@ CREATE TABLE IF NOT EXISTS threads (
     -- lineage, so "what conversation led to this one" is queryable. NULL
     -- for a thread started directly by a top-level caller.
     parent_thread_id  TEXT REFERENCES threads(thread_id),
+    metadata          JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_activity_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -57,6 +63,12 @@ CREATE TABLE IF NOT EXISTS thread_history (
     task_id       TEXT,   -- souk-assigned: task_<hex>, set only for protocol='a2a'
     started_at    TIMESTAMPTZ,
     completed_at  TIMESTAMPTZ,
+
+    -- Free-form extension data, meaning depends on `kind`: for a message
+    -- row, whatever metadata the AG-UI Message carried; for a run_status
+    -- row, an A2A Task/Message's own `metadata` field when the caller was
+    -- an A2A client (real A2A Tasks and Messages have one).
+    metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
 
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (thread_id, message_id)

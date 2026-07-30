@@ -33,23 +33,19 @@ def build_sub_agent_tools(sub_agents: list[SubAgentConfig]) -> list[Tool]:
 
 def _make_tool(sub: SubAgentConfig) -> Tool:
     async def call_sub_agent(ctx: RunContext[AgentDeps], message: str) -> str:
-        # A sub-agent's A2A session must NOT reuse the main thread's own
-        # thread_id directly — that thread belongs to *this* agent, not
-        # the sub-agent, and souk rejects reusing a thread_id across a
-        # different agent_name. Instead derive a session id that's stable
-        # per (main thread, sub-agent): repeated delegations to the same
-        # sub-agent within one main conversation keep talking to the same
-        # sub-thread (so the sub-agent gets its own continuity too), while
-        # `metadata.parentThreadId` records the lineage back to the main
-        # thread for traceability.
+        # No session_id here — souk assigns every thread id itself (see
+        # souk.ids / souk.repo.ensure_thread), the sub-agent tool never
+        # mints one. We only tell souk which thread this call is spawned
+        # from (metadata.parentThreadId); souk reuses the existing child
+        # thread for this (parent, sub-agent) pair if one already exists
+        # (so repeated delegations within one main conversation keep
+        # talking to the same sub-thread), or assigns a fresh one.
         main_thread_id = ctx.deps.thread_id
-        session_id = f"{main_thread_id}__{sub.name}" if main_thread_id else None
 
         final_text = ""
         async for update in call_agent_streaming(
             sub.a2a_url,
             message,
-            session_id=session_id,
             metadata={"parentThreadId": main_thread_id} if main_thread_id else None,
         ):
             await ctx.deps.progress_queue.put(

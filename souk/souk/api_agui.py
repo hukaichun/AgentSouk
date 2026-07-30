@@ -30,10 +30,10 @@ async def run_agent(
                 detail=f"thread '{body.thread_id}' belongs to agent '{thread['agent_name']}', not '{agent_name}'",
             )
 
-    thread_id = await repo.ensure_thread(session, agent_name, body.thread_id)
+    thread_id = await repo.ensure_thread(session, agent_name, body.thread_id, metadata=body.metadata)
 
     created = await repo.create_run(
-        session, thread_id, agent_name, "ag-ui", body.model_dump(mode="json")
+        session, thread_id, agent_name, "ag-ui", body.model_dump(mode="json"), metadata=body.metadata
     )
     run_id = created["run_id"]
 
