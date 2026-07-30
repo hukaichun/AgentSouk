@@ -1,0 +1,38 @@
+services:
+  paradedb:
+    image: paradedb/paradedb:latest
+    environment:
+      POSTGRES_USER: souk
+      POSTGRES_PASSWORD: souk
+      POSTGRES_DB: souk
+    ports:
+      - "5433:5432"
+    volumes:
+      - paradedb_data:/var/lib/postgresql
+
+  souk:
+    build:
+      context: .
+      dockerfile: souk/Dockerfile
+    ports:
+      - "8000:8000"
+      - "50051:50051"
+    depends_on:
+      - paradedb
+    environment:
+      SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
+      SOUK_PUBLIC_HTTP_URL: http://localhost:8000
+
+  agent-demo:
+    build:
+      context: .
+      dockerfile: agent-template/Dockerfile
+    depends_on:
+      - souk
+    volumes:
+      - ./agent-template/config.example.yaml:/app/config.yaml:ro
+    environment:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+
+volumes:
+  paradedb_data:

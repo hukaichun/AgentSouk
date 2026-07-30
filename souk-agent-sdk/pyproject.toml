@@ -1,0 +1,17 @@
+[project]
+name = "souk-agent-sdk"
+version = "0.1.0"
+description = "Agent-side SDK: registers a batch of AG-UI-shaped agents with a souk and relays runs over gRPC"
+requires-python = ">=3.12"
+dependencies = [
+    "grpcio>=1.66",
+    "httpx>=0.27",
+    "httpx-sse>=0.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["souk_agent_sdk"]

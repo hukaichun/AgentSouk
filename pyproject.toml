@@ -1,0 +1,13 @@
+[project]
+name = "agentsouk"
+version = "0.1.0"
+description = "Agent Souk — a public-IP relay that makes agents without a public IP reachable via AG-UI and A2A"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["souk", "souk-agent-sdk", "souk-client-sdk", "agent-template"]
+
+[dependency-groups]
+dev = ["grpcio-tools>=1.66"]

@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package souk;
+
+// gRPC contract between souk (server) and souk-agent-sdk (agent-side client).
+//
+// Envelopes carry raw AG-UI JSON rather than a fully-typed proto per AG-UI
+// event: AG-UI already defines its own JSON event schemas and is still
+// evolving (draft event categories), so re-typing every event here would
+// mean chasing upstream churn for no real gain at this stage.
+service SoukAgentGateway {
+  // Called repeatedly by the SDK's poll loop to discover work queued for
+  // its registered agents. Polling only ever *discovers* run_ids — actual
+  // delivery happens over AgentSession (below), never by opening a new
+  // stream per run.
+  rpc PollForWork(PollRequest) returns (PollResponse);
+
+  // One persistent, multiplexed, bidirectional stream per SDK client
+  // connection: the SDK opens this once (right after registering) and
+  // keeps it open for its whole lifetime. Every run the SDK discovers via
+  // PollForWork is claimed, delivered, and drained through this single
+  // connection — disambiguated by run_id on each envelope — rather than
+  // opening a new stream per run, so one long-lived connection consumes
+  // every call.
+  //
+  // Per run_id, the exchange is:
+  //   1. sdk->souk: a claim envelope (json_payload empty, end_of_stream
+  //      false) naming the run_id it's ready to take.
+  //   2. souk->sdk: one envelope carrying the RunAgentInput JSON for that
+  //      run_id.
+  //   3. sdk->souk: zero or more envelopes, each carrying one AG-UI event
+  //      JSON for that run_id.
+  //   4. sdk->souk: a final envelope for that run_id with end_of_stream
+  //      true.
+  //   5. souk->sdk: an envelope for that run_id with ack true, once souk
+  //      has fully persisted and relayed every event for that run_id —
+  //      the SDK's confirmation that the call was fully consumed, not
+  //      just sent.
+  // Multiple run_ids can be in flight concurrently on the same stream.
+  rpc AgentSession(stream AgentEventEnvelope) returns (stream AgentEventEnvelope);
+}
+
+message PollRequest {
+  repeated string agent_names = 1;
+}
+
+message PollResponse {
+  repeated PendingRun pending = 1;
+}
+
+message PendingRun {
+  string run_id = 1;
+  string agent_name = 2;
+}
+
+message AgentEventEnvelope {
+  string run_id = 1;
+  string agent_name = 2;
+  string json_payload = 3;
+  bool end_of_stream = 4;
+  bool ack = 5;
+}

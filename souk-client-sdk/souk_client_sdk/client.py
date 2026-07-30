@@ -1,0 +1,50 @@
+"""Caller-side SDK: a thin AG-UI client for talking to an agent through a
+souk, so callers (human-facing apps, or another agent acting as a plain
+top-level caller) don't have to hand-roll HTTP+SSE or thread bookkeeping.
+
+Not agent-facing — unrelated to souk-agent-sdk's poll/gRPC machinery.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from typing import Any
+from uuid import uuid4
+
+import httpx
+from httpx_sse import aconnect_sse
+
+
+class SoukClient:
+    def __init__(self, souk_http_url: str, timeout: float = 300.0) -> None:
+        self.souk_http_url = souk_http_url.rstrip("/")
+        self.timeout = timeout
+        self.last_thread_id: str | None = None
+        self.last_run_id: str | None = None
+
+    async def run(
+        self,
+        agent_name: str,
+        message: str,
+        *,
+        thread_id: str | None = None,
+        role: str = "user",
+    ) -> AsyncIterator[dict[str, Any]]:
+        """POSTs a RunAgentInput to /agui/{agent_name} and yields each AG-UI
+        event as it streams back. Pass `thread_id` from a previous call's
+        `last_thread_id` to continue that conversation; omit it to start a
+        new one (souk assigns and returns the id).
+        """
+        body = {
+            "thread_id": thread_id,
+            "messages": [{"id": str(uuid4()), "role": role, "content": message}],
+        }
+        url = f"{self.souk_http_url}/agui/{agent_name}"
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with aconnect_sse(client, "POST", url, json=body) as event_source:
+                self.last_thread_id = event_source.response.headers.get("X-Souk-Thread-Id")
+                self.last_run_id = event_source.response.headers.get("X-Souk-Run-Id")
+                async for sse in event_source.aiter_sse():
+                    yield json.loads(sse.data)
