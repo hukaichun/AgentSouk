@@ -86,24 +86,40 @@ async def get_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | 
     return dict(row) if row else None
 
 
-async def ensure_thread(session: AsyncSession, agent_name: str, thread_id: str | None) -> str:
-    """Returns the thread_id to use: the given one (if it exists), or a freshly assigned one."""
+async def ensure_thread(
+    session: AsyncSession,
+    agent_name: str,
+    thread_id: str | None,
+    parent_thread_id: str | None = None,
+) -> str:
+    """Returns the thread_id to use: the given one (if it already belongs
+    to `agent_name`), or a freshly assigned one. `parent_thread_id` is only
+    applied when creating a new thread (e.g. one an A2A call spawned from
+    within another thread's run) — see threads.parent_thread_id.
+    """
     if thread_id is not None:
-        await session.execute(
-            text("UPDATE threads SET last_activity_at = now() WHERE thread_id = :thread_id"),
-            {"thread_id": thread_id},
-        )
-        return thread_id
+        existing = await get_thread(session, thread_id)
+        if existing is not None:
+            if existing["agent_name"] != agent_name:
+                raise ValueError(
+                    f"thread '{thread_id}' belongs to agent '{existing['agent_name']}', not '{agent_name}'"
+                )
+            await session.execute(
+                text("UPDATE threads SET last_activity_at = now() WHERE thread_id = :thread_id"),
+                {"thread_id": thread_id},
+            )
+            return thread_id
+    else:
+        thread_id = new_id("thread")
 
-    thread_id = new_id("thread")
     await session.execute(
         text(
             """
-            INSERT INTO threads (thread_id, agent_name, created_at, last_activity_at)
-            VALUES (:thread_id, :agent_name, now(), now())
+            INSERT INTO threads (thread_id, agent_name, parent_thread_id, created_at, last_activity_at)
+            VALUES (:thread_id, :agent_name, :parent_thread_id, now(), now())
             """
         ),
-        {"thread_id": thread_id, "agent_name": agent_name},
+        {"thread_id": thread_id, "agent_name": agent_name, "parent_thread_id": parent_thread_id},
     )
     return thread_id
 

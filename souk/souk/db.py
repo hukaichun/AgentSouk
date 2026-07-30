@@ -19,9 +19,15 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE TABLE IF NOT EXISTS threads (
     thread_id         TEXT PRIMARY KEY,   -- souk-assigned: thread_<hex>
     agent_name        TEXT NOT NULL REFERENCES agents(name),
+    -- Set when this thread was spawned by an A2A call from within another
+    -- thread's run (e.g. a main agent delegating to a sub-agent) — pure
+    -- lineage, so "what conversation led to this one" is queryable. NULL
+    -- for a thread started directly by a top-level caller.
+    parent_thread_id  TEXT REFERENCES threads(thread_id),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_activity_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads (parent_thread_id);
 
 -- A2A's task state and AG-UI's conversation history are two views onto the
 -- same underlying conversation (a souk "thread" == an A2A session), so

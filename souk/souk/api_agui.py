@@ -24,6 +24,11 @@ async def run_agent(
         thread = await repo.get_thread(session, body.thread_id)
         if thread is None:
             raise HTTPException(status_code=404, detail=f"thread '{body.thread_id}' not found")
+        if thread["agent_name"] != agent_name:
+            raise HTTPException(
+                status_code=409,
+                detail=f"thread '{body.thread_id}' belongs to agent '{thread['agent_name']}', not '{agent_name}'",
+            )
 
     thread_id = await repo.ensure_thread(session, agent_name, body.thread_id)
 

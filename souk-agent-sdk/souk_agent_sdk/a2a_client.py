@@ -29,6 +29,7 @@ async def call_agent_streaming(
     *,
     task_id: str | None = None,
     session_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
     timeout: float = 120.0,
 ) -> AsyncIterator[dict[str, Any]]:
     task_id = task_id or new_task_id()
@@ -38,6 +39,8 @@ async def call_agent_streaming(
     }
     if session_id:
         params["sessionId"] = session_id
+    if metadata:
+        params["metadata"] = metadata
 
     body = {"jsonrpc": "2.0", "id": task_id, "method": "tasks/sendSubscribe", "params": params}
 
