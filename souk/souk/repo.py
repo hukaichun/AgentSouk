@@ -111,13 +111,13 @@ async def ensure_thread(session: AsyncSession, agent_name: str, thread_id: str |
 async def append_thread_messages(
     session: AsyncSession, thread_id: str, run_id: str, messages: list[dict[str, Any]]
 ) -> None:
-    for seq, message in enumerate(messages):
-        message_id = str(message.get("id") or f"{run_id}-{seq}")
+    for index, message in enumerate(messages):
+        message_id = str(message.get("id") or f"{run_id}-{index}")
         await session.execute(
             text(
                 """
-                INSERT INTO thread_messages (thread_id, run_id, message_id, seq, message_json)
-                VALUES (:thread_id, :run_id, :message_id, :seq, :message_json)
+                INSERT INTO thread_history (thread_id, run_id, kind, message_id, message_json)
+                VALUES (:thread_id, :run_id, 'message', :message_id, :message_json)
                 ON CONFLICT (thread_id, message_id) DO NOTHING
                 """
             ),
@@ -125,7 +125,6 @@ async def append_thread_messages(
                 "thread_id": thread_id,
                 "run_id": run_id,
                 "message_id": message_id,
-                "seq": seq,
                 "message_json": json.dumps(message),
             },
         )
@@ -135,7 +134,11 @@ async def get_thread_messages(session: AsyncSession, thread_id: str) -> list[dic
     rows = (
         await session.execute(
             text(
-                "SELECT message_json FROM thread_messages WHERE thread_id = :thread_id ORDER BY seq"
+                """
+                SELECT message_json FROM thread_history
+                WHERE thread_id = :thread_id AND kind = 'message'
+                ORDER BY id
+                """
             ),
             {"thread_id": thread_id},
         )
@@ -156,13 +159,15 @@ async def create_run(
     await session.execute(
         text(
             """
-            INSERT INTO runs (run_id, thread_id, agent_name, protocol, status, input_json, task_id, created_at)
-            VALUES (:run_id, :thread_id, :agent_name, :protocol, 'queued', :input_json, :task_id, now())
+            INSERT INTO thread_history
+                (thread_id, run_id, kind, agent_name, protocol, status, input_json, task_id)
+            VALUES
+                (:thread_id, :run_id, 'run_status', :agent_name, :protocol, 'queued', :input_json, :task_id)
             """
         ),
         {
-            "run_id": run_id,
             "thread_id": thread_id,
+            "run_id": run_id,
             "agent_name": agent_name,
             "protocol": protocol,
             "input_json": json.dumps(input_json),
@@ -175,7 +180,7 @@ async def create_run(
 
 async def set_task_id(session: AsyncSession, run_id: str, task_id: str) -> None:
     await session.execute(
-        text("UPDATE runs SET task_id = :task_id WHERE run_id = :run_id"),
+        text("UPDATE thread_history SET task_id = :task_id WHERE run_id = :run_id AND kind = 'run_status'"),
         {"task_id": task_id, "run_id": run_id},
     )
 
@@ -189,7 +194,10 @@ async def mark_run_status(session: AsyncSession, run_id: str, status: str) -> No
     }.get(status)
     extra_set = f", {timestamp_col} = now()" if timestamp_col else ""
     await session.execute(
-        text(f"UPDATE runs SET status = :status{extra_set} WHERE run_id = :run_id"),
+        text(
+            f"UPDATE thread_history SET status = :status{extra_set} "
+            "WHERE run_id = :run_id AND kind = 'run_status'"
+        ),
         {"status": status, "run_id": str(run_id)},
     )
     await session.commit()
@@ -197,14 +205,20 @@ async def mark_run_status(session: AsyncSession, run_id: str, status: str) -> No
 
 async def get_run(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
     row = (
-        await session.execute(text("SELECT * FROM runs WHERE run_id = :run_id"), {"run_id": run_id})
+        await session.execute(
+            text("SELECT * FROM thread_history WHERE run_id = :run_id AND kind = 'run_status'"),
+            {"run_id": run_id},
+        )
     ).mappings().first()
     return dict(row) if row else None
 
 
 async def get_run_by_task_id(session: AsyncSession, task_id: str) -> dict[str, Any] | None:
     row = (
-        await session.execute(text("SELECT * FROM runs WHERE task_id = :task_id"), {"task_id": task_id})
+        await session.execute(
+            text("SELECT * FROM thread_history WHERE task_id = :task_id AND kind = 'run_status'"),
+            {"task_id": task_id},
+        )
     ).mappings().first()
     return dict(row) if row else None
 
