@@ -4,7 +4,7 @@ souk_grpc_url: souk:50051
 agents:
   - name: greeter
     description: Friendly demo agent that can delegate translation to a sub-agent.
-    model: anthropic:claude-haiku-4-5-20251001
+    model: custom-openai
     system_prompt: >
       You are a friendly demo agent for Agent Souk. If the user's message
       isn't in English, use the call_translator tool to translate it to
@@ -16,7 +16,7 @@ agents:
 
   - name: translator
     description: Translates text to English.
-    model: anthropic:claude-haiku-4-5-20251001
+    model: custom-openai
     system_prompt: >
       Translate whatever text the user sends you into English. Reply with
       only the translation, nothing else.

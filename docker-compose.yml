@@ -32,6 +32,14 @@ services:
     volumes:
       - ./agent-template/config.example.yaml:/app/config.yaml:ro
     environment:
+      # config.example.yaml uses `model: custom-openai`, resolved by
+      # agent_template.main.resolve_model against these — point them at
+      # any OpenAI-compatible endpoint. Swap the model string to
+      # "anthropic:claude-..." etc. instead and use ANTHROPIC_API_KEY if
+      # you'd rather not run a custom endpoint.
+      LLM_BASE_URL: "${LLM_BASE_URL}"
+      LLM_MODEL_NAME: "${LLM_MODEL_NAME}"
+      LLM_API_KEY: "${LLM_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
 
 volumes:

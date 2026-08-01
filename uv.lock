@@ -2036,6 +2036,7 @@ name = "souk"
 version = "0.1.0"
 source = { editable = "souk" }
 dependencies = [
+    { name = "ag-ui-protocol" },
     { name = "fastapi" },
     { name = "grpcio" },
     { name = "psycopg", extra = ["binary", "pool"] },
@@ -2047,6 +2048,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "ag-ui-protocol", specifier = ">=0.1.19" },
     { name = "fastapi", specifier = ">=0.115" },
     { name = "grpcio", specifier = ">=1.66" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },

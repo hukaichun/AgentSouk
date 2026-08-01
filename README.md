@@ -25,8 +25,16 @@ events for that run.
 ## Running locally
 
 ```bash
-cp .env.example .env   # fill in ANTHROPIC_API_KEY (or override each agent's `model:` in config.example.yaml)
+cp .env.example .env   # fill in LLM_BASE_URL/LLM_MODEL_NAME/LLM_API_KEY (or ANTHROPIC_API_KEY — see .env.example)
 docker compose up --build
+```
+
+`config.example.yaml`'s agents use `model: custom-openai`, which resolves against `LLM_BASE_URL`/`LLM_MODEL_NAME`/`LLM_API_KEY` — any OpenAI-compatible endpoint (Azure AI, a self-hosted gateway, ...), not just api.openai.com. Set a plain `model: anthropic:claude-...` (or `openai:gpt-...`) instead to skip the custom endpoint entirely. See `agent_template.main.resolve_model`.
+
+To run `agent-template` directly on the host against a souk (e.g. one started with `uv run python -m souk.server`) instead of via docker-compose:
+
+```bash
+AGENT_TEMPLATE_CONFIG=agent-template/config.example.yaml uv run --env-file .env python -m agent_template.main
 ```
 
 This starts ParadeDB, souk (HTTP `:8000`, gRPC `:50051`), and one

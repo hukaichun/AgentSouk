@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
+from souk.agui import build_run_agent_input
 from souk.broker import END_OF_STREAM, broker
 from souk.db import get_session
 from souk.models import RunAgentInput
@@ -37,9 +38,10 @@ async def run_agent(
     )
     run_id = created["run_id"]
 
-    input_json = body.model_dump(mode="json")
-    input_json["thread_id"] = thread_id
-    input_json["run_id"] = run_id
+    try:
+        input_json = build_run_agent_input(thread_id, run_id, body.messages)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     await repo.append_thread_messages(session, thread_id, run_id, body.messages)
     await session.commit()

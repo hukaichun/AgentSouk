@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
+from souk.agui import build_run_agent_input
 from souk.broker import END_OF_STREAM, broker
 from souk.config import settings
 from souk.db import get_session
@@ -72,12 +73,21 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
         raise HTTPException(status_code=409, detail=str(e)) from e
     messages = a2a_message_to_agui_messages(params.get("message", {}))
 
-    input_json = {"thread_id": thread_id, "messages": messages}
     created = await repo.create_run(
-        session, thread_id, agent_name, "a2a", input_json, assign_task_id=False, metadata=metadata
+        session,
+        thread_id,
+        agent_name,
+        "a2a",
+        {"thread_id": thread_id, "messages": messages},
+        assign_task_id=False,
+        metadata=metadata,
     )
     run_id = created["run_id"]
-    input_json["run_id"] = run_id
+
+    try:
+        agui_input_json = build_run_agent_input(thread_id, run_id, messages)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     # tasks/send(Subscribe) task ids are caller-supplied (see module docstring),
     # so store it directly rather than souk's usual new_id("task").
@@ -85,7 +95,7 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     await repo.append_thread_messages(session, thread_id, run_id, messages)
     await session.commit()
 
-    broker.enqueue_run(run_id, agent_name, thread_id, input_json, "a2a")
+    broker.enqueue_run(run_id, agent_name, thread_id, agui_input_json, "a2a")
     return task_id, run_id
 
 
