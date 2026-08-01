@@ -5,17 +5,31 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI
 
-from souk import api_a2a, api_agui, api_registry
+from souk import api_a2a, api_agui, api_registry, repo
 from souk.config import settings
-from souk.db import bootstrap_schema
+from souk.db import SessionLocal, bootstrap_schema
 from souk.grpc_server import create_grpc_server
 
+logger = logging.getLogger("souk.server")
 logging.basicConfig(level=logging.INFO)
+
+
+async def startup() -> None:
+    await bootstrap_schema()
+    async with SessionLocal() as session:
+        orphaned = await repo.fail_orphaned_runs(session)
+    if orphaned:
+        logger.warning(
+            "startup: marked %d run(s) failed — still queued/running from before this restart, "
+            "souk's in-memory dispatch state doesn't survive a restart: %s",
+            len(orphaned),
+            orphaned,
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await bootstrap_schema()
+    await startup()
     yield
 
 
@@ -26,7 +40,7 @@ app.include_router(api_a2a.router)
 
 
 async def _serve() -> None:
-    await bootstrap_schema()
+    await startup()
 
     grpc_server = create_grpc_server()
     await grpc_server.start()

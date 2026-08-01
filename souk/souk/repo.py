@@ -264,6 +264,36 @@ async def mark_run_status(session: AsyncSession, run_id: str, status: str) -> No
     await session.commit()
 
 
+async def fail_orphaned_runs(session: AsyncSession) -> list[str]:
+    """Called once on souk startup. souk's live dispatch state (souk.broker)
+    is pure in-memory — a restart loses it entirely, so any run still
+    'queued' or 'running' in the DB at that point will never be picked up
+    or completed again (PollForWork only ever consults the broker, not the
+    DB). Mark them 'failed' so the DB stops claiming they're still live.
+
+    Deliberately narrow: the WHERE clause only ever touches rows still in
+    a non-terminal state. Runs already 'completed'/'failed'/'cancelled'
+    are untouched — every run can fail, but a run that already finished
+    keeps the state it finished in, always.
+    """
+    rows = (
+        await session.execute(
+            text(
+                """
+                UPDATE thread_history
+                SET status = 'failed',
+                    completed_at = now(),
+                    metadata = metadata || '{"failureReason": "orphaned_by_souk_restart"}'::jsonb
+                WHERE kind = 'run_status' AND status IN ('queued', 'running')
+                RETURNING run_id
+                """
+            )
+        )
+    ).scalars().all()
+    await session.commit()
+    return list(rows)
+
+
 async def get_run(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
     row = (
         await session.execute(

@@ -72,11 +72,18 @@ class RunBroker:
     def get(self, run_id: str) -> RunState | None:
         return self._runs.get(run_id)
 
-    async def push_event(self, run_id: str, event_json: dict[str, Any]) -> int:
+    def next_seq(self, run_id: str) -> int:
         state = self._runs[run_id]
         state.seq += 1
-        await state.output_queue.put(event_json)
         return state.seq
+
+    async def deliver_event(self, run_id: str, event_json: dict[str, Any]) -> None:
+        # Split from next_seq() deliberately: callers must persist the
+        # event durably *before* calling this — this is what actually
+        # makes it visible to the live SSE caller, and there's no undoing
+        # that once it's happened.
+        state = self._runs[run_id]
+        await state.output_queue.put(event_json)
 
     async def close_run(self, run_id: str) -> None:
         state = self._runs.get(run_id)

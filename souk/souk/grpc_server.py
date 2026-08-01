@@ -85,10 +85,16 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         )
 
     async def _relay_event(self, run_id: str, json_payload: str) -> None:
+        # Persist *before* relaying: if souk crashes between the two, the
+        # live caller must not end up having seen an event that was never
+        # durably recorded. If the persist raises, this event is simply
+        # never delivered — surfaced as "AgentSession: error handling
+        # frame" by the caller in handle_incoming(), not swallowed.
         event = json.loads(json_payload)
-        seq = await broker.push_event(run_id, event)
+        seq = broker.next_seq(run_id)
         async with SessionLocal() as session:
             await repo.append_run_event(session, run_id, seq, event)
+        await broker.deliver_event(run_id, event)
 
     async def _finish_run(self, run_id: str, outbound: asyncio.Queue) -> None:
         state = broker.get(run_id)
