@@ -14,5 +14,15 @@ class Settings(BaseSettings):
     # per-agent Agent Card URLs. Override in deployments behind a proxy/LB.
     public_http_url: str = "http://localhost:8000"
 
+    # A run past this many seconds without any activity (claimed, or an
+    # event relayed) while still 'running' is presumed stalled — the
+    # provider claimed it and went silent, a real anomaly (as opposed to
+    # a run merely sitting 'queued', which just means the provider hasn't
+    # claimed it yet and isn't itself a health signal — see PollRequest.
+    # max_claim). Set well above realistic single-run latency (LLM calls
+    # can legitimately take a while).
+    run_stall_timeout_seconds: int = 120
+    health_sweep_interval_seconds: int = 15
+
 
 settings = Settings()

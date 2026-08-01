@@ -31,7 +31,8 @@ logger = logging.getLogger("souk.grpc")
 class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
     async def PollForWork(self, request, context):
         agent_names = list(request.agent_names)
-        states = broker.poll(agent_names)
+        max_claim = request.max_claim if request.HasField("max_claim") else None
+        states = broker.poll(agent_names, max_claim=max_claim)
 
         async with SessionLocal() as session:
             for name in agent_names:
@@ -94,6 +95,11 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         seq = broker.next_seq(run_id)
         async with SessionLocal() as session:
             await repo.append_run_event(session, run_id, seq, event)
+            # Marks the run as still making progress — see
+            # repo.fail_stalled_runs, which would otherwise eventually
+            # treat a quiet-but-alive run as abandoned.
+            await repo.touch_run_activity(session, run_id)
+            await session.commit()
         await broker.deliver_event(run_id, event)
 
     async def _finish_run(self, run_id: str, outbound: asyncio.Queue) -> None:

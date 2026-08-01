@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS thread_history (
     task_id       TEXT,   -- souk-assigned: task_<hex>, set only for protocol='a2a'
     started_at    TIMESTAMPTZ,
     completed_at  TIMESTAMPTZ,
+    -- Bumped on every status change and every event relayed for this run
+    -- (see repo.mark_run_status / repo.touch_run_activity) — how souk
+    -- tells "provider claimed this and is making progress" apart from
+    -- "provider claimed this and then went silent" (see the periodic
+    -- stall sweep in souk.health).
+    last_activity_at TIMESTAMPTZ,
 
     -- Free-form extension data, meaning depends on `kind`: for a message
     -- row, whatever metadata the AG-UI Message carried; for a run_status

@@ -42,6 +42,16 @@ service SoukAgentGateway {
 
 message PollRequest {
   repeated string agent_names = 1;
+  // How many more runs this provider can start processing right now
+  // (e.g. its concurrency limit minus runs currently in flight). souk
+  // hands out at most this many, leaving the rest queued for a later
+  // poll — this is how a provider throttles itself instead of souk
+  // dumping its whole backlog on every poll regardless of capacity.
+  // Unset means unlimited (souk hands out everything queued). Explicitly
+  // 0 is a legitimate value distinct from unset — it means "I'm at full
+  // capacity, claim nothing this poll" — hence `optional` here rather
+  // than relying on proto3's normal zero-value-means-absent default.
+  optional int32 max_claim = 2;
 }
 
 message PollResponse {

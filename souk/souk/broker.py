@@ -56,17 +56,38 @@ class RunBroker:
         self._pending_by_agent[agent_name].append(run_id)
         return state
 
-    def poll(self, agent_names: list[str]) -> list[RunState]:
+    def poll(self, agent_names: list[str], max_claim: int | None = None) -> list[RunState]:
+        """Returns (and removes from the pending queue) up to `max_claim`
+        runs across `agent_names`, round-robining between agents so a cap
+        doesn't starve later names in the list.
+
+        `max_claim=None` means the caller never reported a capacity at
+        all — drains everything currently queued, unlimited (the old
+        all-at-once behavior). `max_claim=0` is different: it means the
+        caller explicitly reported "no spare capacity right now", so
+        nothing is claimed — distinct from None, not a stand-in for it.
+        """
+        if max_claim is not None and max_claim <= 0:
+            return []
+
         found: list[RunState] = []
-        for name in agent_names:
-            queue = self._pending_by_agent.get(name)
-            if not queue:
-                continue
-            while queue:
+        queues = [self._pending_by_agent.get(name) for name in agent_names]
+        while any(queues):
+            if max_claim is not None and len(found) >= max_claim:
+                break
+            progressed = False
+            for queue in queues:
+                if not queue:
+                    continue
+                if max_claim is not None and len(found) >= max_claim:
+                    break
                 run_id = queue.popleft()
+                progressed = True
                 state = self._runs.get(run_id)
                 if state is not None:
                     found.append(state)
+            if not progressed:
+                break
         return found
 
     def get(self, run_id: str) -> RunState | None:

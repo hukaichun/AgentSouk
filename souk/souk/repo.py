@@ -220,9 +220,9 @@ async def create_run(
         text(
             """
             INSERT INTO thread_history
-                (thread_id, run_id, kind, agent_name, protocol, status, input_json, task_id, metadata)
+                (thread_id, run_id, kind, agent_name, protocol, status, input_json, task_id, metadata, last_activity_at)
             VALUES
-                (:thread_id, :run_id, 'run_status', :agent_name, :protocol, 'queued', :input_json, :task_id, :metadata)
+                (:thread_id, :run_id, 'run_status', :agent_name, :protocol, 'queued', :input_json, :task_id, :metadata, now())
             """
         ),
         {
@@ -254,14 +254,29 @@ async def mark_run_status(session: AsyncSession, run_id: str, status: str) -> No
         "cancelled": "completed_at",
     }.get(status)
     extra_set = f", {timestamp_col} = now()" if timestamp_col else ""
+    # Every status change counts as activity (see thread_history.last_activity_at).
     await session.execute(
         text(
-            f"UPDATE thread_history SET status = :status{extra_set} "
+            f"UPDATE thread_history SET status = :status, last_activity_at = now(){extra_set} "
             "WHERE run_id = :run_id AND kind = 'run_status'"
         ),
         {"status": status, "run_id": str(run_id)},
     )
     await session.commit()
+
+
+async def touch_run_activity(session: AsyncSession, run_id: str) -> None:
+    """Called whenever an event is relayed for a run — see
+    souk.grpc_server._relay_event — so a run that's producing output
+    doesn't look stalled even without a status change.
+    """
+    await session.execute(
+        text(
+            "UPDATE thread_history SET last_activity_at = now() "
+            "WHERE run_id = :run_id AND kind = 'run_status'"
+        ),
+        {"run_id": run_id},
+    )
 
 
 async def fail_orphaned_runs(session: AsyncSession) -> list[str]:
@@ -288,6 +303,45 @@ async def fail_orphaned_runs(session: AsyncSession) -> list[str]:
                 RETURNING run_id
                 """
             )
+        )
+    ).scalars().all()
+    await session.commit()
+    return list(rows)
+
+
+async def fail_stalled_runs(session: AsyncSession, stall_timeout_seconds: int) -> list[str]:
+    """Called periodically (see souk.health) while souk is live. A run
+    only ever reaches 'running' once a provider has explicitly claimed
+    it — if it then goes this long without any activity (no further
+    event, see touch_run_activity), the provider claimed it and went
+    silent: a real anomaly, distinct from a run merely sitting 'queued'
+    waiting to be claimed (see PollRequest.max_claim — a provider
+    throttling itself is expected, not a failure).
+
+    NOTE for whoever adds resumable/HITL runs later (see
+    thread_history.status's CHECK constraint): a status meaning "paused,
+    waiting on something outside souk" (e.g. tool-call approval) must be
+    excluded from this WHERE clause the same way terminal statuses
+    already are — it would otherwise get incorrectly killed by this sweep.
+
+    Same narrowness guarantee as fail_orphaned_runs: only rows still
+    'running' past the timeout are touched; everything else (including
+    runs that produced fresh activity moments ago) is left alone.
+    """
+    rows = (
+        await session.execute(
+            text(
+                """
+                UPDATE thread_history
+                SET status = 'failed',
+                    completed_at = now(),
+                    metadata = metadata || '{"failureReason": "stalled_no_activity"}'::jsonb
+                WHERE kind = 'run_status' AND status = 'running'
+                  AND last_activity_at < now() - make_interval(secs => :timeout)
+                RETURNING run_id
+                """
+            ),
+            {"timeout": stall_timeout_seconds},
         )
     ).scalars().all()
     await session.commit()

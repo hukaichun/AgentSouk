@@ -9,6 +9,7 @@ from souk import api_a2a, api_agui, api_registry, repo
 from souk.config import settings
 from souk.db import SessionLocal, bootstrap_schema
 from souk.grpc_server import create_grpc_server
+from souk.health import run_health_sweeps_forever
 
 logger = logging.getLogger("souk.server")
 logging.basicConfig(level=logging.INFO)
@@ -30,7 +31,11 @@ async def startup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await startup()
-    yield
+    sweeper = asyncio.create_task(run_health_sweeps_forever())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
 
 
 app = FastAPI(title="souk", lifespan=lifespan)
@@ -40,6 +45,13 @@ app.include_router(api_a2a.router)
 
 
 async def _serve() -> None:
+    # Explicit call, ahead of starting the gRPC server: it must not accept
+    # PollForWork/AgentSession traffic before the schema exists. uvicorn's
+    # Server.serve() below also triggers the FastAPI app's ASGI lifespan,
+    # which calls startup() again (harmless — bootstrap_schema and
+    # fail_orphaned_runs are idempotent) but is where the health-sweep
+    # background task actually gets started; it isn't started here too,
+    # to avoid two redundant sweep loops running concurrently.
     await startup()
 
     grpc_server = create_grpc_server()
