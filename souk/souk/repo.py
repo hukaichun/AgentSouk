@@ -598,7 +598,7 @@ async def fail_unclaimed_runs(session: AsyncSession, timeout_seconds: int) -> li
                 UPDATE thread_history th
                 SET status = 'failed',
                     completed_at = now(),
-                    metadata = metadata || '{"failureReason": "no_provider_online"}'::jsonb
+                    metadata = th.metadata || '{"failureReason": "no_provider_online"}'::jsonb
                 FROM agents a
                 WHERE th.kind = 'run_status' AND th.status = 'queued'
                   AND th.agent_id = a.agent_id

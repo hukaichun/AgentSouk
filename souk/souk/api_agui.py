@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
-from souk.agui import build_run_agent_input
+from souk.agui import build_run_agent_input, fill_message_ids, rewrite_message_ids
 from souk.broker import END_OF_STREAM, broker
 from souk.db import get_session
 from souk.models import RunAgentInput
@@ -130,7 +130,8 @@ async def _run_agent(
     if resuming_run_id is not None:
         await repo.mark_run_resumed(session, resuming_run_id, run_id)
 
-    await repo.append_thread_messages(session, thread_id, run_id, body.messages)
+    messages = fill_message_ids(body.messages)
+    await repo.append_thread_messages(session, thread_id, run_id, messages)
 
     # Fast-fail (see souk.health's queued-timeout sweep for the fallback
     # covering the race where the target goes offline *after* this check):
@@ -155,7 +156,7 @@ async def _run_agent(
         )
 
     try:
-        input_json = build_run_agent_input(thread_id, run_id, body.messages)
+        input_json = build_run_agent_input(thread_id, run_id, messages)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -164,12 +165,17 @@ async def _run_agent(
     state = broker.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui")
 
     async def event_stream():
+        # Maps the agent's own provider-generated messageId (e.g.
+        # pydantic-ai's AGUIAdapter mints a plain uuid4) to a souk-assigned
+        # one, consistently across a message's START/CONTENT/END events —
+        # see souk.agui.rewrite_message_ids.
+        message_id_map: dict[str, str] = {}
         try:
             while True:
                 item = await state.output_queue.get()
                 if item is END_OF_STREAM:
                     break
-                yield {"event": "message", "data": json.dumps(item)}
+                yield {"event": "message", "data": json.dumps(rewrite_message_ids(item, message_id_map))}
         finally:
             broker.forget(run_id)
 
