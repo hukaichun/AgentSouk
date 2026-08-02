@@ -9,25 +9,39 @@ interface ThreadTreeNode {
 const params = new URLSearchParams(window.location.search);
 const agentId = params.get("id");
 let threadId: string | null = null;
+let selfName = "assistant";
 let currentAssistantEl: HTMLElement | null = null;
+let typingEl: HTMLElement | null = null;
 // agent_id -> display name, from the roster fetched once at page load —
-// used to label the call-chain tree with names instead of raw agent_ids.
+// used to label the call-chain route with names instead of raw agent_ids.
 const agentNameById = new Map<string, string>();
 // Keyed by the sub-agent's A2A task id — one accumulating bubble per
 // delegated call, so a streamed multi-hop response reads like the main
 // assistant's own streaming text instead of one raw JSON blob per event.
 const subAgentEls = new Map<string, HTMLElement>();
 
-function appendMessage(role: string, text: string, cssClass?: string): HTMLElement {
+function appendEntry(tag: string, text: string, cssClass: string): HTMLElement {
   const log = document.getElementById("chat-log")!;
   const div = document.createElement("div");
-  div.className = `msg ${cssClass || ""}`.trim();
-  div.innerHTML = `<div class="role">${escapeHtml(role)}</div><div class="text"></div>`;
-  const textEl = div.querySelector(".text") as HTMLElement;
-  textEl.textContent = text;
+  div.className = `entry ${cssClass}`;
+  div.innerHTML = `<span class="tag">${escapeHtml(tag)}</span><div class="bubble"></div>`;
+  const bubble = div.querySelector(".bubble") as HTMLElement;
+  bubble.textContent = text;
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
-  return textEl;
+  return bubble;
+}
+
+function showTyping(): void {
+  if (typingEl) return;
+  const bubble = appendEntry(selfName, "", "assistant");
+  bubble.innerHTML = `<span class="typing"><span></span><span></span><span></span></span>`;
+  typingEl = bubble.parentElement as HTMLElement;
+}
+
+function clearTyping(): void {
+  typingEl?.remove();
+  typingEl = null;
 }
 
 async function loadAgentInfo(soukUrl: string): Promise<AgentRosterEntry | null> {
@@ -41,18 +55,23 @@ async function loadAgentInfo(soukUrl: string): Promise<AgentRosterEntry | null> 
   const agent = agents.find((a) => a.agent_id === agentId);
   if (!agent) {
     document.getElementById("agent-title")!.textContent = "Agent not found";
-    document.getElementById("agent-meta")!.textContent =
+    document.getElementById("agent-desc")!.textContent =
       "It may be offline past the staleness window, or de-listed.";
     (document.getElementById("chat-form") as HTMLElement).style.display = "none";
     return null;
   }
+  selfName = agent.name;
   document.getElementById("agent-title")!.textContent = agent.name;
-  document.getElementById("agent-meta")!.textContent =
-    `${agent.online ? "online" : "offline"} · agent_id ${agent.agent_id}` +
-    (agent.description ? ` · ${agent.description}` : "");
+  document.getElementById("status-chip")!.innerHTML = `
+    <span class="status-chip ${agent.online ? "online" : "offline"}">
+      <span class="dot"></span>${agent.online ? "online" : "offline"}
+    </span>
+  `;
+  document.getElementById("agent-id")!.textContent = agent.agent_id;
+  document.getElementById("agent-desc")!.textContent = agent.description || "";
   if (!agent.online) {
     document.getElementById("offline-banner")!.innerHTML =
-      `<div class="offline-banner">This agent is currently offline — your message will wait ` +
+      `<div class="offline-banner">Currently offline — your message will wait ` +
       `briefly for it to come back, then fail if it doesn't.</div>`;
   }
   return agent;
@@ -60,20 +79,23 @@ async function loadAgentInfo(soukUrl: string): Promise<AgentRosterEntry | null> 
 
 function handleAguiEvent(event: any): void {
   if (event.type === "RUN_ERROR") {
-    appendMessage("error", event.message || "The agent failed to respond.", "error");
+    clearTyping();
+    appendEntry("error", event.message || "The agent failed to respond.", "error");
     return;
   }
   if (event.type === "TEXT_MESSAGE_CONTENT" || event.type === "TEXT_MESSAGE_CHUNK") {
     const delta = event.delta || event.content || "";
     if (!delta) return;
+    clearTyping();
     if (!currentAssistantEl) {
-      currentAssistantEl = appendMessage("assistant", "", "");
+      currentAssistantEl = appendEntry(selfName, "", "assistant");
     }
     currentAssistantEl.textContent += delta;
     return;
   }
   if (event.type === "RUN_FINISHED") {
     currentAssistantEl = null;
+    clearTyping();
     return;
   }
   if (event.type === "CUSTOM" && event.name === "sub_agent_progress") {
@@ -87,6 +109,7 @@ function handleAguiEvent(event: any): void {
     // of that is plumbing, not something a human should have to read.
     // Render one accumulating bubble per sub-agent call instead of a raw
     // JSON dump per event.
+    clearTyping();
     const value = event.value || {};
     const subAgent = value.sub_agent || "sub-agent";
     const taskId = value.id || subAgent;
@@ -103,14 +126,14 @@ function handleAguiEvent(event: any): void {
       // placeholder once so the delegation is visible before any text
       // streams in, but don't spam a bubble per tick.
       if (!subAgentEls.has(taskId)) {
-        subAgentEls.set(taskId, appendMessage(`↳ ${subAgent}`, "…", "sub"));
+        subAgentEls.set(taskId, appendEntry(subAgent, "…", "sub"));
       }
       return;
     }
 
     let el = subAgentEls.get(taskId);
     if (!el || el.textContent === "…") {
-      el = el || appendMessage(`↳ ${subAgent}`, "", "sub");
+      el = el || appendEntry(subAgent, "", "sub");
       el.textContent = "";
       subAgentEls.set(taskId, el);
     }
@@ -120,12 +143,18 @@ function handleAguiEvent(event: any): void {
   }
 }
 
-function renderTreeNode(node: ThreadTreeNode): string {
-  const name = escapeHtml(agentNameById.get(node.agent_id) || node.agent_id);
-  const children = node.children.length
-    ? `<ul>${node.children.map((child) => renderTreeNode(child)).join("")}</ul>`
-    : "";
-  return `<li><span class="agent-name">${name}</span>${children}</li>`;
+// Flattens the (usually linear) delegation tree into an ordered list of
+// stops for the route strip. A real fan-out (one call spawning several
+// sibling sub-calls) still renders as a single depth-first route rather
+// than branching visually — every delegation chain seen in practice so
+// far is linear, and a strip is the right shape for that; a true tree
+// widget would be overkill for the common case it'd rarely serve.
+function flattenRoute(node: ThreadTreeNode): string[] {
+  const stops = [node.agent_id];
+  for (const child of node.children) {
+    stops.push(...flattenRoute(child));
+  }
+  return stops;
 }
 
 async function renderCallChain(soukUrl: string, forThreadId: string): Promise<void> {
@@ -136,14 +165,22 @@ async function renderCallChain(soukUrl: string, forThreadId: string): Promise<vo
     const root: ThreadTreeNode = await resp.json();
     // Only worth showing once there's an actual delegation — a plain
     // agent with no sub-calls would otherwise render a pointless
-    // single-node tree on every reply.
+    // single-stop route on every reply.
     if (root.children.length === 0) {
       container.innerHTML = "";
+      container.classList.remove("has-chain");
       return;
     }
-    container.innerHTML =
-      `<div class="call-chain-title">call chain</div>` +
-      `<ul class="call-chain-tree">${renderTreeNode(root)}</ul>`;
+    const stops = flattenRoute(root);
+    const stopHtml = stops
+      .map((id, i) => {
+        const name = escapeHtml(agentNameById.get(id) || id);
+        const link = i > 0 ? `<span class="link"></span>` : "";
+        return `${link}<span class="stop ${i === 0 ? "root" : ""}"><span class="dot"></span>${name}</span>`;
+      })
+      .join("");
+    container.classList.add("has-chain");
+    container.innerHTML = `<div class="chain-label">call chain for this reply</div><div class="route">${stopHtml}</div>`;
   } catch {
     // Best-effort UI sugar — a failed fetch here shouldn't disrupt the
     // chat itself, which already succeeded by the time this runs.
@@ -153,9 +190,12 @@ async function renderCallChain(soukUrl: string, forThreadId: string): Promise<vo
 async function sendMessage(soukUrl: string, text: string): Promise<void> {
   const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
   sendBtn.disabled = true;
-  appendMessage("you", text, "");
+  appendEntry("you", text, "user");
   currentAssistantEl = null;
   subAgentEls.clear();
+  document.getElementById("call-chain")!.innerHTML = "";
+  document.getElementById("call-chain")!.classList.remove("has-chain");
+  showTyping();
 
   // No client-generated `id` here — souk backfills a message id for any
   // AG-UI message that omits one (see souk.agui.fill_message_ids), the
@@ -182,7 +222,8 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
     if (contentType.includes("application/json")) {
       // Duplicate-call snapshot branch (an active run already exists on
       // this thread) — no new stream to read, just a state snapshot.
-      appendMessage("system", "(already in flight — waiting for it to finish)", "");
+      clearTyping();
+      appendEntry("system", "(already in flight — waiting for it to finish)", "system");
       return;
     }
     await streamSse(resp, handleAguiEvent);
@@ -190,9 +231,11 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
       await renderCallChain(soukUrl, threadId);
     }
   } catch (err) {
+    clearTyping();
     const message = err instanceof Error ? err.message : String(err);
-    appendMessage("error", `request failed: ${message}`, "error");
+    appendEntry("error", `request failed: ${message}`, "error");
   } finally {
+    clearTyping();
     sendBtn.disabled = false;
   }
 }

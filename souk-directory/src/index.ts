@@ -18,13 +18,11 @@ function renderAgentCard(agent: AgentRosterEntry, soukUrl: string): string {
   return `
     <a class="card" href="${href}">
       <div class="card-header">
-        <span class="status-dot ${statusClass}" title="${statusLabel}"></span>
         <span class="card-name">${escapeHtml(agent.name)}</span>
+        <span class="status-chip ${statusClass}"><span class="dot"></span>${statusLabel}</span>
       </div>
       <div class="card-meta">
-        ${statusLabel} · agent_id ${escapeHtml(agent.agent_id)} · joined ${new Date(
-    agent.joined_at
-  ).toLocaleDateString()}
+        agent_id ${escapeHtml(agent.agent_id)} · joined ${new Date(agent.joined_at).toLocaleDateString()}
       </div>
       <div class="card-desc">${escapeHtml(agent.description || "(no description)")}</div>
     </a>

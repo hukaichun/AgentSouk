@@ -7,17 +7,27 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="souk-bar"></div>
-  <a class="back-link" href="#" id="back-link">&larr; back to directory</a>
-  <h2 id="agent-title">Loading…</h2>
-  <p id="agent-meta" class="card-meta"></p>
-  <div id="offline-banner"></div>
-  <div id="chat-log" class="chat-log"></div>
-  <form id="chat-form" class="chat-form">
-    <input id="chat-input" type="text" placeholder="Message this agent..." autocomplete="off" />
-    <button id="chat-send" type="submit">Send</button>
-  </form>
-  <div id="call-chain"></div>
+  <div class="page">
+    <div id="souk-bar"></div>
+    <div class="chat-shell">
+      <aside class="rail">
+        <a class="back-link" href="#" id="back-link">&larr; directory</a>
+        <div class="agent-name" id="agent-title">Loading…</div>
+        <div id="status-chip"></div>
+        <div class="agent-id" id="agent-id"></div>
+        <div class="agent-desc" id="agent-desc"></div>
+        <div id="offline-banner"></div>
+      </aside>
+      <main class="chat-main">
+        <div id="chat-log" class="ledger"></div>
+        <div id="call-chain" class="chain-strip"></div>
+        <form id="chat-form" class="composer">
+          <input id="chat-input" type="text" placeholder="Message this agent..." autocomplete="off" />
+          <button id="chat-send" type="submit">Send</button>
+        </form>
+      </main>
+    </div>
+  </div>
 
   <script type="module" src="dist/agent.js"></script>
 </body>
