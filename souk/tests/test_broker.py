@@ -34,3 +34,26 @@ async def test_deliver_event_is_a_noop_for_a_forgotten_run():
     # Must not raise — a straggler frame for an already-finished run is a
     # legitimate race, not a bug.
     await broker.deliver_event("run_1", {"type": "TEXT_MESSAGE_CONTENT"})
+
+
+def test_enqueue_run_wakes_a_subscriber_for_that_agent_id():
+    broker = RunBroker()
+    event = broker.subscribe_wake(["agent_1"])
+    assert not event.is_set()
+    broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
+    assert event.is_set()
+
+
+def test_enqueue_run_does_not_wake_a_subscriber_for_a_different_agent_id():
+    broker = RunBroker()
+    event = broker.subscribe_wake(["agent_1"])
+    broker.enqueue_run("run_1", "agent_2", "thread_1", {}, "ag-ui")
+    assert not event.is_set()
+
+
+def test_unsubscribe_wake_stops_further_wakes():
+    broker = RunBroker()
+    event = broker.subscribe_wake(["agent_1"])
+    broker.unsubscribe_wake(["agent_1"], event)
+    broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
+    assert not event.is_set()
