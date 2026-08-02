@@ -8,6 +8,10 @@ dependencies = [
     "pydantic-ai[ag-ui]>=0.0.49",
     "pydantic-settings>=2.6",
     "pyyaml>=6.0",
+    # Used directly by pydantic_ai_agent.souk_tools — already pulled in
+    # transitively via souk-agent-sdk, declared explicitly since this
+    # project imports it itself, not just through that dependency.
+    "httpx>=0.27",
 ]
 
 [tool.uv.sources]

@@ -124,11 +124,13 @@ cd agent-template && uv sync && uv run agent-template
 `docker compose up --build` starts ParadeDB, souk (HTTP `:8000`, gRPC
 `:50051`), one `agent-demo` container (the pydantic-ai provider) running
 two agents from `providers/pydantic-ai-agent/config.example.yaml`:
-`greeter` (which can delegate to a sub-agent) and `translator` (the
-sub-agent it calls via A2A) — and `souk-directory` (`:8080`). Open
-`http://localhost:8080/index.html` for a browsable list of `greeter`/
-`translator` and a live chat UI, no setup needed (see
-`souk-directory/README.md`).
+`souk-guide` (a tour-guide agent — lists/describes what's on this souk via
+a `list_souk_agents` tool that just calls `GET /agents`, see
+`pydantic_ai_agent/souk_tools.py`, and can delegate translation to a
+sub-agent) and `translator` (the sub-agent it calls via A2A) — and
+`souk-directory` (`:8080`). Open `http://localhost:8080/index.html` for a
+browsable list of `souk-guide`/`translator` and a live chat UI, no setup
+needed (see `souk-directory/README.md`).
 
 ## Verifying the flow
 
@@ -137,11 +139,11 @@ sub-agent it calls via A2A) — and `souk-directory` (`:8080`). Open
 curl localhost:8000/agents
 
 # AG-UI: talk to an agent directly
-curl -N -X POST localhost:8000/agui/greeter \
+curl -N -X POST localhost:8000/agui/souk-guide \
   -H 'content-type: application/json' \
   -d '{"messages":[{"id":"m1","role":"user","content":"Bonjour, comment ça va?"}]}'
 # -> SSE stream of AG-UI events; watch for CUSTOM sub_agent_progress events
-#    while `greeter` calls `translator` via A2A mid-run.
+#    while `souk-guide` calls `translator` via A2A mid-run.
 
 # A2A: agent card + JSON-RPC
 curl localhost:8000/a2a/translator/.well-known/agent.json

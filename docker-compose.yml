@@ -9,6 +9,11 @@ services:
       - "5433:5432"
     volumes:
       - paradedb_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U souk -d souk"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
 
   souk:
     build:
@@ -18,7 +23,8 @@ services:
       - "8000:8000"
       - "50051:50051"
     depends_on:
-      - paradedb
+      paradedb:
+        condition: service_healthy
     environment:
       SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
       SOUK_PUBLIC_HTTP_URL: http://localhost:8000
@@ -37,7 +43,7 @@ services:
       - ./providers/pydantic-ai-agent/config.example.yaml:/app/config.yaml:ro
       # Without this, every rebuild/recreate of this container gets a
       # fresh identity (see souk_agent_sdk/identity.py) — the *old* one's
-      # "greeter"/"translator" agent_ids are left behind as orphans (souk
+      # "souk-guide"/"translator" agent_ids are left behind as orphans (souk
       # doesn't 409 a fresh key registering the same names, it just mints
       # new, unrelated agent_ids for them — see souk/db.py's
       # UNIQUE(public_key, name)), and a second "translator" existing makes

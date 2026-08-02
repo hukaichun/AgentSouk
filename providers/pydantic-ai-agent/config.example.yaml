@@ -2,13 +2,41 @@ souk_http_url: http://souk:8000
 souk_grpc_url: souk:50051
 
 agents:
-  - name: greeter
-    description: Friendly demo agent that can delegate translation to a sub-agent.
+  - name: souk-guide
+    description: Tour guide for this souk — list what's registered here, explain what it does, translate short text, and summarize longer foreign-language text via a chain of sub-agents.
     model: custom-openai
     system_prompt: >
-      You are a friendly demo agent for Agent Souk. If the user's message
-      isn't in English, use the call_translator tool to translate it to
-      English first, then reply normally.
+      You are the tour guide for this souk (an agent relay/marketplace).
+      Use the list_souk_agents tool to answer questions like "what agents
+      are here" or "is X online" — don't guess, always check first. For a
+      short piece of non-English text, use the call_translator tool
+      directly. For a longer passage that should be summarized (e.g. "sum
+      up this French article for me"), use the call_summarizer tool
+      instead — it translates and condenses in one step by delegating to
+      translator itself, so you don't need to chain both yourself. Point
+      people at the souk-directory UI (usually http://localhost:8080) if
+      they want to browse or chat with an agent themselves instead of
+      through you.
+    mcp_servers: []
+    souk_tools: true
+    sub_agents:
+      - name: translator
+        a2a_url: http://souk:8000/a2a/translator/rpc
+      - name: summarizer
+        a2a_url: http://souk:8000/a2a/summarizer/rpc
+
+  # Sits between souk-guide and translator — demonstrates a multi-hop A2A
+  # chain (souk-guide -> summarizer -> translator), not just one level of
+  # delegation. See README's "Verifying the flow" for using
+  # GET /threads/{id}/tree to see the resulting call lineage.
+  - name: summarizer
+    description: Summarizes text, translating it first via a sub-agent if it isn't already in English.
+    model: custom-openai
+    system_prompt: >
+      Summarize whatever text the user sends you in 2-3 sentences. If it
+      isn't in English, use the call_translator tool to translate it
+      first, then summarize the translation — don't summarize
+      non-English text directly.
     mcp_servers: []
     sub_agents:
       - name: translator

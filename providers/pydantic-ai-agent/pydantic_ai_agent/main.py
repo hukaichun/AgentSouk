@@ -21,6 +21,7 @@ from souk_agent_sdk import AgentHandle, SoukAgentClient
 from souk_agent_sdk.identity import load_or_create_identity, new_actor_chain, public_key_hex
 
 from pydantic_ai_agent.config import AgentConfig, load_config
+from pydantic_ai_agent.souk_tools import build_souk_tools
 from pydantic_ai_agent.sub_agent_tool import AgentDeps, build_sub_agent_tools
 
 logger = logging.getLogger("pydantic_ai_agent")
@@ -49,13 +50,16 @@ def resolve_model(model: str) -> str | OpenAIChatModel:
     return model
 
 
-def build_pydantic_agent(cfg: AgentConfig) -> Agent:
+def build_pydantic_agent(cfg: AgentConfig, souk_http_url: str) -> Agent:
     toolsets = [MCPToolset(url) for url in cfg.mcp_servers]
+    tools = build_sub_agent_tools(cfg.sub_agents)
+    if cfg.souk_tools:
+        tools += build_souk_tools(souk_http_url)
     return Agent(
         resolve_model(cfg.model),
         system_prompt=cfg.system_prompt,
         toolsets=toolsets,
-        tools=build_sub_agent_tools(cfg.sub_agents),
+        tools=tools,
         deps_type=AgentDeps,
     )
 
@@ -121,7 +125,7 @@ async def main() -> None:
 
     handles = []
     for agent_cfg in cfg.agents:
-        agent = build_pydantic_agent(agent_cfg)
+        agent = build_pydantic_agent(agent_cfg, cfg.souk_http_url)
         handles.append(
             AgentHandle(
                 name=agent_cfg.name,
