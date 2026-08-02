@@ -3,9 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc"
+    "typecheck": "tsc",
+    "build": "npm run typecheck && esbuild src/index.ts src/agent.ts --bundle --splitting --format=esm --outdir=dist"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "typescript": "^5.6.3"
+  },
+  "dependencies": {
+    "eventsource-parser": "^3.1.0"
   }
 }

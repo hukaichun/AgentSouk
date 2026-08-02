@@ -4,6 +4,10 @@ const params = new URLSearchParams(window.location.search);
 const agentId = params.get("id");
 let threadId: string | null = null;
 let currentAssistantEl: HTMLElement | null = null;
+// Keyed by the sub-agent's A2A task id — one accumulating bubble per
+// delegated call, so a streamed multi-hop response reads like the main
+// assistant's own streaming text instead of one raw JSON blob per event.
+const subAgentEls = new Map<string, HTMLElement>();
 
 function appendMessage(role: string, text: string, cssClass?: string): HTMLElement {
   const log = document.getElementById("chat-log")!;
@@ -65,7 +69,42 @@ function handleAguiEvent(event: any): void {
     // (see providers/pydantic-ai-agent's sub_agent_tool.py) — souk itself
     // doesn't guarantee this for every provider, see the project plan's
     // A9 notes.
-    appendMessage(`↳ ${event.value?.sub_agent || "sub-agent"}`, JSON.stringify(event.value), "sub");
+    //
+    // The raw payload is an A2A task update (status ticks, an internal
+    // agui_event passthrough, then streamed artifact text parts) — most
+    // of that is plumbing, not something a human should have to read.
+    // Render one accumulating bubble per sub-agent call instead of a raw
+    // JSON dump per event.
+    const value = event.value || {};
+    const subAgent = value.sub_agent || "sub-agent";
+    const taskId = value.id || subAgent;
+    const state = value.status?.state;
+
+    if (state === "completed" || state === "failed") {
+      subAgentEls.delete(taskId);
+      return;
+    }
+
+    const textParts = (value.artifact?.parts || []).filter((p: any) => p.type === "text" && p.text);
+    if (textParts.length === 0) {
+      // A status-only tick (e.g. the initial "working") — show a
+      // placeholder once so the delegation is visible before any text
+      // streams in, but don't spam a bubble per tick.
+      if (!subAgentEls.has(taskId)) {
+        subAgentEls.set(taskId, appendMessage(`↳ ${subAgent}`, "…", "sub"));
+      }
+      return;
+    }
+
+    let el = subAgentEls.get(taskId);
+    if (!el || el.textContent === "…") {
+      el = el || appendMessage(`↳ ${subAgent}`, "", "sub");
+      el.textContent = "";
+      subAgentEls.set(taskId, el);
+    }
+    for (const part of textParts) {
+      el.textContent += part.text;
+    }
   }
 }
 
@@ -74,9 +113,16 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
   sendBtn.disabled = true;
   appendMessage("you", text, "");
   currentAssistantEl = null;
+  subAgentEls.clear();
 
+  // No client-generated `id` here — souk backfills a message id for any
+  // AG-UI message that omits one (see souk.agui.fill_message_ids), the
+  // same way it already does for A2A-sourced messages. souk is the one
+  // party that actually needs ids in its own <category>_<hex> shape
+  // (thread history, run events, ...); a plain browser caller shouldn't
+  // have to reimplement that scheme just to satisfy AG-UI's schema.
   const body: Record<string, unknown> = {
-    messages: [{ id: `m_${Date.now()}`, role: "user", content: text }],
+    messages: [{ role: "user", content: text }],
   };
   if (threadId) {
     body.thread_id = threadId;

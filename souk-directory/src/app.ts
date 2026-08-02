@@ -13,6 +13,8 @@
 // input box (still pre-filled and editable) is what makes anything else
 // possible.
 
+import { EventSourceParserStream } from "eventsource-parser/stream";
+
 const SOUK_URL_KEY = "souk-directory:soukUrl";
 const DEFAULT_SOUK_URL = "http://localhost:8000";
 
@@ -88,32 +90,25 @@ export async function fetchAgents(soukUrl: string): Promise<AgentRosterEntry[]> 
   return body.agents;
 }
 
-// Minimal SSE body parser for a POST'd EventSource-shaped stream (the
-// browser's native EventSource can't POST, and souk's /agui/id/{agent_id}
-// requires a POST body — see sse_starlette's `event: message\ndata: ...\n\n`
-// framing on the souk side). Calls `onEvent` with the parsed JSON payload
-// of each event as it arrives.
+// Parses a POST'd EventSource-shaped stream (the browser's native
+// EventSource can't POST, and souk's /agui/id/{agent_id} requires a POST
+// body, so we still drive the fetch ourselves) via eventsource-parser
+// instead of hand-rolling SSE framing — a hand-rolled version of this
+// previously shipped broken (assumed bare `\n\n` between events; sse_
+// starlette actually emits `\r\n\r\n`, so it silently parsed zero events
+// off a perfectly well-formed stream). SSE framing has enough edge cases
+// (CRLF vs LF, multi-line `data:` fields, comment lines, `id:`/`retry:`)
+// that it isn't worth re-deriving by hand a second time.
+// Calls `onEvent` with the parsed JSON payload of each event as it arrives.
 export async function streamSse(response: Response, onEvent: (event: any) => void): Promise<void> {
-  const reader = response.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let sepIndex: number;
-    while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
-      const rawEvent = buffer.slice(0, sepIndex);
-      buffer = buffer.slice(sepIndex + 2);
-      const dataLine = rawEvent.split("\n").find((line) => line.startsWith("data:"));
-      if (dataLine) {
-        const payload = dataLine.slice(5).trim();
-        try {
-          onEvent(JSON.parse(payload));
-        } catch (err) {
-          console.error("souk-directory: failed to parse SSE payload", payload, err);
-        }
-      }
+  const stream = response
+    .body!.pipeThrough(new TextDecoderStream())
+    .pipeThrough(new EventSourceParserStream());
+  for await (const event of stream) {
+    try {
+      onEvent(JSON.parse(event.data));
+    } catch (err) {
+      console.error("souk-directory: failed to parse SSE payload", event.data, err);
     }
   }
 }
