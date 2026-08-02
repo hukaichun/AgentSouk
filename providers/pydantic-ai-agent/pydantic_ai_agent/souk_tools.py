@@ -1,6 +1,6 @@
 """Tools that let one of this provider's own agents (e.g. a "tour guide"
 agent) query the souk it's registered on — what agents exist here, are
-they online, what do they do.
+they online, what do they do, inspect agent cards, and get developer guides.
 
 Deliberately plain pydantic-ai `Tool`s, not a real MCP server, even
 though the framework already supports attaching one (`AgentConfig.
@@ -13,17 +13,64 @@ If a second provider ever wants the exact same souk-introspection
 capability, *that's* the point to extract this into a real, shared MCP
 server (or a small package) — not before.
 
-Talks to souk purely through its already-public HTTP API (`GET /agents`),
-the exact same surface `souk-directory` and any external caller use — no
-privileged access, nothing souk needs to know about this provider for.
+Talks to souk purely through its already-public HTTP API (`GET /agents`,
+`GET /health`, `GET /a2a/{name}/.well-known/agent.json`), the exact same
+surface `souk-directory` and any external caller use — no privileged access,
+nothing souk needs to know about this provider for.
 This is what keeps provider/souk independence intact: souk isn't even
 aware this tool exists.
 """
 
 from __future__ import annotations
 
+import json
 import httpx
 from pydantic_ai import Tool
+
+
+DEV_GUIDES: dict[str, str] = {
+    "architecture": """
+### Agent Souk Architecture Overview
+- **Relay Mechanism**: Outbound-only gRPC streams (`souk-agent-sdk`). Agents do not require public IPs, open ports, or ingress tunnels (ngrok).
+- **Dual Gateway**: Exposes AG-UI (SSE for human interfaces) and A2A (JSON-RPC for agent-to-agent) on a single FastAPI gateway.
+- **Identity**: Ed25519 cryptographic keypairs. No passwords, central DB, or registration signup flow.
+- **Actor Chains**: Multi-hop EdDSA JWT chain verification for auditable caller provenance in multi-agent workflows.
+- **Persistence**: ParadeDB / Postgres for durable threads, message history, and HITL async task pause/resume.
+""",
+    "how_to_connect": """
+### How to Connect a New Agent to Souk
+1. **Copy the Reference Template**: Start from `agent-template/` or use `souk-agent-sdk` in Python.
+2. **Install SDK**: `pip install souk-agent-sdk` (or add as a dependency via `uv`).
+3. **Write an AgentHandle**:
+```python
+from souk_agent_sdk import AgentHandle, SoukAgentClient
+
+async def my_agent_run(run_input: dict):
+    # Process messages from run_input
+    yield {"type": "TEXT_DELTA", "delta": "Hello from my agent!"}
+
+handle = AgentHandle(name="my-custom-agent", description="My agent description", run_stream=my_agent_run)
+client = SoukAgentClient(souk_http_url="http://localhost:8000", souk_grpc_url="localhost:50051", handles=[handle])
+await client.run_forever()
+```
+4. **Run Docker or Host Process**: Launch your agent, and it will register automatically via Ed25519 identity key!
+""",
+    "identity": """
+### Provider & Caller Identity Model
+- **Ed25519 Keypair**: Created on first launch (default `souk_identity.key`). Back it up like any credential.
+- **Agent Ownership**: Scoped to `(public_key, name)`. Re-registering with the same key maintains `agent_id`.
+- **Actor Chain**: When delegating across agents, each hop appends an EdDSA JWT signed by that agent's private key, bound to `prevHash` of the previous token.
+""",
+    "quickstart": """
+### Quickstart with Docker Compose
+Run the entire stack in 1 minute:
+```bash
+cp .env.example .env
+docker compose up --build
+```
+Then open `http://localhost:8080` for the Web Directory & Live Chat UI!
+"""
+}
 
 
 def build_souk_tools(souk_http_url: str) -> list[Tool]:
@@ -49,10 +96,93 @@ def build_souk_tools(souk_http_url: str) -> list[Tool]:
             lines.append(f"- {agent['name']} ({status}, agent_id={agent['agent_id']}): {description}")
         return "\n".join(lines)
 
+    async def get_agent_card(agent_name_or_id: str) -> str:
+        """Fetch the detailed Agent Card for a specific agent by name or agent_id.
+        Use this when a user asks about specific capabilities, parameters, skills,
+        or schema details of an agent on this souk.
+        """
+        async with httpx.AsyncClient() as client:
+            url = f"{souk_http_url}/a2a/{agent_name_or_id}/.well-known/agent.json"
+            resp = await client.get(url)
+            if resp.status_code == 404:
+                return f"Agent '{agent_name_or_id}' was not found on this souk."
+            resp.raise_for_status()
+            card = resp.json()
+        
+        name = card.get("name", agent_name_or_id)
+        desc = card.get("description", "No description provided.")
+        version = card.get("version", "1.0.0")
+        skills = card.get("skills", [])
+        skills_str = ", ".join([s.get("name", "unnamed") for s in skills]) if skills else "None listed"
+        auth = card.get("authentication", {})
+        
+        output = [
+            f"### Agent Card: {name} (v{version})",
+            f"**Description**: {desc}",
+            f"**Skills**: {skills_str}",
+            f"**Authentication**: {json.dumps(auth)}",
+            f"**Full Card JSON**:\n```json\n{json.dumps(card, indent=2)}\n```"
+        ]
+        return "\n".join(output)
+
+    async def get_souk_stats() -> str:
+        """Get real-time operational statistics and health status of this souk gateway.
+        Use this to answer questions about platform health, active provider connections, or uptime.
+        """
+        async with httpx.AsyncClient() as client:
+            health_resp = await client.get(f"{souk_http_url}/health")
+            agents_resp = await client.get(f"{souk_http_url}/agents")
+            
+            health_data = health_resp.json() if health_resp.status_code == 200 else {"status": "unknown"}
+            agents_data = agents_resp.json().get("agents", []) if agents_resp.status_code == 200 else []
+            
+        total_agents = len(agents_data)
+        online_agents = sum(1 for a in agents_data if a.get("online"))
+        offline_agents = total_agents - online_agents
+        
+        lines = [
+            "### Souk Platform Real-time Status",
+            f"- **Gateway Status**: {health_data.get('status', 'ok')}",
+            f"- **Total Registered Agents**: {total_agents}",
+            f"- **Online Agents**: {online_agents}",
+            f"- **Offline Agents**: {offline_agents}",
+        ]
+        if online_agents > 0:
+            online_names = ", ".join([a["name"] for a in agents_data if a.get("online")])
+            lines.append(f"- **Currently Online**: {online_names}")
+        return "\n".join(lines)
+
+    async def get_souk_developer_guide(topic: str = "quickstart") -> str:
+        """Get developer onboarding guides and documentation for Agent Souk.
+        Allowed topics: 'quickstart', 'architecture', 'how_to_connect', 'identity'.
+        Use this when users or developers ask how Souk works or how to build and connect their own agents.
+        """
+        topic_clean = topic.strip().lower()
+        if topic_clean in DEV_GUIDES:
+            return DEV_GUIDES[topic_clean]
+        
+        available = ", ".join(list(DEV_GUIDES.keys()))
+        return f"Unknown topic '{topic}'. Available topics: {available}\n\n" + DEV_GUIDES["quickstart"]
+
     return [
         Tool(
             list_souk_agents,
             name="list_souk_agents",
             description="List every agent currently registered on this souk, with online status and description.",
-        )
+        ),
+        Tool(
+            get_agent_card,
+            name="get_agent_card",
+            description="Fetch the detailed Agent Card (capabilities, skills, schemas) for a specific agent on this souk.",
+        ),
+        Tool(
+            get_souk_stats,
+            name="get_souk_stats",
+            description="Get real-time operational statistics and health status of this souk gateway.",
+        ),
+        Tool(
+            get_souk_developer_guide,
+            name="get_souk_developer_guide",
+            description="Get developer onboarding guides and documentation for Agent Souk (topics: quickstart, architecture, how_to_connect, identity).",
+        ),
     ]

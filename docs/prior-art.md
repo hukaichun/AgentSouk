@@ -9,9 +9,7 @@ souk's specific combination — outbound-only connectivity for agents
 without a public IP, AG-UI *and* A2A on the same gateway, durable
 run/thread state, HITL/async pause-resume, and self-sovereign identity
 with no signup flow — doesn't appear to exist as a single project
-elsewhere. But no individual piece of it is new; several adjacent
-projects, some backed by far more resources than this one, are solving
-overlapping slices:
+elsewhere. Several adjacent projects solve overlapping slices of this architecture:
 
 | Project | Solves | Doesn't solve (vs. souk) |
 |---|---|---|
