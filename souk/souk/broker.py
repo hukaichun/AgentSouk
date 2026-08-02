@@ -97,8 +97,18 @@ class RunBroker:
     def get(self, run_id: str) -> RunState | None:
         return self._runs.get(run_id)
 
-    def next_seq(self, run_id: str) -> int:
-        state = self._runs[run_id]
+    def next_seq(self, run_id: str) -> int | None:
+        # None means "this run is already forgotten" — a legitimate race,
+        # not a bug: a run gets forgotten (see forget()) as soon as its
+        # HTTP/SSE consumer finishes reading, but the agent side streams
+        # frames independently and a straggler can still be in flight
+        # (e.g. two concurrent runs sharing one AgentSession connection,
+        # see souk_agent_sdk.client._write_loop). Callers must treat None
+        # as "drop this frame", matching close_run's existing
+        # already-gone-is-fine handling below, rather than crash.
+        state = self._runs.get(run_id)
+        if state is None:
+            return None
         state.seq += 1
         return state.seq
 
@@ -107,7 +117,9 @@ class RunBroker:
         # event durably *before* calling this — this is what actually
         # makes it visible to the live SSE caller, and there's no undoing
         # that once it's happened.
-        state = self._runs[run_id]
+        state = self._runs.get(run_id)
+        if state is None:
+            return
         await state.output_queue.put(event_json)
 
     async def close_run(self, run_id: str) -> None:

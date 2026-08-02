@@ -249,11 +249,19 @@ class SoukAgentClient:
         except Exception:
             logger.exception("run %s for agent_id '%s' failed", run_id, agent_id)
         finally:
-            self._inboxes.pop(run_id, None)
             # Best-effort: if this run was cancelled because the
             # connection died, outbound is a queue nobody's writer will
             # ever drain again and inbox will never receive an ack —
             # never let cleanup hang indefinitely on either.
+            #
+            # The inbox must stay registered in self._inboxes until the
+            # ack wait below is actually over — _read_loop demultiplexes
+            # purely by looking up self._inboxes[run_id], so popping it
+            # first (as this used to do) meant souk's ack always arrived
+            # to find no inbox left, got dropped as "frame for
+            # unknown/finished run_id", and every single run paid a
+            # guaranteed 5s stall plus a misleading "connection likely
+            # lost" warning even on a perfectly healthy connection.
             try:
                 await outbound.put(
                     souk_pb2.AgentEventEnvelope(
@@ -267,3 +275,5 @@ class SoukAgentClient:
                 logger.warning(
                     "run %s: no ack from souk within timeout (connection likely lost)", run_id
                 )
+            finally:
+                self._inboxes.pop(run_id, None)

@@ -143,6 +143,13 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
             if state is not None:
                 state.pause_payload = event.get("value") or {}
         seq = broker.next_seq(run_id)
+        if seq is None:
+            # Run already forgotten (its HTTP/SSE consumer finished first)
+            # — a straggler frame from the agent side, not an error. Drop
+            # it rather than persisting an event for a run nothing will
+            # ever read again. See broker.next_seq's docstring.
+            logger.warning("AgentSession: dropping frame for already-finished run_id=%s", run_id)
+            return
         async with SessionLocal() as session:
             await repo.append_run_event(session, run_id, seq, event)
             # Marks the run as still making progress — see
