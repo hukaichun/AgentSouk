@@ -20,7 +20,10 @@ events for that run.
 | `souk/` | The gateway server: AG-UI + A2A HTTP surface, gRPC relay, Postgres/ParadeDB persistence |
 | `souk-agent-sdk/` | Agent-side SDK: registers a batch of agents, polls for work, relays runs over gRPC, includes a streaming A2A client for calling sub-agents |
 | `souk-client-sdk/` | Caller-side SDK: thin AG-UI client for talking to an agent through a souk |
-| `agent-template/` | Generic pydantic-ai agent runner: give it a system prompt + MCP servers (+ optional sub-agents) via YAML, it produces a running AG-UI agent wired to a souk |
+| `agent-template/` | Minimal reference provider: the smallest possible `souk_agent_sdk.AgentHandle` implementation, no framework attached. Copy this to start a new provider from scratch |
+| `providers/` | Fuller example providers (see `providers/README.md`) — currently `pydantic-ai-agent/`, a YAML-configured pydantic-ai agent runner with MCP tool support and A2A sub-agent delegation |
+
+souk itself runs no agent logic — every agent is a "provider" that speaks `proto/souk.proto` and connects out to a souk. `souk-agent-sdk` is a convenience client for that contract, not the contract itself: any implementation (any language) is an equally valid provider. `agent-template/` and `providers/*` are examples, not the only way to build one.
 
 ## Running locally
 
@@ -29,18 +32,25 @@ cp .env.example .env   # fill in LLM_BASE_URL/LLM_MODEL_NAME/LLM_API_KEY (or ANT
 docker compose up --build
 ```
 
-`config.example.yaml`'s agents use `model: custom-openai`, which resolves against `LLM_BASE_URL`/`LLM_MODEL_NAME`/`LLM_API_KEY` — any OpenAI-compatible endpoint (Azure AI, a self-hosted gateway, ...), not just api.openai.com. Set a plain `model: anthropic:claude-...` (or `openai:gpt-...`) instead to skip the custom endpoint entirely. See `agent_template.main.resolve_model`.
+`config.example.yaml`'s agents use `model: custom-openai`, which resolves against `LLM_BASE_URL`/`LLM_MODEL_NAME`/`LLM_API_KEY` — any OpenAI-compatible endpoint (Azure AI, a self-hosted gateway, ...), not just api.openai.com. Set a plain `model: anthropic:claude-...` (or `openai:gpt-...`) instead to skip the custom endpoint entirely. See `pydantic_ai_agent.main.resolve_model`.
 
-To run `agent-template` directly on the host against a souk (e.g. one started with `uv run python -m souk.server`) instead of via docker-compose:
+To run the pydantic-ai example provider directly on the host against a souk (e.g. one started with `uv run python -m souk.server`) instead of via docker-compose:
 
 ```bash
-AGENT_TEMPLATE_CONFIG=agent-template/config.example.yaml uv run --env-file .env python -m agent_template.main
+AGENT_TEMPLATE_CONFIG=providers/pydantic-ai-agent/config.example.yaml uv run --env-file .env python -m pydantic_ai_agent.main
 ```
 
-This starts ParadeDB, souk (HTTP `:8000`, gRPC `:50051`), and one
-`agent-demo` container running two agents from
-`agent-template/config.example.yaml`: `greeter` (which can delegate to a
-sub-agent) and `translator` (the sub-agent it calls via A2A).
+Or run the minimal reference provider instead (no LLM, just echoes messages back — useful for exercising souk itself without an LLM key):
+
+```bash
+uv run --package agent-template agent-template
+```
+
+`docker compose up --build` starts ParadeDB, souk (HTTP `:8000`, gRPC
+`:50051`), and one `agent-demo` container (the pydantic-ai provider)
+running two agents from `providers/pydantic-ai-agent/config.example.yaml`:
+`greeter` (which can delegate to a sub-agent) and `translator` (the
+sub-agent it calls via A2A).
 
 ## Verifying the flow
 

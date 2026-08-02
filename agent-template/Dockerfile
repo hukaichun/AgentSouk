@@ -10,13 +10,10 @@ COPY souk /app/souk
 COPY souk-agent-sdk /app/souk-agent-sdk
 COPY souk-client-sdk /app/souk-client-sdk
 COPY agent-template /app/agent-template
-COPY providers/pydantic-ai-agent /app/providers/pydantic-ai-agent
 COPY proto /app/proto
 COPY scripts /app/scripts
 
 RUN uv sync --group dev \
     && uv run bash scripts/gen_proto.sh
 
-ENV AGENT_TEMPLATE_CONFIG=/app/config.yaml
-
-CMD ["uv", "run", "pydantic-ai-agent"]
+CMD ["uv", "run", "agent-template"]

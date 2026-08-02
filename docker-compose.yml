@@ -23,17 +23,21 @@ services:
       SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
       SOUK_PUBLIC_HTTP_URL: http://localhost:8000
 
+  # Runs the pydantic-ai example provider (providers/pydantic-ai-agent) —
+  # see providers/README.md for other provider examples, and
+  # /agent-template for the minimal reference implementation this one
+  # builds on top of.
   agent-demo:
     build:
       context: .
-      dockerfile: agent-template/Dockerfile
+      dockerfile: providers/pydantic-ai-agent/Dockerfile
     depends_on:
       - souk
     volumes:
-      - ./agent-template/config.example.yaml:/app/config.yaml:ro
+      - ./providers/pydantic-ai-agent/config.example.yaml:/app/config.yaml:ro
     environment:
       # config.example.yaml uses `model: custom-openai`, resolved by
-      # agent_template.main.resolve_model against these — point them at
+      # pydantic_ai_agent.main.resolve_model against these — point them at
       # any OpenAI-compatible endpoint. Swap the model string to
       # "anthropic:claude-..." etc. instead and use ANTHROPIC_API_KEY if
       # you'd rather not run a custom endpoint.

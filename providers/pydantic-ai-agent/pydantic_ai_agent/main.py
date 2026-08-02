@@ -19,10 +19,10 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.ui.ag_ui import AGUIAdapter
 from souk_agent_sdk import AgentHandle, SoukAgentClient
 
-from agent_template.config import AgentConfig, load_config
-from agent_template.sub_agent_tool import AgentDeps, build_sub_agent_tools
+from pydantic_ai_agent.config import AgentConfig, load_config
+from pydantic_ai_agent.sub_agent_tool import AgentDeps, build_sub_agent_tools
 
-logger = logging.getLogger("agent_template")
+logger = logging.getLogger("pydantic_ai_agent")
 
 # Sentinel marking the end of a run's merged event stream.
 _DONE = object()

@@ -2,7 +2,7 @@
 drives the sub-agent over A2A (tasks/sendSubscribe) and re-emits every
 progress update it streams back as an AG-UI CUSTOM event on the *same*
 queue the enclosing run's own AG-UI events are being written to (see
-agent_template/main.py) — so sub-agent progress is visible end-to-end to
+pydantic_ai_agent/main.py) — so sub-agent progress is visible end-to-end to
 whoever is watching the main agent's run, not just consumed internally by
 the tool-call loop.
 """
@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pydantic_ai import RunContext, Tool
 from souk_agent_sdk.a2a_client import call_agent_streaming
 
-from agent_template.config import SubAgentConfig
+from pydantic_ai_agent.config import SubAgentConfig
 
 
 @dataclass

@@ -1,7 +1,7 @@
 [project]
-name = "agent-template"
+name = "pydantic-ai-agent"
 version = "0.1.0"
-description = "Generic pydantic-ai agent runner: config (system prompt + MCP servers) in, souk-connected AG-UI agent out"
+description = "Example souk provider: config (system prompt + MCP servers + sub-agents) in, souk-connected AG-UI agent out, built on pydantic-ai. One of several provider examples under providers/ — see providers/README.md."
 requires-python = ">=3.12"
 dependencies = [
     "souk-agent-sdk",
@@ -14,11 +14,11 @@ dependencies = [
 souk-agent-sdk = { workspace = true }
 
 [project.scripts]
-agent-template = "agent_template.main:run"
+pydantic-ai-agent = "pydantic_ai_agent.main:run"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["agent_template"]
+packages = ["pydantic_ai_agent"]
