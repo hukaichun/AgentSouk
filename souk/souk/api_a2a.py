@@ -26,6 +26,7 @@ from souk.agui import build_run_agent_input
 from souk.broker import END_OF_STREAM, broker
 from souk.config import settings
 from souk.db import get_session
+from souk.identity import a2a_call_signing_payload, verify_signature
 from souk.translate_a2a import (
     a2a_message_to_agui_messages,
     agui_event_to_a2a_update,
@@ -82,6 +83,28 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     # any A2A client that doesn't know about it.
     parent_thread_id = metadata.get("parentThreadId")
 
+    # Optional, opt-in caller identity: a caller that holds an Ed25519 key
+    # (e.g. a provider signing with the same identity it registered
+    # with — see providers/pydantic-ai-agent's sub-agent tool) can prove
+    # who it is by including callerPublicKey/callerSignature. Unsigned
+    # calls are still allowed (souk doesn't mandate caller auth — see
+    # souk/identity.py's a2a_call_signing_payload docstring); a signature
+    # that's present but doesn't verify is rejected outright rather than
+    # silently treated as anonymous, since that's more likely tampering
+    # than a legitimate caller who simply chose not to sign.
+    verified_caller_name = None
+    caller_public_key = metadata.get("callerPublicKey")
+    caller_signature = metadata.get("callerSignature")
+    if caller_public_key and caller_signature:
+        payload = a2a_call_signing_payload(task_id, session_id)
+        if not verify_signature(caller_public_key, caller_signature, payload):
+            raise HTTPException(status_code=401, detail="invalid caller signature")
+        verified_caller_name = await repo.get_agent_name_for_public_key(session, caller_public_key)
+        metadata = {
+            **metadata,
+            "verifiedCaller": {"agentName": verified_caller_name, "publicKey": caller_public_key},
+        }
+
     try:
         thread_id = await repo.ensure_thread(
             session, agent_name, session_id, parent_thread_id, metadata=metadata
@@ -109,8 +132,15 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     if resuming_run_id is not None:
         await repo.mark_run_resumed(session, resuming_run_id, run_id)
 
+    forwarded_props = (
+        {"caller": {"agentName": verified_caller_name, "publicKey": caller_public_key}}
+        if verified_caller_name
+        else None
+    )
     try:
-        agui_input_json = build_run_agent_input(thread_id, run_id, messages)
+        agui_input_json = build_run_agent_input(
+            thread_id, run_id, messages, forwarded_props=forwarded_props
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

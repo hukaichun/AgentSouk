@@ -16,7 +16,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from httpx_sse import aconnect_sse
+
+from souk_agent_sdk.identity import a2a_call_signing_payload, public_key_hex, sign
 
 
 def new_task_id() -> str:
@@ -30,9 +33,23 @@ async def call_agent_streaming(
     task_id: str | None = None,
     session_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    signing_key: Ed25519PrivateKey | None = None,
     timeout: float = 120.0,
 ) -> AsyncIterator[dict[str, Any]]:
+    """`signing_key`, if given, proves this call's identity to the callee's
+    souk (see souk/identity.py's a2a_call_signing_payload) — pass the same
+    keypair this provider registered with (souk_agent_sdk.identity) to let
+    a sub-agent call be attributed back to a known, registered agent
+    rather than arriving anonymous. Entirely optional: souk doesn't
+    require callers to authenticate.
+    """
     task_id = task_id or new_task_id()
+    metadata = dict(metadata) if metadata else {}
+    if signing_key is not None:
+        payload = a2a_call_signing_payload(task_id, session_id)
+        metadata["callerPublicKey"] = public_key_hex(signing_key)
+        metadata["callerSignature"] = sign(signing_key, payload)
+
     params: dict[str, Any] = {
         "id": task_id,
         "message": {"role": "user", "parts": [{"type": "text", "text": message_text}]},

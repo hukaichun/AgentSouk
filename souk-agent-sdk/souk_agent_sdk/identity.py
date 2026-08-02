@@ -41,3 +41,12 @@ def registration_signing_payload(sdk_client_id: str, agent_names: list[str]) -> 
     # Must match souk.identity.registration_signing_payload exactly —
     # souk verifies this signature against the same canonical string.
     return f"{sdk_client_id}:{','.join(sorted(agent_names))}".encode()
+
+
+def a2a_call_signing_payload(task_id: str, session_id: str | None) -> bytes:
+    # Must match souk.identity.a2a_call_signing_payload exactly. Used when
+    # this provider itself acts as an A2A caller (e.g. delegating to a
+    # sub-agent, see a2a_client.call_agent_streaming's signing_key param)
+    # and wants the callee's souk to know which registered identity made
+    # the call.
+    return f"{task_id}:{session_id or ''}".encode()

@@ -12,12 +12,14 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.ui.ag_ui import AGUIAdapter
 from souk_agent_sdk import AgentHandle, SoukAgentClient
+from souk_agent_sdk.identity import load_or_create_identity
 
 from pydantic_ai_agent.config import AgentConfig, load_config
 from pydantic_ai_agent.sub_agent_tool import AgentDeps, build_sub_agent_tools
@@ -59,7 +61,7 @@ def build_pydantic_agent(cfg: AgentConfig) -> Agent:
     )
 
 
-def make_run_stream(agent: Agent):
+def make_run_stream(agent: Agent, signing_key: Ed25519PrivateKey):
     async def run_stream(run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         # `combined` is where the AG-UI adapter's own events AND any
         # sub-agent CUSTOM progress events (pushed by tools via AgentDeps)
@@ -68,7 +70,9 @@ def make_run_stream(agent: Agent):
         # run_input is a real AG-UI RunAgentInput JSON dict from souk (see
         # souk.agui.build_run_agent_input) — camelCase wire keys.
         combined: asyncio.Queue = asyncio.Queue()
-        deps = AgentDeps(progress_queue=combined, thread_id=run_input.get("threadId"))
+        deps = AgentDeps(
+            progress_queue=combined, thread_id=run_input.get("threadId"), signing_key=signing_key
+        )
 
         async def drain_adapter() -> None:
             try:
@@ -101,6 +105,14 @@ async def main() -> None:
     config_path = os.environ.get("AGENT_TEMPLATE_CONFIG", "config.yaml")
     cfg = load_config(config_path)
 
+    # Loaded once up front (not inside SoukAgentClient) so the exact same
+    # identity is available here for signing sub-agent calls (see
+    # sub_agent_tool.AgentDeps.signing_key) — SoukAgentClient loads the
+    # same on-disk key itself for registration, so both end up with
+    # identical keys without this being passed between them.
+    identity_key_path = os.environ.get("SOUK_IDENTITY_KEY_PATH", "souk_identity.key")
+    signing_key = load_or_create_identity(identity_key_path)
+
     handles = []
     for agent_cfg in cfg.agents:
         agent = build_pydantic_agent(agent_cfg)
@@ -108,12 +120,14 @@ async def main() -> None:
             AgentHandle(
                 name=agent_cfg.name,
                 description=agent_cfg.description,
-                run_stream=make_run_stream(agent),
+                run_stream=make_run_stream(agent, signing_key),
             )
         )
         logger.info("built pydantic-ai agent '%s' (model=%s)", agent_cfg.name, agent_cfg.model)
 
-    client = SoukAgentClient(cfg.souk_http_url, cfg.souk_grpc_url, handles)
+    client = SoukAgentClient(
+        cfg.souk_http_url, cfg.souk_grpc_url, handles, identity_key_path=identity_key_path
+    )
     await client.run_forever()
 
 

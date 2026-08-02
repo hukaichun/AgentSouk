@@ -115,6 +115,21 @@ async def list_agents(session: AsyncSession) -> list[dict[str, Any]]:
     ]
 
 
+async def get_agent_name_for_public_key(session: AsyncSession, public_key: str) -> str | None:
+    """Resolves a verified caller's public key (see souk.identity's
+    a2a_call_signing_payload / api_a2a._start_run) back to one of its
+    registered agent names, purely for audit/display — if the key owns
+    several names this just picks one, since the point is establishing
+    "this is a known, registered identity", not which specific name.
+    """
+    return (
+        await session.execute(
+            text("SELECT name FROM agents WHERE public_key = :public_key ORDER BY joined_at LIMIT 1"),
+            {"public_key": public_key},
+        )
+    ).scalars().first()
+
+
 async def get_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
     row = (
         await session.execute(

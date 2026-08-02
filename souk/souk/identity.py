@@ -44,7 +44,21 @@ def registration_signing_payload(sdk_client_id: str, agent_names: list[str]) -> 
     return f"{sdk_client_id}:{','.join(sorted(agent_names))}".encode()
 
 
-def verify_registration_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
+def a2a_call_signing_payload(task_id: str, session_id: str | None) -> bytes:
+    """What a *caller* signs when it wants souk to know who it is on an
+    A2A tasks/send(Subscribe) call — see api_a2a._start_run. Currently
+    used for agent-to-agent calls (a provider signing with the same
+    identity key it registered with, see
+    providers/pydantic-ai-agent/pydantic_ai_agent/sub_agent_tool.py) but
+    nothing here is specific to that — any caller holding an Ed25519 key
+    could use the same mechanism. Doesn't cover the message text itself:
+    the goal is knowing *who* initiated this task, not tamper-proofing
+    its content.
+    """
+    return f"{task_id}:{session_id or ''}".encode()
+
+
+def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
     try:
         public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
         public_key.verify(bytes.fromhex(signature_hex), payload)

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic_ai import RunContext, Tool
 from souk_agent_sdk.a2a_client import call_agent_streaming
 
@@ -25,6 +26,13 @@ class AgentDeps:
     # directly into the caller-visible output.
     progress_queue: asyncio.Queue
     thread_id: str | None = None
+    # This provider's own registered identity (see
+    # souk_agent_sdk.identity) — reused to sign outgoing sub-agent calls
+    # so the callee's souk can attribute them to a known, registered
+    # agent instead of an anonymous caller (see souk/identity.py's
+    # a2a_call_signing_payload). Optional: a sub-agent call without one
+    # is still allowed, just unattributed.
+    signing_key: Ed25519PrivateKey | None = None
 
 
 def build_sub_agent_tools(sub_agents: list[SubAgentConfig]) -> list[Tool]:
@@ -47,6 +55,7 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
             sub.a2a_url,
             message,
             metadata={"parentThreadId": main_thread_id} if main_thread_id else None,
+            signing_key=ctx.deps.signing_key,
         ):
             await ctx.deps.progress_queue.put(
                 {
