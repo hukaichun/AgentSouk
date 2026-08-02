@@ -27,6 +27,16 @@ class AgentRegistration(BaseModel):
 class RegisterBatchRequest(BaseModel):
     sdk_client_id: str
     agents: list[AgentRegistration]
+    # Ed25519 public key (hex) this provider's identity is backed by, and
+    # a signature (hex) over souk.identity.registration_signing_payload —
+    # proves possession of the matching private key. See
+    # souk_agent_sdk.identity for how a provider generates/persists one.
+    # First registration of a name binds it to this key; later attempts
+    # to register the same name with a different key are rejected (see
+    # repo.register_agents) — this is the whole of souk's provider
+    # identity model: no signup flow, the keypair *is* the identity.
+    public_key: str
+    signature: str
 
 
 class AgentRosterEntry(BaseModel):
@@ -40,6 +50,16 @@ class AgentRosterEntry(BaseModel):
 
 class RosterResponse(BaseModel):
     agents: list[AgentRosterEntry]
+
+
+class RegisterBatchResponse(RosterResponse):
+    # Bearer token required on every subsequent PollForWork/AgentSession
+    # gRPC call (see souk.identity) — valid for
+    # souk.identity.SESSION_TOKEN_TTL_SECONDS, re-issued on every
+    # /agents/register call (souk_agent_sdk re-registers on each
+    # run_forever() (re)connect, so an expired token is naturally
+    # refreshed rather than needing its own renewal endpoint).
+    session_token: str
 
 
 class RunAgentInput(BaseModel):

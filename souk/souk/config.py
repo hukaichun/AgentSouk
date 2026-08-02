@@ -24,5 +24,11 @@ class Settings(BaseSettings):
     run_stall_timeout_seconds: int = 120
     health_sweep_interval_seconds: int = 15
 
+    # Signs the bearer tokens issued at /agents/register and required on
+    # every gRPC call (see souk.identity) — MUST be overridden with a real
+    # secret in any deployment reachable by anyone other than yourself;
+    # the default is only safe for a single-developer local souk.
+    token_signing_secret: str = "dev-insecure-change-me"
+
 
 settings = Settings()

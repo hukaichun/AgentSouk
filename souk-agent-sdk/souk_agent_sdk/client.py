@@ -28,6 +28,7 @@ import grpc
 import httpx
 
 from souk_agent_sdk.grpc_gen import souk_pb2, souk_pb2_grpc
+from souk_agent_sdk.identity import load_or_create_identity, public_key_hex, registration_signing_payload, sign
 
 logger = logging.getLogger("souk_agent_sdk")
 
@@ -52,6 +53,7 @@ class SoukAgentClient:
         poll_interval: float = 2.0,
         reconnect_delay: float = 2.0,
         max_concurrent_runs: int | None = None,
+        identity_key_path: str = "souk_identity.key",
     ) -> None:
         self.souk_http_url = souk_http_url.rstrip("/")
         self.souk_grpc_url = souk_grpc_url
@@ -59,6 +61,12 @@ class SoukAgentClient:
         self.sdk_client_id = sdk_client_id or f"sdk_{secrets.token_hex(8)}"
         self.poll_interval = poll_interval
         self.reconnect_delay = reconnect_delay
+        # This provider's identity to any souk it connects to — see
+        # souk_agent_sdk.identity. Persisted to disk: restarting this
+        # process must keep proving ownership of the same agent names,
+        # which only works if it keeps using the same keypair.
+        self._identity = load_or_create_identity(identity_key_path)
+        self._session_token: str | None = None
         # How many runs this provider will claim at once, across all its
         # agents combined. None means unlimited — souk hands out its
         # whole backlog on every poll (the old, pre-throttling behavior).
@@ -75,11 +83,15 @@ class SoukAgentClient:
         self._in_flight: set[asyncio.Task] = set()
 
     async def register(self) -> None:
+        names = [a.name for a in self.agents.values()]
+        payload = registration_signing_payload(self.sdk_client_id, names)
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"{self.souk_http_url}/agents/register",
                 json={
                     "sdk_client_id": self.sdk_client_id,
+                    "public_key": public_key_hex(self._identity),
+                    "signature": sign(self._identity, payload),
                     "agents": [
                         {
                             "name": a.name,
@@ -91,18 +103,22 @@ class SoukAgentClient:
                 },
             )
             resp.raise_for_status()
+        self._session_token = resp.json()["session_token"]
         logger.info("registered %d agent(s) as sdk_client_id=%s", len(self.agents), self.sdk_client_id)
 
     async def run_forever(self) -> None:
-        """Registers once, then keeps a connection to souk alive
-        indefinitely — reconnecting with a fixed delay if the AgentSession
-        stream or the poll loop itself ever errors out, so a transient
-        network blip doesn't permanently stop this provider from checking
-        for and responding to souk's work.
+        """Keeps a connection to souk alive indefinitely — reconnecting
+        with a fixed delay if the AgentSession stream or the poll loop
+        itself ever errors out, so a transient network blip doesn't
+        permanently stop this provider from checking for and responding
+        to souk's work. Re-registers on every (re)connect, not just the
+        first — that's also how the bearer token gets refreshed before it
+        expires (see souk.identity.SESSION_TOKEN_TTL_SECONDS), without a
+        separate renewal mechanism.
         """
-        await self.register()
         while True:
             try:
+                await self.register()
                 await self._run_connection()
             except asyncio.CancelledError:
                 raise
@@ -115,7 +131,8 @@ class SoukAgentClient:
     async def _run_connection(self) -> None:
         channel = grpc.aio.insecure_channel(self.souk_grpc_url)
         stub = souk_pb2_grpc.SoukAgentGatewayStub(channel)
-        self._session_call = stub.AgentSession()
+        auth_metadata = (("authorization", self._session_token),)
+        self._session_call = stub.AgentSession(metadata=auth_metadata)
         self._outbound = asyncio.Queue()
         self._inboxes = {}
 
@@ -170,7 +187,9 @@ class SoukAgentClient:
         kwargs: dict[str, Any] = {"agent_names": list(self.agents.keys())}
         if self.max_concurrent_runs is not None:
             kwargs["max_claim"] = max(0, self.max_concurrent_runs - len(self._in_flight))
-        response = await stub.PollForWork(souk_pb2.PollRequest(**kwargs))
+        response = await stub.PollForWork(
+            souk_pb2.PollRequest(**kwargs), metadata=(("authorization", self._session_token),)
+        )
         for pending in response.pending:
             task = asyncio.create_task(self._handle_run(pending.run_id, pending.agent_name))
             self._in_flight.add(task)

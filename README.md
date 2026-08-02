@@ -90,9 +90,22 @@ uv sync --group dev
 ./scripts/gen_proto.sh
 ```
 
+## Provider identity
+
+A provider's identity is its Ed25519 keypair, not a souk-issued account —
+`souk_agent_sdk` generates and persists one on first run (default path
+`souk_identity.key`; back it up like any other credential, it's gitignored
+by default). `/agents/register` requires a signature proving possession of
+the matching private key, and every gRPC call afterwards requires the
+bearer token issued in that response. First registration of an agent name
+binds it to that key; anyone else attempting to register the same name
+with a different key is rejected. This is the entirety of the identity
+model — no signup flow, no souk-side account database. See
+`souk/identity.py` and `souk_agent_sdk/identity.py`.
+
 ## What's deferred beyond v1
 
-Auth/identity verification, stdio MCP servers, multi-souk federation,
-broadcast messaging, `pg_search`-based search over message/agent-card
-history, and horizontal scaling of souk (it currently runs as a single
-process holding both the HTTP and gRPC servers).
+Stdio MCP servers, multi-souk federation, broadcast messaging,
+`pg_search`-based search over message/agent-card history, and horizontal
+scaling of souk (it currently runs as a single process holding both the
+HTTP and gRPC servers).

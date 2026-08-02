@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk import repo
 from souk.db import get_session
-from souk.models import AgentRosterEntry, RegisterBatchRequest, RosterResponse
+from souk.identity import issue_session_token, registration_signing_payload, verify_registration_signature
+from souk.models import AgentRosterEntry, RegisterBatchRequest, RegisterBatchResponse, RosterResponse
 
 router = APIRouter()
 
@@ -11,14 +12,26 @@ router = APIRouter()
 @router.post("/agents/register", status_code=201)
 async def register_agents(
     body: RegisterBatchRequest, session: AsyncSession = Depends(get_session)
-) -> RosterResponse:
-    await repo.register_agents(
-        session,
-        body.sdk_client_id,
-        [agent.model_dump() for agent in body.agents],
-    )
+) -> RegisterBatchResponse:
+    payload = registration_signing_payload(body.sdk_client_id, [a.name for a in body.agents])
+    if not verify_registration_signature(body.public_key, body.signature, payload):
+        raise HTTPException(status_code=401, detail="invalid registration signature")
+
+    try:
+        await repo.register_agents(
+            session,
+            body.sdk_client_id,
+            body.public_key,
+            [agent.model_dump() for agent in body.agents],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
     agents = await repo.list_agents(session)
-    return RosterResponse(agents=[AgentRosterEntry(**a) for a in agents])
+    return RegisterBatchResponse(
+        agents=[AgentRosterEntry(**a) for a in agents],
+        session_token=issue_session_token(body.sdk_client_id),
+    )
 
 
 @router.get("/agents")

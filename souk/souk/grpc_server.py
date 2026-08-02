@@ -25,9 +25,24 @@ from souk.broker import broker
 from souk.config import settings
 from souk.db import SessionLocal
 from souk.grpc_gen import souk_pb2, souk_pb2_grpc
+from souk.identity import verify_session_token
 from souk.pause import is_pause_event
 
 logger = logging.getLogger("souk.grpc")
+
+
+def _authenticate(context) -> str | None:
+    """Every gRPC call must present the bearer token issued at
+    /agents/register (see souk/identity.py) — returns its sdk_client_id,
+    or None if missing/invalid/expired. Defense in depth: PollForWork
+    additionally filters requested agent_names down to ones this
+    sdk_client_id actually owns (see repo.get_agent_names_for_sdk_client),
+    since a token alone doesn't say *which* names its holder controls.
+    """
+    for key, value in context.invocation_metadata() or ():
+        if key == "authorization":
+            return verify_session_token(value)
+    return None
 
 
 def _last_assistant_text(messages: list[dict]) -> str:
@@ -41,7 +56,21 @@ def _last_assistant_text(messages: list[dict]) -> str:
 
 class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
     async def PollForWork(self, request, context):
-        agent_names = list(request.agent_names)
+        sdk_client_id = _authenticate(context)
+        if sdk_client_id is None:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
+
+        requested_names = list(request.agent_names)
+        async with SessionLocal() as session:
+            owned_names = await repo.get_agent_names_for_sdk_client(session, sdk_client_id)
+        agent_names = [name for name in requested_names if name in owned_names]
+        if len(agent_names) != len(requested_names):
+            logger.warning(
+                "PollForWork: sdk_client_id=%s requested unowned agent name(s): %s",
+                sdk_client_id,
+                sorted(set(requested_names) - owned_names),
+            )
+
         max_claim = request.max_claim if request.HasField("max_claim") else None
         states = broker.poll(agent_names, max_claim=max_claim)
 
@@ -58,6 +87,9 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
     async def AgentSession(
         self, request_iterator: AsyncIterator[souk_pb2.AgentEventEnvelope], context
     ):
+        if _authenticate(context) is None:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
+
         outbound: asyncio.Queue = asyncio.Queue()
 
         async def handle_incoming() -> None:

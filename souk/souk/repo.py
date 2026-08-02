@@ -18,8 +18,26 @@ from souk.ids import new_id
 
 
 async def register_agents(
-    session: AsyncSession, sdk_client_id: str, agents: list[dict[str, Any]]
+    session: AsyncSession, sdk_client_id: str, public_key: str, agents: list[dict[str, Any]]
 ) -> None:
+    """Raises ValueError if any name in `agents` is already claimed by a
+    different public_key — see souk/identity.py. The caller
+    (souk.identity.verify_registration_signature) must already have
+    confirmed `public_key` is the one this call was actually signed
+    with before this is reached; this function only enforces *ownership*
+    (first-claim-wins), not the signature itself.
+    """
+    names = [agent["name"] for agent in agents]
+    existing = (
+        await session.execute(
+            text("SELECT name, public_key FROM agents WHERE name = ANY(:names)"),
+            {"names": names},
+        )
+    ).mappings().all()
+    conflicting = [row["name"] for row in existing if row["public_key"] != public_key]
+    if conflicting:
+        raise ValueError(f"agent name(s) already registered under a different key: {conflicting}")
+
     for agent in agents:
         card = {
             "name": agent["name"],
@@ -29,8 +47,8 @@ async def register_agents(
         await session.execute(
             text(
                 """
-                INSERT INTO agents (name, sdk_client_id, agent_card, metadata, joined_at, last_seen_at)
-                VALUES (:name, :sdk_client_id, :agent_card, :metadata, now(), now())
+                INSERT INTO agents (name, sdk_client_id, public_key, agent_card, metadata, joined_at, last_seen_at)
+                VALUES (:name, :sdk_client_id, :public_key, :agent_card, :metadata, now(), now())
                 ON CONFLICT (name) DO UPDATE SET
                     sdk_client_id = EXCLUDED.sdk_client_id,
                     agent_card = EXCLUDED.agent_card,
@@ -41,11 +59,26 @@ async def register_agents(
             {
                 "name": agent["name"],
                 "sdk_client_id": sdk_client_id,
+                "public_key": public_key,
                 "agent_card": json.dumps(card),
                 "metadata": json.dumps(agent.get("metadata", {})),
             },
         )
     await session.commit()
+
+
+async def get_agent_names_for_sdk_client(session: AsyncSession, sdk_client_id: str) -> set[str]:
+    """Which agent names this token's holder actually owns — used to stop
+    a valid token for one provider being used to poll for another
+    provider's agent names in souk.grpc_server.PollForWork.
+    """
+    rows = (
+        await session.execute(
+            text("SELECT name FROM agents WHERE sdk_client_id = :sdk_client_id"),
+            {"sdk_client_id": sdk_client_id},
+        )
+    ).scalars().all()
+    return set(rows)
 
 
 async def touch_agent(session: AsyncSession, name: str) -> None:

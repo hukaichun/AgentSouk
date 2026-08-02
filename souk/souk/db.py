@@ -11,6 +11,13 @@ SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS agents (
     name          TEXT PRIMARY KEY,
     sdk_client_id TEXT NOT NULL,
+    -- Ed25519 public key (hex) that first claimed this name — see
+    -- souk/identity.py. Set once at first registration, never changed by
+    -- a later one (repo.register_agents rejects a re-registration with a
+    -- different key instead of overwriting it). This is the entirety of
+    -- souk's provider identity model: whoever holds the matching private
+    -- key owns the name.
+    public_key    TEXT NOT NULL,
     agent_card    JSONB NOT NULL,
     -- Free-form, souk-internal extension data — distinct from agent_card
     -- (which is protocol-facing: served verbatim as the A2A Agent Card).
