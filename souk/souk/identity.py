@@ -1,22 +1,23 @@
-"""Minimal provider identity: proves whoever registers an agent name
-actually holds the private key that first claimed it, and gates gRPC
-calls on a short-lived bearer token issued only after that proof.
+"""Minimal provider identity: proves whoever registers under a public_key
+actually holds the matching private key, and gates gRPC calls on a
+short-lived bearer token issued only after that proof.
 
 Deliberately not a full account system — no signup flow, no stored
-credentials beyond the public key an agent name was first claimed with.
-A provider's identity *is* its Ed25519 keypair (see
-souk_agent_sdk.identity, which generates and persists one on first
-run). This is enough to close the one gap that matters for a public,
-multi-tenant souk: nobody can register/reclaim an agent name they don't
-hold the key for.
+credentials beyond the public key itself. A provider's identity *is* its
+Ed25519 keypair (see souk_agent_sdk.identity, which generates and persists
+one on first run). This is enough to close the one gap that matters for a
+public, multi-tenant souk: nobody can act as a public_key they don't hold
+the private key for. `name` (the human-facing label an agent registers
+under) is deliberately *not* part of the ownership model — it isn't unique
+or exclusive (see souk/db.py's UNIQUE(public_key, name)); the souk-assigned
+agent_id, scoped to (public_key, name), is what's actually owned.
 
 Two independent checks, at two different points:
   1. Registration (register_agents / verify_registration_signature):
      the request must be signed with the private key matching the
-     public_key it presents, and that public_key must match whatever
-     first claimed each agent name in the batch (see
-     repo.register_agents). Expensive-ish (Ed25519 verify), so it only
-     happens at registration, not on every poll.
+     public_key it presents (see repo.register_agents). Expensive-ish
+     (Ed25519 verify), so it only happens at registration, not on every
+     poll.
   2. Every gRPC call (PollForWork/AgentSession): must present a bearer
      token issued by step 1 (see issue_session_token/verify_session_token).
      Cheap (HMAC verify), stateless (no session store — the token itself

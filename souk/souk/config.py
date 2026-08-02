@@ -10,6 +10,25 @@ class Settings(BaseSettings):
     grpc_host: str = "0.0.0.0"
     grpc_port: int = 50051
     online_window_seconds: int = 60
+    # A much longer cutoff than online_window_seconds: an agent whose
+    # last_seen_at is older than this is excluded from GET /agents
+    # entirely (not just marked offline) — read-time filter only, no job,
+    # no mutation; reappears automatically the moment it registers again.
+    stale_hidden_window_seconds: int = 60 * 60 * 24 * 7
+
+    # How long a run may sit 'queued' (never claimed) before souk gives up
+    # on it — only applies once the target agent is also no longer online,
+    # see repo.fail_unclaimed_runs. Shorter than run_stall_timeout_seconds:
+    # waiting to be claimed should time out faster than "claimed and
+    # stalled".
+    queued_timeout_seconds: int = 45
+
+    # Origins allowed to call souk's HTTP surface cross-origin (e.g. a
+    # souk-directory instance served from a different origin). "*" is fine
+    # for local development; tighten this for any real deployment, same as
+    # token_signing_secret's default is only safe for a single-developer
+    # local souk.
+    cors_allow_origins: list[str] = ["*"]
     # Base URL callers use to reach this souk's HTTP surface, used to build
     # per-agent Agent Card URLs. Override in deployments behind a proxy/LB.
     public_http_url: str = "http://localhost:8000"

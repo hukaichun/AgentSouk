@@ -51,10 +51,11 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
         main_thread_id = ctx.deps.thread_id
 
         final_text = ""
+        failed = False
         async for update in call_agent_streaming(
             sub.a2a_url,
             message,
-            metadata={"parentThreadId": main_thread_id} if main_thread_id else None,
+            parent_thread_id=main_thread_id,
             actor_chain=ctx.deps.actor_chain,
         ):
             await ctx.deps.progress_queue.put(
@@ -64,11 +65,15 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
                     "value": {"sub_agent": sub.name, **update},
                 }
             )
+            if update.get("status", {}).get("state") == "failed":
+                failed = True
             artifact = update.get("artifact")
             if artifact:
                 for part in artifact.get("parts", []):
                     if part.get("type") == "text":
                         final_text += part["text"]
+        if failed:
+            return f"({sub.name} is currently unavailable — the call failed or timed out)"
         return final_text or f"(no response from {sub.name})"
 
     call_sub_agent.__name__ = f"call_{sub.name}"

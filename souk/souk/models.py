@@ -47,7 +47,10 @@ class RegisterBatchRequest(BaseModel):
 class AgentRosterEntry(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
+    agent_id: str
     name: str
+    description: str = ""
+    skills: list[dict[str, Any]] = Field(default_factory=list)
     joined_at: datetime
     last_seen_at: datetime
     online: bool
@@ -65,6 +68,10 @@ class RegisterBatchResponse(RosterResponse):
     # run_forever() (re)connect, so an expired token is naturally
     # refreshed rather than needing its own renewal endpoint).
     session_token: str
+    # {name: agent_id} for this batch — lets the caller (souk_agent_sdk)
+    # learn the souk-assigned ids for the agents it just registered, since
+    # `name` alone is no longer a unique routing key (see souk/db.py).
+    agent_ids: dict[str, str]
 
 
 class RunAgentInput(BaseModel):

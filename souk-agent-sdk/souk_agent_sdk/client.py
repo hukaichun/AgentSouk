@@ -70,13 +70,20 @@ class SoukAgentClient:
         # grpc_tls_* settings.
         self.ca_cert_path = ca_cert_path
         self.agents: dict[str, AgentHandle] = {a.name: a for a in agents}
+        # Populated by register() from the {name: agent_id} map souk
+        # returns — dispatch (PollForWork/AgentSession) is keyed by
+        # agent_id, not name, since name is no longer a unique routing key
+        # (see souk/db.py's UNIQUE(public_key, name)). Empty until the
+        # first successful registration.
+        self._handle_by_id: dict[str, AgentHandle] = {}
         self.sdk_client_id = sdk_client_id or f"sdk_{secrets.token_hex(8)}"
         self.poll_interval = poll_interval
         self.reconnect_delay = reconnect_delay
         # This provider's identity to any souk it connects to — see
         # souk_agent_sdk.identity. Persisted to disk: restarting this
-        # process must keep proving ownership of the same agent names,
-        # which only works if it keeps using the same keypair.
+        # process must keep resolving to the same agent_ids it registered
+        # before, which only works if it keeps using the same keypair (see
+        # souk_agent_sdk.identity's module docstring).
         self._identity = load_or_create_identity(identity_key_path)
         self._session_token: str | None = None
         # How many runs this provider will claim at once, across all its
@@ -117,7 +124,12 @@ class SoukAgentClient:
                 },
             )
             resp.raise_for_status()
-        self._session_token = resp.json()["session_token"]
+        body = resp.json()
+        self._session_token = body["session_token"]
+        agent_ids: dict[str, str] = body["agent_ids"]
+        self._handle_by_id = {
+            agent_ids[name]: handle for name, handle in self.agents.items() if name in agent_ids
+        }
         logger.info("registered %d agent(s) as sdk_client_id=%s", len(self.agents), self.sdk_client_id)
 
     async def run_forever(self) -> None:
@@ -203,39 +215,39 @@ class SoukAgentClient:
         # PollRequest.max_claim distinguishes "unset" (unlimited) from an
         # explicit 0 ("no spare capacity right now"), so this must not
         # send 0 as a stand-in for "unlimited".
-        kwargs: dict[str, Any] = {"agent_names": list(self.agents.keys())}
+        kwargs: dict[str, Any] = {"agent_ids": list(self._handle_by_id.keys())}
         if self.max_concurrent_runs is not None:
             kwargs["max_claim"] = max(0, self.max_concurrent_runs - len(self._in_flight))
         response = await stub.PollForWork(
             souk_pb2.PollRequest(**kwargs), metadata=(("authorization", self._session_token),)
         )
         for pending in response.pending:
-            task = asyncio.create_task(self._handle_run(pending.run_id, pending.agent_name))
+            task = asyncio.create_task(self._handle_run(pending.run_id, pending.agent_id))
             self._in_flight.add(task)
             task.add_done_callback(self._in_flight.discard)
 
-    async def _handle_run(self, run_id: str, agent_name: str) -> None:
-        handle = self.agents.get(agent_name)
+    async def _handle_run(self, run_id: str, agent_id: str) -> None:
+        handle = self._handle_by_id.get(agent_id)
         if handle is None:
-            logger.warning("PollForWork returned run for unknown local agent '%s'", agent_name)
+            logger.warning("PollForWork returned run for unknown local agent_id '%s'", agent_id)
             return
 
         inbox: asyncio.Queue = asyncio.Queue()
         self._inboxes[run_id] = inbox
         outbound = self._outbound
         try:
-            await outbound.put(souk_pb2.AgentEventEnvelope(run_id=run_id, agent_name=agent_name))
+            await outbound.put(souk_pb2.AgentEventEnvelope(run_id=run_id, agent_id=agent_id))
             first = await inbox.get()
             run_input = json.loads(first.json_payload)
 
             async for event in handle.run_stream(run_input):
                 await outbound.put(
                     souk_pb2.AgentEventEnvelope(
-                        run_id=run_id, agent_name=agent_name, json_payload=json.dumps(event)
+                        run_id=run_id, agent_id=agent_id, json_payload=json.dumps(event)
                     )
                 )
         except Exception:
-            logger.exception("run %s for agent '%s' failed", run_id, agent_name)
+            logger.exception("run %s for agent_id '%s' failed", run_id, agent_id)
         finally:
             self._inboxes.pop(run_id, None)
             # Best-effort: if this run was cancelled because the
@@ -245,7 +257,7 @@ class SoukAgentClient:
             try:
                 await outbound.put(
                     souk_pb2.AgentEventEnvelope(
-                        run_id=run_id, agent_name=agent_name, end_of_stream=True
+                        run_id=run_id, agent_id=agent_id, end_of_stream=True
                     )
                 )
                 ack = await asyncio.wait_for(inbox.get(), timeout=5.0)

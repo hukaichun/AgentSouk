@@ -1,12 +1,17 @@
 """A provider's identity to any souk it connects to is its Ed25519
 keypair — not an account souk issues, see souk/identity.py on the server
 side. Generated once and persisted to disk so restarting this process
-still owns the same agent names (a fresh key would be a fresh, unrelated
-identity — souk would refuse to let it re-claim names the old key owned).
+still owns the same agent_ids (a fresh key is a fresh, unrelated identity —
+souk lets it register under the same `name`s without complaint, since names
+aren't exclusive, but it gets *new* agent_ids with no connection to the old
+ones; anything still pointed at the old agent_ids, e.g. another provider's
+sub-agent delegation config, keeps talking to the orphaned identity, not
+this one).
 
 Losing this file means losing the ability to update those agent
-registrations — there's no recovery flow in this minimal version, so
-treat it like any other credential (back it up, don't commit it).
+registrations under their original agent_ids — there's no recovery flow in
+this minimal version, so treat it like any other credential (back it up,
+don't commit it).
 """
 
 from __future__ import annotations

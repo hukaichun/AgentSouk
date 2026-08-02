@@ -9,14 +9,18 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS agents (
-    name          TEXT PRIMARY KEY,
+    -- souk-assigned: agent_<hex> (souk.ids.new_id) — the real routing/
+    -- ownership key. `name` below is deliberately NOT this: it's a free,
+    -- non-unique, human-facing label (multiple identities may register the
+    -- same name; see the UNIQUE(public_key, name) constraint instead).
+    agent_id      TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
     sdk_client_id TEXT NOT NULL,
-    -- Ed25519 public key (hex) that first claimed this name — see
-    -- souk/identity.py. Set once at first registration, never changed by
-    -- a later one (repo.register_agents rejects a re-registration with a
-    -- different key instead of overwriting it). This is the entirety of
-    -- souk's provider identity model: whoever holds the matching private
-    -- key owns the name.
+    -- Ed25519 public key (hex) that owns this agent_id — see
+    -- souk/identity.py. Set once at first registration of this
+    -- (public_key, name) pair, never changed by a later one. Whoever holds
+    -- the matching private key owns this agent_id; `name` itself is not
+    -- exclusive, so a different public_key may freely reuse the same name.
     public_key    TEXT NOT NULL,
     agent_card    JSONB NOT NULL,
     -- Free-form, souk-internal extension data — distinct from agent_card
@@ -25,12 +29,19 @@ CREATE TABLE IF NOT EXISTS agents (
     -- attach whatever isn't worth a dedicated column.
     metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
     joined_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Soft-delist marker, NULL = listed. Set when a registration batch
+    -- from this public_key omits a previously-registered agent_id (see
+    -- repo.register_agents), or cleared again if it reappears in a later
+    -- batch. Never hard-deleted — threads/thread_history still reference
+    -- agent_id, and the audit trail should survive de-listing.
+    delisted_at   TIMESTAMPTZ,
+    UNIQUE (public_key, name)
 );
 
 CREATE TABLE IF NOT EXISTS threads (
     thread_id         TEXT PRIMARY KEY,   -- souk-assigned: thread_<hex>
-    agent_name        TEXT NOT NULL REFERENCES agents(name),
+    agent_id          TEXT NOT NULL REFERENCES agents(agent_id),
     -- Set when this thread was spawned by an A2A call from within another
     -- thread's run (e.g. a main agent delegating to a sub-agent) — pure
     -- lineage, so "what conversation led to this one" is queryable. NULL
@@ -63,7 +74,7 @@ CREATE TABLE IF NOT EXISTS thread_history (
     message_json  JSONB,
 
     -- kind = 'run_status'
-    agent_name    TEXT,
+    agent_id      TEXT,
     protocol      TEXT CHECK (protocol IN ('ag-ui', 'a2a')),
     -- 'input-required': the run ended paused/resumable instead of
     -- finished — a provider signaled this via the souk.pause CUSTOM

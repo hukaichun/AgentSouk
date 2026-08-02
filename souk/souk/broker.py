@@ -24,7 +24,7 @@ END_OF_STREAM = object()
 @dataclass
 class RunState:
     run_id: str
-    agent_name: str
+    agent_id: str
     thread_id: str
     input_json: dict[str, Any]
     protocol: str  # "ag-ui" | "a2a"
@@ -44,26 +44,26 @@ class RunBroker:
     def enqueue_run(
         self,
         run_id: str,
-        agent_name: str,
+        agent_id: str,
         thread_id: str,
         input_json: dict[str, Any],
         protocol: str,
     ) -> RunState:
         state = RunState(
             run_id=run_id,
-            agent_name=agent_name,
+            agent_id=agent_id,
             thread_id=thread_id,
             input_json=input_json,
             protocol=protocol,
         )
         self._runs[run_id] = state
-        self._pending_by_agent[agent_name].append(run_id)
+        self._pending_by_agent[agent_id].append(run_id)
         return state
 
-    def poll(self, agent_names: list[str], max_claim: int | None = None) -> list[RunState]:
+    def poll(self, agent_ids: list[str], max_claim: int | None = None) -> list[RunState]:
         """Returns (and removes from the pending queue) up to `max_claim`
-        runs across `agent_names`, round-robining between agents so a cap
-        doesn't starve later names in the list.
+        runs across `agent_ids`, round-robining between agents so a cap
+        doesn't starve later ids in the list.
 
         `max_claim=None` means the caller never reported a capacity at
         all — drains everything currently queued, unlimited (the old
@@ -75,7 +75,7 @@ class RunBroker:
             return []
 
         found: list[RunState] = []
-        queues = [self._pending_by_agent.get(name) for name in agent_names]
+        queues = [self._pending_by_agent.get(agent_id) for agent_id in agent_ids]
         while any(queues):
             if max_claim is not None and len(found) >= max_claim:
                 break

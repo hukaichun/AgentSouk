@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from souk import api_a2a, api_agui, api_registry, repo
 from souk.config import settings
@@ -39,6 +40,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="souk", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allow_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(api_registry.router)
 app.include_router(api_agui.router)
 app.include_router(api_a2a.router)

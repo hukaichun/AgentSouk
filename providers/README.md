@@ -17,3 +17,15 @@ equally valid provider.
 Add new provider examples as siblings of `pydantic-ai-agent/` here (e.g. a
 different LLM framework, a non-Python implementation, a HITL-approval demo)
 rather than growing `/agent-template` — that one stays deliberately minimal.
+
+## Pinning a sub-agent delegation target
+
+`pydantic-ai-agent/config.example.yaml`'s `sub_agents[].a2a_url` points at a
+name-based route (e.g. `http://souk:8000/a2a/translator/rpc`) — fine for the
+bundled demo, where there's no risk of another provider registering the same
+name. souk agent names aren't unique or reserved, though (any identity may
+register any name — see souk's README, "Provider identity"): a production
+delegation that must reach one *specific* provider, not "whichever agent
+currently owns this name", should target `/a2a/id/{agent_id}/rpc` instead —
+the `agent_id` returned in that provider's own `/agents/register` response
+(also logged on startup by `souk_agent_sdk.SoukAgentClient.register`).

@@ -1,9 +1,19 @@
 """A2A gateway: one Agent Card + one JSON-RPC endpoint per agent.
 
-Agent Cards are served under a per-agent path prefix
-(`/a2a/{agent_name}/.well-known/agent.json`) rather than at the origin
-root — a deliberate deviation from A2A's single-agent-per-origin
+Agent Cards are served under a per-agent path prefix rather than at the
+origin root — a deliberate deviation from A2A's single-agent-per-origin
 assumption, since one souk fronts many agents at one origin.
+
+Two ways to address an agent:
+- `/a2a/id/{agent_id}/...` — the canonical, always-unambiguous route keyed
+  by souk's own assigned id (see souk/db.py's `agents.agent_id`).
+- `/a2a/{name}/...` — the legacy, human-readable route, kept working for
+  convenience: resolves transparently as long as exactly one currently-
+  listed agent has that display name. `name` is not unique (multiple
+  identities may register the same one — see repo.register_agents), so a
+  collision here 404s/409s instead of silently picking a winner; a caller
+  that needs to pin one specific agent (e.g. a sub-agent delegation config)
+  should use the `id` route instead.
 
 Per A2A's own protocol contract, `tasks/send(Subscribe)` callers supply
 their own task id (`params.id`) and optional session id
@@ -37,15 +47,46 @@ from souk.translate_a2a import (
 router = APIRouter()
 
 
-@router.get("/a2a/{agent_name}/.well-known/agent.json")
-async def agent_card(agent_name: str, session: AsyncSession = Depends(get_session)) -> dict:
-    agent = await repo.get_agent(session, agent_name)
-    if agent is None:
-        raise HTTPException(status_code=404, detail=f"agent '{agent_name}' is not registered")
-    base = f"{settings.public_http_url}/a2a/{agent_name}"
+async def _resolve_agent_id(session: AsyncSession, name: str) -> str:
+    """Resolves the legacy name-based routes down to a single agent_id, or
+    raises 404 (no match) / 409 (ambiguous — more than one currently-listed
+    agent shares this name) with enough in the body to retry against
+    `/a2a/id/{agent_id}/...` or `/agui/id/{agent_id}`.
+    """
+    candidates = await repo.resolve_agents_by_name(session, name)
+    if not candidates:
+        raise HTTPException(status_code=404, detail=f"agent '{name}' is not registered")
+    if len(candidates) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": f"multiple agents are registered under the name '{name}'",
+                "retry_with": "/a2a/id/{agent_id}/... or /agui/id/{agent_id}",
+                "candidates": [
+                    {
+                        "name": c["name"],
+                        "agent_id": c["agent_id"],
+                        "public_key_prefix": c["public_key"][:12],
+                        "joined_at": c["joined_at"].isoformat(),
+                        "description": c["agent_card"].get("description", ""),
+                    }
+                    for c in candidates
+                ],
+            },
+        )
+    return candidates[0]["agent_id"]
+
+
+async def _display_name(session: AsyncSession, agent_id: str) -> str:
+    agent = await repo.get_agent_by_id(session, agent_id)
+    return agent["name"] if agent else agent_id
+
+
+def _build_agent_card(agent_id: str, agent: dict) -> dict:
+    base = f"{settings.public_http_url}/a2a/id/{agent_id}"
     card = dict(agent["agent_card"])
     return {
-        "name": card.get("name", agent_name),
+        "name": card.get("name", agent["name"]),
         "description": card.get("description", ""),
         "url": f"{base}/rpc",
         "version": "0.1.0",
@@ -54,23 +95,40 @@ async def agent_card(agent_name: str, session: AsyncSession = Depends(get_sessio
     }
 
 
-async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tuple[str, str, bool]:
+@router.get("/a2a/id/{agent_id}/.well-known/agent.json")
+async def agent_card_by_id(agent_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+    agent = await repo.get_agent_by_id(session, agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"agent '{agent_id}' is not registered")
+    return _build_agent_card(agent_id, agent)
+
+
+@router.get("/a2a/{name}/.well-known/agent.json")
+async def agent_card_by_name(name: str, session: AsyncSession = Depends(get_session)) -> dict:
+    agent_id = await _resolve_agent_id(session, name)
+    agent = await repo.get_agent_by_id(session, agent_id)
+    return _build_agent_card(agent_id, agent)
+
+
+async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tuple[str, str, bool]:
     """Queues a run from A2A tasks/send(Subscribe) params.
     Returns (task_id, run_id, is_new).
 
-    is_new=False means this session already had an active run (see
-    repo.get_active_run_for_thread) and nothing new was queued — the
-    caller gets back the *existing* task_id/run_id instead, which may
-    already be paused ('input-required') or even finished by the time
-    they look at it. This is what stops a caller from re-triggering an
-    already-pending sub-agent task a second time (see souk/pause.py):
-    a repeated tasks/send(Subscribe) on the same session becomes
-    idempotent — same task_id back, current real state — rather than
-    forking a second concurrent run on the same thread.
+    is_new=False means either this session already had an active run (see
+    repo.get_active_run_for_thread), or the target agent was already known
+    to be offline at call time and the run was created pre-failed instead
+    of queued (see the online check below) — either way nothing was
+    enqueued, and the caller gets back a run whose current persisted state
+    (possibly already terminal) is authoritative rather than something to
+    wait on live. This is also what stops a caller from re-triggering an
+    already-pending sub-agent task a second time (see souk/pause.py): a
+    repeated tasks/send(Subscribe) on the same session becomes idempotent
+    — same task_id back, current real state — rather than forking a second
+    concurrent run on the same thread.
     """
-    agent = await repo.get_agent(session, agent_name)
+    agent = await repo.get_agent_by_id(session, agent_id)
     if agent is None:
-        raise HTTPException(status_code=404, detail=f"agent '{agent_name}' is not registered")
+        raise HTTPException(status_code=404, detail=f"agent '{agent_id}' is not registered")
 
     task_id = params.get("id")
     if not task_id:
@@ -112,7 +170,7 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
 
     try:
         thread_id = await repo.ensure_thread(
-            session, agent_name, session_id, parent_thread_id, metadata=metadata
+            session, agent_id, session_id, parent_thread_id, metadata=metadata
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
@@ -127,7 +185,7 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     created = await repo.create_run(
         session,
         thread_id,
-        agent_name,
+        agent_id,
         "a2a",
         {"thread_id": thread_id, "messages": messages},
         assign_task_id=False,
@@ -136,6 +194,23 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     run_id = created["run_id"]
     if resuming_run_id is not None:
         await repo.mark_run_resumed(session, resuming_run_id, run_id)
+
+    # tasks/send(Subscribe) task ids are caller-supplied (see module docstring),
+    # so store it directly rather than souk's usual new_id("task").
+    await repo.set_task_id(session, run_id, task_id)
+    await repo.append_thread_messages(session, thread_id, run_id, messages)
+
+    # Fast-fail (see souk.health's queued-timeout sweep for the fallback
+    # covering the race where the target goes offline *after* this check):
+    # if souk already knows the target is offline right now, don't queue
+    # at all — mark the run failed immediately so the caller doesn't wait
+    # out queued_timeout_seconds for something that was never going anywhere.
+    if not repo.is_agent_online(agent["last_seen_at"]):
+        await repo.mark_run_status(
+            session, run_id, "failed", metadata={"failureReason": "agent_offline"}
+        )
+        await session.commit()
+        return task_id, run_id, False
 
     # The raw chain (not just the resolved summary) is forwarded too — a
     # provider that wants to delegate further itself needs the actual
@@ -154,25 +229,20 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # tasks/send(Subscribe) task ids are caller-supplied (see module docstring),
-    # so store it directly rather than souk's usual new_id("task").
-    await repo.set_task_id(session, run_id, task_id)
-    await repo.append_thread_messages(session, thread_id, run_id, messages)
     await session.commit()
 
-    broker.enqueue_run(run_id, agent_name, thread_id, agui_input_json, "a2a")
+    broker.enqueue_run(run_id, agent_id, thread_id, agui_input_json, "a2a")
     return task_id, run_id, True
 
 
-@router.post("/a2a/{agent_name}/rpc")
-async def rpc(agent_name: str, request: Request, session: AsyncSession = Depends(get_session)):
+async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventSourceResponse | dict:
     body = await request.json()
     method = body.get("method")
     params = body.get("params", {})
     rpc_id = body.get("id")
 
     if method == "tasks/send":
-        task_id, run_id, is_new = await _start_run(session, agent_name, params)
+        task_id, run_id, is_new = await _start_run(session, agent_id, params)
         state = broker.get(run_id) if is_new else None
         if state is not None:
             events: list[dict] = []
@@ -183,17 +253,19 @@ async def rpc(agent_name: str, request: Request, session: AsyncSession = Depends
                 events.append(item)
             broker.forget(run_id)
         else:
-            # Not a fresh run: either already paused/finished, or this is
-            # a duplicate call racing a run that's live under a different
-            # requester — either way, nothing to wait on here. Report
-            # its current persisted state instead (see _start_run).
+            # Not a fresh run: either already paused/finished, already
+            # failed fast (see _start_run's offline check), or this is a
+            # duplicate call racing a run that's live under a different
+            # requester — either way, nothing to wait on here. Report its
+            # current persisted state instead.
             events = await repo.get_run_events(session, run_id)
         run = await repo.get_run(session, run_id)
-        task = build_task(task_id, agent_name, run["status"] if run else "completed", events)
+        display_name = await _display_name(session, agent_id)
+        task = build_task(task_id, display_name, run["status"] if run else "completed", events)
         return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
     if method == "tasks/sendSubscribe":
-        task_id, run_id, is_new = await _start_run(session, agent_name, params)
+        task_id, run_id, is_new = await _start_run(session, agent_id, params)
         state = broker.get(run_id) if is_new else None
 
         async def event_stream():
@@ -231,7 +303,8 @@ async def rpc(agent_name: str, request: Request, session: AsyncSession = Depends
         if run is None:
             return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32001, "message": "task not found"}}
         events = await repo.get_run_events(session, run["run_id"])
-        task = build_task(task_id, agent_name, run["status"], events)
+        display_name = await _display_name(session, agent_id)
+        task = build_task(task_id, display_name, run["status"], events)
         return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
     if method == "tasks/cancel":
@@ -243,7 +316,19 @@ async def rpc(agent_name: str, request: Request, session: AsyncSession = Depends
         # agent-side run in flight (if any) isn't forcibly interrupted in v1.
         await repo.mark_run_status(session, run["run_id"], "cancelled")
         events = await repo.get_run_events(session, run["run_id"])
-        task = build_task(task_id, agent_name, "cancelled", events)
+        display_name = await _display_name(session, agent_id)
+        task = build_task(task_id, display_name, "cancelled", events)
         return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
     return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32601, "message": f"method not found: {method}"}}
+
+
+@router.post("/a2a/id/{agent_id}/rpc")
+async def rpc_by_id(agent_id: str, request: Request, session: AsyncSession = Depends(get_session)):
+    return await _rpc(agent_id, request, session)
+
+
+@router.post("/a2a/{name}/rpc")
+async def rpc_by_name(name: str, request: Request, session: AsyncSession = Depends(get_session)):
+    agent_id = await _resolve_agent_id(session, name)
+    return await _rpc(agent_id, request, session)

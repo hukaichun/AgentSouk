@@ -19,104 +19,169 @@ from souk.ids import new_id
 
 async def register_agents(
     session: AsyncSession, sdk_client_id: str, public_key: str, agents: list[dict[str, Any]]
-) -> None:
-    """Raises ValueError if any name in `agents` is already claimed by a
-    different public_key — see souk/identity.py. The caller
-    (souk.identity.verify_registration_signature) must already have
-    confirmed `public_key` is the one this call was actually signed
-    with before this is reached; this function only enforces *ownership*
-    (first-claim-wins), not the signature itself.
+) -> dict[str, str]:
+    """Upserts this batch under `public_key`, then de-lists (soft-delete)
+    anything previously owned by this same `public_key` that's absent from
+    it — the batch is treated as the declarative full statement of "what
+    this identity currently offers" (see the module-level design notes in
+    the project plan: this is what makes a plain re-registration call the
+    entire de-listing UX, no separate endpoint needed).
+
+    `name` is not exclusive — a different public_key may freely reuse the
+    same name (see the UNIQUE(public_key, name) constraint in souk/db.py).
+    An agent_id is assigned once per (public_key, name) pair and reused on
+    every subsequent registration of that same pair; a name reappearing
+    after being de-listed clears delisted_at again (self-heal).
+
+    Returns {name: agent_id} for this batch.
     """
     names = [agent["name"] for agent in agents]
     existing = (
         await session.execute(
-            text("SELECT name, public_key FROM agents WHERE name = ANY(:names)"),
-            {"names": names},
+            text(
+                "SELECT agent_id, name FROM agents WHERE public_key = :public_key AND name = ANY(:names)"
+            ),
+            {"public_key": public_key, "names": names},
         )
     ).mappings().all()
-    conflicting = [row["name"] for row in existing if row["public_key"] != public_key]
-    if conflicting:
-        raise ValueError(
-            f"agent name(s) already registered under a different key: {conflicting}. "
-            "If this is the same provider as before, its identity key (souk_identity.key by "
-            "default) didn't persist across restarts — check it's on a durable path/volume, "
-            "not the container's ephemeral filesystem. If it's genuinely a different provider, "
-            "pick different agent names."
-        )
+    existing_ids = {row["name"]: row["agent_id"] for row in existing}
 
+    agent_ids: dict[str, str] = {}
     for agent in agents:
+        name = agent["name"]
+        agent_id = existing_ids.get(name) or new_id("agent")
+        agent_ids[name] = agent_id
         card = {
-            "name": agent["name"],
+            "name": name,
             "description": agent.get("description", ""),
             **agent.get("agent_card_extra", {}),
         }
         await session.execute(
             text(
                 """
-                INSERT INTO agents (name, sdk_client_id, public_key, agent_card, metadata, joined_at, last_seen_at)
-                VALUES (:name, :sdk_client_id, :public_key, :agent_card, :metadata, now(), now())
-                ON CONFLICT (name) DO UPDATE SET
+                INSERT INTO agents
+                    (agent_id, name, sdk_client_id, public_key, agent_card, metadata, joined_at, last_seen_at)
+                VALUES
+                    (:agent_id, :name, :sdk_client_id, :public_key, :agent_card, :metadata, now(), now())
+                ON CONFLICT (agent_id) DO UPDATE SET
                     sdk_client_id = EXCLUDED.sdk_client_id,
                     agent_card = EXCLUDED.agent_card,
                     metadata = EXCLUDED.metadata,
-                    last_seen_at = now()
+                    last_seen_at = now(),
+                    delisted_at = NULL
                 """
             ),
             {
-                "name": agent["name"],
+                "agent_id": agent_id,
+                "name": name,
                 "sdk_client_id": sdk_client_id,
                 "public_key": public_key,
                 "agent_card": json.dumps(card),
                 "metadata": json.dumps(agent.get("metadata", {})),
             },
         )
+
+    await session.execute(
+        text(
+            """
+            UPDATE agents SET delisted_at = now()
+            WHERE public_key = :public_key AND delisted_at IS NULL
+              AND NOT (agent_id = ANY(:agent_ids))
+            """
+        ),
+        {"public_key": public_key, "agent_ids": list(agent_ids.values())},
+    )
     await session.commit()
+    return agent_ids
 
 
-async def get_agent_names_for_sdk_client(session: AsyncSession, sdk_client_id: str) -> set[str]:
-    """Which agent names this token's holder actually owns — used to stop
-    a valid token for one provider being used to poll for another
-    provider's agent names in souk.grpc_server.PollForWork.
+async def get_agent_ids_for_sdk_client(session: AsyncSession, sdk_client_id: str) -> set[str]:
+    """Which agent_ids this token's holder actually owns — used to stop a
+    valid token for one provider being used to poll for another provider's
+    agent ids in souk.grpc_server.PollForWork.
     """
     rows = (
         await session.execute(
-            text("SELECT name FROM agents WHERE sdk_client_id = :sdk_client_id"),
+            text("SELECT agent_id FROM agents WHERE sdk_client_id = :sdk_client_id"),
             {"sdk_client_id": sdk_client_id},
         )
     ).scalars().all()
     return set(rows)
 
 
-async def touch_agent(session: AsyncSession, name: str) -> None:
+async def touch_agent(session: AsyncSession, agent_id: str) -> None:
     await session.execute(
-        text("UPDATE agents SET last_seen_at = now() WHERE name = :name"),
-        {"name": name},
+        text("UPDATE agents SET last_seen_at = now() WHERE agent_id = :agent_id"),
+        {"agent_id": agent_id},
     )
     await session.commit()
 
 
-async def get_agent(session: AsyncSession, name: str) -> dict[str, Any] | None:
+async def get_agent_by_id(session: AsyncSession, agent_id: str) -> dict[str, Any] | None:
+    """Direct, always-unambiguous lookup by the canonical key — a delisted
+    agent is treated as not found, same as one that never existed."""
     row = (
         await session.execute(
             text(
-                "SELECT name, agent_card, metadata, joined_at, last_seen_at "
-                "FROM agents WHERE name = :name"
+                "SELECT agent_id, name, agent_card, metadata, joined_at, last_seen_at "
+                "FROM agents WHERE agent_id = :agent_id AND delisted_at IS NULL"
             ),
-            {"name": name},
+            {"agent_id": agent_id},
         )
     ).mappings().first()
     return dict(row) if row else None
 
 
-async def list_agents(session: AsyncSession) -> list[dict[str, Any]]:
+async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[str, Any]]:
+    """Every currently-listed agent registered under this display name —
+    zero, one (the common case), or many if multiple identities picked the
+    same name. Callers of the legacy `/a2a/{name}/...`/`/agui/{name}`
+    routes use this to either transparently resolve (exactly one match) or
+    surface a 409 with the candidate list (more than one) — see api_a2a.py/
+    api_agui.py.
+    """
     rows = (
         await session.execute(
-            text("SELECT name, joined_at, last_seen_at FROM agents ORDER BY name")
+            text(
+                "SELECT agent_id, name, public_key, agent_card, metadata, joined_at, last_seen_at "
+                "FROM agents WHERE name = :name AND delisted_at IS NULL ORDER BY joined_at"
+            ),
+            {"name": name},
         )
     ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def is_agent_online(last_seen_at: datetime) -> bool:
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.online_window_seconds)
+    return last_seen_at.replace(tzinfo=timezone.utc) >= cutoff
+
+
+async def list_agents(session: AsyncSession) -> list[dict[str, Any]]:
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.stale_hidden_window_seconds)
+    rows = (
+        await session.execute(
+            text(
+                """
+                SELECT agent_id, name, agent_card, joined_at, last_seen_at
+                FROM agents
+                WHERE delisted_at IS NULL AND last_seen_at >= :stale_cutoff
+                ORDER BY name
+                """
+            ),
+            {"stale_cutoff": stale_cutoff},
+        )
+    ).mappings().all()
     return [
-        {**dict(row), "online": row["last_seen_at"].replace(tzinfo=timezone.utc) >= cutoff}
+        {
+            "agent_id": row["agent_id"],
+            "name": row["name"],
+            "description": row["agent_card"].get("description", ""),
+            "skills": row["agent_card"].get("skills", []),
+            "joined_at": row["joined_at"],
+            "last_seen_at": row["last_seen_at"],
+            "online": is_agent_online(row["last_seen_at"]),
+        }
         for row in rows
     ]
 
@@ -147,7 +212,7 @@ async def get_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | 
 
 async def ensure_thread(
     session: AsyncSession,
-    agent_name: str,
+    agent_id: str,
     thread_id: str | None,
     parent_thread_id: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -156,14 +221,14 @@ async def ensure_thread(
     (see souk.ids); callers never mint their own. Three cases:
 
     1. `thread_id` given and it already exists: reuse it (must belong to
-       `agent_name`). This is for genuine external callers that supply
+       `agent_id`). This is for genuine external callers that supply
        their own opaque identifier (e.g. a real A2A client's sessionId) —
        souk just tracks it, it doesn't generate it, so it's exempt from
        the "db-generated" rule the same way A2A's caller-supplied task id
        already is.
     2. `thread_id` is None but `parent_thread_id` is given (e.g. a
        sub-agent call spawned from within another thread's run): reuse
-       the existing child thread for this (parent_thread_id, agent_name)
+       the existing child thread for this (parent_thread_id, agent_id)
        pair if one exists, so repeated delegation calls keep talking to
        the same sub-thread — otherwise assign a fresh souk-generated id.
     3. Neither given: always assign a fresh souk-generated id.
@@ -171,9 +236,9 @@ async def ensure_thread(
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
         if existing is not None:
-            if existing["agent_name"] != agent_name:
+            if existing["agent_id"] != agent_id:
                 raise ValueError(
-                    f"thread '{thread_id}' belongs to agent '{existing['agent_name']}', not '{agent_name}'"
+                    f"thread '{thread_id}' belongs to agent '{existing['agent_id']}', not '{agent_id}'"
                 )
             await session.execute(
                 text("UPDATE threads SET last_activity_at = now() WHERE thread_id = :thread_id"),
@@ -186,11 +251,11 @@ async def ensure_thread(
                 text(
                     """
                     SELECT thread_id FROM threads
-                    WHERE parent_thread_id = :parent_thread_id AND agent_name = :agent_name
+                    WHERE parent_thread_id = :parent_thread_id AND agent_id = :agent_id
                     ORDER BY created_at LIMIT 1
                     """
                 ),
-                {"parent_thread_id": parent_thread_id, "agent_name": agent_name},
+                {"parent_thread_id": parent_thread_id, "agent_id": agent_id},
             )
         ).mappings().first()
         if row is not None:
@@ -206,18 +271,38 @@ async def ensure_thread(
     await session.execute(
         text(
             """
-            INSERT INTO threads (thread_id, agent_name, parent_thread_id, metadata, created_at, last_activity_at)
-            VALUES (:thread_id, :agent_name, :parent_thread_id, :metadata, now(), now())
+            INSERT INTO threads (thread_id, agent_id, parent_thread_id, metadata, created_at, last_activity_at)
+            VALUES (:thread_id, :agent_id, :parent_thread_id, :metadata, now(), now())
             """
         ),
         {
             "thread_id": thread_id,
-            "agent_name": agent_name,
+            "agent_id": agent_id,
             "parent_thread_id": parent_thread_id,
             "metadata": json.dumps(metadata or {}),
         },
     )
     return thread_id
+
+
+async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
+    """Direct children of `thread_id` (see threads.parent_thread_id) —
+    walked recursively by the caller (api_agui.get_thread_tree) to build a
+    full lineage tree. souk is the one party that actually sees every A2A
+    hop, so this is data it can own outright; it only gets populated when
+    a caller sets metadata.parentThreadId though (see api_a2a._start_run),
+    so it's only as complete as callers choose to make it.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "SELECT thread_id, agent_id, created_at FROM threads "
+                "WHERE parent_thread_id = :thread_id ORDER BY created_at"
+            ),
+            {"thread_id": thread_id},
+        )
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 async def append_thread_messages(
@@ -262,7 +347,7 @@ async def get_thread_messages(session: AsyncSession, thread_id: str) -> list[dic
 async def create_run(
     session: AsyncSession,
     thread_id: str,
-    agent_name: str,
+    agent_id: str,
     protocol: str,
     input_json: dict[str, Any],
     assign_task_id: bool = False,
@@ -274,15 +359,15 @@ async def create_run(
         text(
             """
             INSERT INTO thread_history
-                (thread_id, run_id, kind, agent_name, protocol, status, input_json, task_id, metadata, last_activity_at)
+                (thread_id, run_id, kind, agent_id, protocol, status, input_json, task_id, metadata, last_activity_at)
             VALUES
-                (:thread_id, :run_id, 'run_status', :agent_name, :protocol, 'queued', :input_json, :task_id, :metadata, now())
+                (:thread_id, :run_id, 'run_status', :agent_id, :protocol, 'queued', :input_json, :task_id, :metadata, now())
             """
         ),
         {
             "thread_id": thread_id,
             "run_id": run_id,
-            "agent_name": agent_name,
+            "agent_id": agent_id,
             "protocol": protocol,
             "input_json": json.dumps(input_json),
             "task_id": task_id,
@@ -487,6 +572,42 @@ async def fail_stalled_runs(session: AsyncSession, stall_timeout_seconds: int) -
                 """
             ),
             {"timeout": stall_timeout_seconds},
+        )
+    ).scalars().all()
+    await session.commit()
+    return list(rows)
+
+
+async def fail_unclaimed_runs(session: AsyncSession, timeout_seconds: int) -> list[str]:
+    """Distinct from fail_stalled_runs: catches a run that's sat 'queued'
+    (never claimed at all) past `timeout_seconds' *and* whose target agent
+    is no longer online — the race case where a provider was online (or
+    ambiguously so) when the call was made, got queued, then went dark
+    before ever polling for it. The common "target already known offline
+    at call time" case is handled synchronously instead (see
+    api_a2a._start_run/api_agui.run_agent's fast-fail path) — this sweep is
+    only the fallback for the race, not the primary mechanism, so it's
+    deliberately not firing on every provider that's simply throttling
+    itself via PollRequest.max_claim (see fail_stalled_runs's docstring on
+    why 'queued' alone isn't a health signal).
+    """
+    rows = (
+        await session.execute(
+            text(
+                """
+                UPDATE thread_history th
+                SET status = 'failed',
+                    completed_at = now(),
+                    metadata = metadata || '{"failureReason": "no_provider_online"}'::jsonb
+                FROM agents a
+                WHERE th.kind = 'run_status' AND th.status = 'queued'
+                  AND th.agent_id = a.agent_id
+                  AND th.created_at < now() - make_interval(secs => :timeout)
+                  AND a.last_seen_at < now() - make_interval(secs => :online_window)
+                RETURNING th.run_id
+                """
+            ),
+            {"timeout": timeout_seconds, "online_window": settings.online_window_seconds},
         )
     ).scalars().all()
     await session.commit()

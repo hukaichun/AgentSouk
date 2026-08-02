@@ -35,8 +35,8 @@ def _authenticate(context) -> str | None:
     """Every gRPC call must present the bearer token issued at
     /agents/register (see souk/identity.py) — returns its sdk_client_id,
     or None if missing/invalid/expired. Defense in depth: PollForWork
-    additionally filters requested agent_names down to ones this
-    sdk_client_id actually owns (see repo.get_agent_names_for_sdk_client),
+    additionally filters requested agent_ids down to ones this
+    sdk_client_id actually owns (see repo.get_agent_ids_for_sdk_client),
     since a token alone doesn't say *which* names its holder controls.
     """
     for key, value in context.invocation_metadata() or ():
@@ -60,27 +60,27 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         if sdk_client_id is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
 
-        requested_names = list(request.agent_names)
+        requested_ids = list(request.agent_ids)
         async with SessionLocal() as session:
-            owned_names = await repo.get_agent_names_for_sdk_client(session, sdk_client_id)
-        agent_names = [name for name in requested_names if name in owned_names]
-        if len(agent_names) != len(requested_names):
+            owned_ids = await repo.get_agent_ids_for_sdk_client(session, sdk_client_id)
+        agent_ids = [agent_id for agent_id in requested_ids if agent_id in owned_ids]
+        if len(agent_ids) != len(requested_ids):
             logger.warning(
-                "PollForWork: sdk_client_id=%s requested unowned agent name(s): %s",
+                "PollForWork: sdk_client_id=%s requested unowned agent id(s): %s",
                 sdk_client_id,
-                sorted(set(requested_names) - owned_names),
+                sorted(set(requested_ids) - owned_ids),
             )
 
         max_claim = request.max_claim if request.HasField("max_claim") else None
-        states = broker.poll(agent_names, max_claim=max_claim)
+        states = broker.poll(agent_ids, max_claim=max_claim)
 
         async with SessionLocal() as session:
-            for name in agent_names:
-                await repo.touch_agent(session, name)
+            for agent_id in agent_ids:
+                await repo.touch_agent(session, agent_id)
 
         return souk_pb2.PollResponse(
             pending=[
-                souk_pb2.PendingRun(run_id=s.run_id, agent_name=s.agent_name) for s in states
+                souk_pb2.PendingRun(run_id=s.run_id, agent_id=s.agent_id) for s in states
             ]
         )
 
@@ -123,7 +123,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         await outbound.put(
             souk_pb2.AgentEventEnvelope(
                 run_id=run_id,
-                agent_name=state.agent_name,
+                agent_id=state.agent_id,
                 json_payload=json.dumps(state.input_json),
             )
         )
@@ -162,7 +162,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         await broker.close_run(run_id)
         await outbound.put(
             souk_pb2.AgentEventEnvelope(
-                run_id=run_id, agent_name=state.agent_name if state else "", ack=True
+                run_id=run_id, agent_id=state.agent_id if state else "", ack=True
             )
         )
         # A plain completion (not a pause) may be exactly what an outer
@@ -190,7 +190,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
             created = await repo.create_run(
                 session,
                 parent_thread_id,
-                parent_run["agent_name"],
+                parent_run["agent_id"],
                 parent_run["protocol"],
                 {"resume": forwarded_props["resume"]},
                 metadata={"resumedFrom": child_thread_id},
@@ -212,7 +212,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
                 return
             await session.commit()
         broker.enqueue_run(
-            new_run_id, parent_run["agent_name"], parent_thread_id, input_json, parent_run["protocol"]
+            new_run_id, parent_run["agent_id"], parent_thread_id, input_json, parent_run["protocol"]
         )
         logger.info(
             "auto-resumed run=%s on thread=%s after child thread=%s completed",

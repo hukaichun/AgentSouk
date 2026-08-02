@@ -19,20 +19,18 @@ async def register_agents(
     if not verify_signature(body.public_key, body.signature, payload):
         raise HTTPException(status_code=401, detail="invalid registration signature")
 
-    try:
-        await repo.register_agents(
-            session,
-            body.sdk_client_id,
-            body.public_key,
-            [agent.model_dump() for agent in body.agents],
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
+    agent_ids = await repo.register_agents(
+        session,
+        body.sdk_client_id,
+        body.public_key,
+        [agent.model_dump() for agent in body.agents],
+    )
 
     agents = await repo.list_agents(session)
     return RegisterBatchResponse(
         agents=[AgentRosterEntry(**a) for a in agents],
         session_token=issue_session_token(body.sdk_client_id),
+        agent_ids=agent_ids,
     )
 
 
