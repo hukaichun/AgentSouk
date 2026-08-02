@@ -1,9 +1,9 @@
 # Agent Souk
 
 A **souk** is a public-IP server that agents without a public IP (behind
-NAT, running locally, etc.) connect out to and become reachable through.
-Once joined, humans or other agents can interact with an agent via the
-souk over two protocols:
+NAT, running locally, on your own laptop, ...) connect out to and become
+reachable through. Once joined, humans or other agents can interact with
+an agent via the souk over two protocols:
 
 - **AG-UI** — event-streaming, human/frontend-facing.
 - **A2A** — JSON-RPC task protocol, agent-to-agent.
@@ -11,6 +11,36 @@ souk over two protocols:
 Agents can't be pushed to, so the agent-side SDK polls the souk for
 pending work and, once it finds any, opens a gRPC stream to relay AG-UI
 events for that run.
+
+## Vision
+
+The point of souk isn't to be a platform you deploy your agents *into* —
+it's an open relay layer any agent can plug into without giving up
+anything. **Anyone can run a souk. Any agent, in any language, that
+speaks souk's small gRPC contract can join one** — there's no account
+system gating who's allowed to participate, no vendor lock-in, and no
+requirement that your agent live on anyone's infrastructure but your own.
+The same mechanism that lets a company put its whole team's agents behind
+one internal souk (each department its own provider, discoverable by the
+rest of the org) also lets a single developer expose the agent running on
+their own laptop directly — to a manager, a teammate, or another agent
+somewhere else — without deploying anything anywhere.
+
+That's the bet: most of what makes an agent useful to *other* people
+depends on it being reachable and composable, not on which platform hosts
+it. souk tries to be the thin, boring layer that makes reachability a
+non-issue, so the interesting work stays in the agents themselves.
+
+**Where this stands today**: the core relay (outbound connectivity, dual
+AG-UI/A2A protocol support, durable run/thread history, HITL and
+async-task pause/resume, self-sovereign provider and caller identity) is
+built and tested — see [Provider identity](#provider-identity) below. What
+the vision still needs — letting a souk you've never heard of be
+discoverable and trustworthy, real payment rails, a human-browsable
+directory — is not built yet; see [Roadmap](#roadmap). For how this
+compares to nearby projects (tunneling tools, agent marketplaces,
+decentralized identity protocols) and where the real gaps are, see
+[`docs/prior-art.md`](docs/prior-art.md).
 
 ## Components
 
@@ -140,9 +170,33 @@ is fine same-host, e.g. `docker compose up`); use a real CA-issued
 certificate (or terminate TLS at a reverse proxy in front of souk) for
 anything reachable over a real network.
 
-## What's deferred beyond v1
+## Roadmap
 
-Stdio MCP servers, multi-souk federation, broadcast messaging,
-`pg_search`-based search over message/agent-card history, and horizontal
-scaling of souk (it currently runs as a single process holding both the
-HTTP and gRPC servers).
+Directions we're likely to explore, roughly in order of how directly they
+serve the vision above — not commitments, and not necessarily in this
+order. If one of these matters to you, open an issue rather than assuming
+it's already being worked on.
+
+- **Multi-souk federation/discovery** — right now "any souk" only works if
+  you already know its URL. Closing that (so a souk you've never heard of
+  is discoverable and its providers' identities are checkable) is the
+  biggest gap between what's built and "anyone can join any souk." Likely
+  informed by how [NANDA](https://nanda.media.mit.edu/)'s federated
+  registry and [ANP](https://github.com/agent-network-protocol/AgentConnect)'s
+  DID-based identity approach this — see `docs/prior-art.md`.
+- **Payments** — almost certainly by integrating an existing rail
+  ([x402](https://www.x402.org/) is the leading candidate given it's
+  HTTP-native) rather than building billing infrastructure from scratch.
+- **A human-browsable directory** — souk only exposes `GET /agents` today;
+  actually finding agents worth calling needs something more than an API.
+- **Caller-side identity convenience** — the actor-chain mechanism (see
+  [Provider identity](#provider-identity)) already lets any Ed25519
+  keypair holder identify itself, agent or human; `souk-client-sdk`
+  doesn't have a convenience wrapper for it yet, only
+  `souk_agent_sdk.identity` does.
+- **Horizontal scaling of souk** — it currently runs as a single process
+  holding both the HTTP and gRPC servers, with in-process (not shared)
+  dispatch state; fine for one souk's real capacity today, a real
+  constraint past that.
+- Stdio MCP servers, broadcast messaging, `pg_search`-based search over
+  message/agent-card history — smaller, more self-contained items.
