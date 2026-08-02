@@ -1,12 +1,28 @@
 #!/usr/bin/env bash
-# Regenerate gRPC stubs from proto/souk.proto into both souk/ and souk-agent-sdk/.
-# Run from the repo root: ./scripts/gen_proto.sh
+# Regenerate gRPC stubs from proto/souk.proto.
+#
+# With no args: regenerates both souk/souk/grpc_gen and
+# souk-agent-sdk/souk_agent_sdk/grpc_gen — the convenience path for local
+# dev after editing proto/souk.proto (run from the repo root: `uv sync
+# --group dev && ./scripts/gen_proto.sh`).
+#
+# With one or more explicit paths: generates into just those directories
+# (relative to the current working directory) — used by each package's
+# own Dockerfile, which only has its own directory (plus proto/) in its
+# build context, not its siblings.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROTO_DIR="$ROOT/proto"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROTO_DIR="$SCRIPT_DIR/../proto"
 
-for OUT in "$ROOT/souk/souk/grpc_gen" "$ROOT/souk-agent-sdk/souk_agent_sdk/grpc_gen"; do
+if [ "$#" -gt 0 ]; then
+    OUTS=("$@")
+else
+    ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+    OUTS=("$ROOT/souk/souk/grpc_gen" "$ROOT/souk-agent-sdk/souk_agent_sdk/grpc_gen")
+fi
+
+for OUT in "${OUTS[@]}"; do
     mkdir -p "$OUT"
     touch "$OUT/__init__.py"
     python -m grpc_tools.protoc \
@@ -18,6 +34,5 @@ for OUT in "$ROOT/souk/souk/grpc_gen" "$ROOT/souk-agent-sdk/souk_agent_sdk/grpc_
     # grpc_tools emits `import souk_pb2` (absolute) — rewrite to a package-relative
     # import so the generated stub works when imported as part of these packages.
     sed -i 's/^import souk_pb2 as souk__pb2$/from . import souk_pb2 as souk__pb2/' "$OUT/souk_pb2_grpc.py"
+    echo "Generated gRPC stubs into $OUT"
 done
-
-echo "Generated gRPC stubs into souk/souk/grpc_gen and souk-agent-sdk/souk_agent_sdk/grpc_gen"

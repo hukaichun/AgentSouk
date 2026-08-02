@@ -7,8 +7,20 @@ license = "Apache-2.0"
 requires-python = ">=3.12"
 dependencies = []
 
-[tool.uv.workspace]
-members = ["souk", "souk-agent-sdk", "souk-client-sdk", "agent-template", "providers/pydantic-ai-agent"]
-
+# Deliberately NOT a uv workspace: souk, souk-agent-sdk, souk-client-sdk,
+# agent-template, and providers/* are independent projects that happen to
+# live in one repo, not one coupled unit — souk-agent-sdk is a convenience
+# client for proto/souk.proto, not a required piece of souk itself, and
+# every provider example is exactly that, an example. A shared workspace
+# lockfile would mean you can't build/ship any one of them without every
+# other one present, which contradicts that. Each subdirectory has its own
+# pyproject.toml and is synced independently (`cd <dir> && uv sync`); the
+# only cross-package reference is a plain `path` source (not `workspace =
+# true`) where a provider actually depends on souk-agent-sdk.
+#
+# This root project exists only to hold the dev tooling for
+# scripts/gen_proto.sh's "regenerate both packages' stubs after editing
+# proto/souk.proto" convenience path — see README's "Regenerating gRPC
+# stubs" section.
 [dependency-groups]
 dev = ["grpcio-tools>=1.66"]

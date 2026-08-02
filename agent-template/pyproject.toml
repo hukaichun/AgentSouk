@@ -8,7 +8,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-souk-agent-sdk = { workspace = true }
+souk-agent-sdk = { path = "../souk-agent-sdk" }
 
 [project.scripts]
 agent-template = "agent_template.main:run"

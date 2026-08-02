@@ -55,6 +55,8 @@ decentralized identity protocols) and where the real gaps are, see
 
 souk itself runs no agent logic — every agent is a "provider" that speaks `proto/souk.proto` and connects out to a souk. `souk-agent-sdk` is a convenience client for that contract, not the contract itself: any implementation (any language) is an equally valid provider. `agent-template/` and `providers/*` are examples, not the only way to build one.
 
+**Each of these is an independent project sharing a repo, not one coupled unit** — there's deliberately no shared workspace lockfile tying them together, so any one of them can be built, shipped, or forked on its own. `souk` never imports anything from `souk-agent-sdk` or vice versa; a provider only ever depends on `souk-agent-sdk` (a plain path/git dependency, not a workspace member). Each subdirectory has its own `pyproject.toml` and is synced independently: `cd souk && uv sync`, `cd agent-template && uv sync`, etc. — not one `uv sync` at the repo root covering everything.
+
 ## Running locally
 
 ```bash
@@ -64,17 +66,26 @@ docker compose up --build
 
 `config.example.yaml`'s agents use `model: custom-openai`, which resolves against `LLM_BASE_URL`/`LLM_MODEL_NAME`/`LLM_API_KEY` — any OpenAI-compatible endpoint (Azure AI, a self-hosted gateway, ...), not just api.openai.com. Set a plain `model: anthropic:claude-...` (or `openai:gpt-...`) instead to skip the custom endpoint entirely. See `pydantic_ai_agent.main.resolve_model`.
 
-To run the pydantic-ai example provider directly on the host against a souk (e.g. one started with `uv run python -m souk.server`) instead of via docker-compose:
+To run souk directly on the host instead of via docker-compose:
 
 ```bash
-AGENT_TEMPLATE_CONFIG=providers/pydantic-ai-agent/config.example.yaml uv run --env-file .env python -m pydantic_ai_agent.main
+cd souk && uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk/grpc_gen && uv run souk-server
+```
+
+To run the pydantic-ai example provider directly on the host against that souk:
+
+```bash
+cd providers/pydantic-ai-agent && uv sync \
+  && AGENT_TEMPLATE_CONFIG=config.example.yaml uv run --env-file ../../.env python -m pydantic_ai_agent.main
 ```
 
 Or run the minimal reference provider instead (no LLM, just echoes messages back — useful for exercising souk itself without an LLM key):
 
 ```bash
-uv run --package agent-template agent-template
+cd agent-template && uv sync && uv run agent-template
 ```
+
+(Both providers need `souk-agent-sdk`'s own gRPC stubs generated once — `cd souk-agent-sdk && uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen` — before their first `uv sync`, since they depend on it as a plain path dependency built from what's on disk.)
 
 `docker compose up --build` starts ParadeDB, souk (HTTP `:8000`, gRPC
 `:50051`), and one `agent-demo` container (the pydantic-ai provider)
@@ -113,11 +124,12 @@ exploratory testing of the registration/roster endpoints.
 
 ## Regenerating gRPC stubs
 
-After changing `proto/souk.proto`:
+After changing `proto/souk.proto`, regenerate both packages' stubs from
+the repo root:
 
 ```bash
 uv sync --group dev
-./scripts/gen_proto.sh
+uv run bash scripts/gen_proto.sh
 ```
 
 ## Provider identity

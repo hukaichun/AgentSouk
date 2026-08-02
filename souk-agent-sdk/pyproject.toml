@@ -5,11 +5,24 @@ description = "Agent-side SDK: registers a batch of AG-UI-shaped agents with a s
 requires-python = ">=3.12"
 dependencies = [
     "grpcio>=1.66",
+    # The generated grpc_gen/*_pb2.py stubs (see scripts/gen_proto.sh)
+    # import google.protobuf directly — this was previously only present
+    # by accident, pulled in transitively via the grpcio-tools dev
+    # dependency, which broke the moment a consumer (e.g. agent-template)
+    # synced this package without also syncing its dev group.
+    "protobuf>=5.26",
     "httpx>=0.27",
     "httpx-sse>=0.4",
     "cryptography>=42.0",
     "pyjwt>=2.9",
 ]
+
+# grpcio-tools to regenerate souk_agent_sdk/grpc_gen from
+# proto/souk.proto — see scripts/gen_proto.sh and this package's (or a
+# dependent's, e.g. agent-template's) Dockerfile. Not a runtime
+# dependency (only grpcio itself, above, is needed once stubs exist).
+[dependency-groups]
+dev = ["grpcio-tools>=1.66"]
 
 [build-system]
 requires = ["hatchling"]
