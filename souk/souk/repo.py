@@ -246,7 +246,16 @@ async def set_task_id(session: AsyncSession, run_id: str, task_id: str) -> None:
     )
 
 
-async def mark_run_status(session: AsyncSession, run_id: str, status: str) -> None:
+async def mark_run_status(
+    session: AsyncSession, run_id: str, status: str, metadata: dict[str, Any] | None = None
+) -> None:
+    """`metadata`, if given, is merged (shallow, jsonb `||`) into the run's
+    existing metadata rather than replacing it — used to attach pause
+    details (see souk/pause.py) when status='input-required'.
+
+    'input-required' deliberately has no completed_at: it isn't done, it's
+    paused — see the CHECK constraint's comment in souk/db.py.
+    """
     timestamp_col = {
         "running": "started_at",
         "completed": "completed_at",
@@ -254,15 +263,97 @@ async def mark_run_status(session: AsyncSession, run_id: str, status: str) -> No
         "cancelled": "completed_at",
     }.get(status)
     extra_set = f", {timestamp_col} = now()" if timestamp_col else ""
+    # CAST(...) rather than `:metadata::jsonb` — SQLAlchemy's bind-param
+    # scanner (at least on the psycopg dialect) fails to recognize a bind
+    # name immediately followed by a `::` cast and leaves it unbound.
+    metadata_set = ", metadata = metadata || CAST(:metadata AS jsonb)" if metadata else ""
+    params: dict[str, Any] = {"status": status, "run_id": str(run_id)}
+    if metadata:
+        params["metadata"] = json.dumps(metadata)
     # Every status change counts as activity (see thread_history.last_activity_at).
     await session.execute(
         text(
-            f"UPDATE thread_history SET status = :status, last_activity_at = now(){extra_set} "
+            f"UPDATE thread_history SET status = :status, last_activity_at = now(){extra_set}{metadata_set} "
             "WHERE run_id = :run_id AND kind = 'run_status'"
         ),
-        {"status": status, "run_id": str(run_id)},
+        params,
     )
     await session.commit()
+
+
+async def mark_run_resumed(session: AsyncSession, old_run_id: str, new_run_id: str) -> None:
+    """Closes out a paused ('input-required') run once a follow-up run has
+    been created to continue its thread — see api_agui.run_agent's/
+    api_a2a._start_run's resume path and grpc_server._resume_parent_run_if_waiting.
+    Must happen before (or as part of the same transaction as) creating
+    that follow-up run: otherwise both rows are briefly 'active'
+    simultaneously and get_active_run_for_thread's tie-break could still
+    surface the stale paused one instead of the new run.
+    """
+    await mark_run_status(session, old_run_id, "resumed", metadata={"resumedByRunId": new_run_id})
+
+
+async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
+    """The thread's run that's still 'open' in some sense — not yet
+    completed/failed/cancelled. Used to enforce a single active run per
+    thread: while one exists, a new call on the same thread must not
+    start a second, concurrent one (see api_agui.run_agent /
+    api_a2a._start_run) — that would fork the thread's otherwise linear
+    history with no clean way to merge it back.
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT * FROM thread_history
+                WHERE thread_id = :thread_id AND kind = 'run_status'
+                  AND status IN ('queued', 'running', 'input-required')
+                ORDER BY id DESC LIMIT 1
+                """
+            ),
+            {"thread_id": thread_id},
+        )
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
+    """Everything a caller needs to catch up on a thread without a live
+    stream: accumulated messages plus the current active run (if any).
+    Used both by GET /threads/{thread_id} (for a caller reconnecting after
+    its original SSE closed — e.g. once a run it was watching paused) and
+    to answer a duplicate call on a thread that already has an active run,
+    instead of starting a second one.
+    """
+    thread = await get_thread(session, thread_id)
+    if thread is None:
+        return None
+    messages = await get_thread_messages(session, thread_id)
+    active_run = await get_active_run_for_thread(session, thread_id)
+    return {"thread_id": thread_id, "messages": messages, "active_run": active_run}
+
+
+async def find_parent_run_waiting_on(session: AsyncSession, child_thread_id: str) -> dict[str, Any] | None:
+    """Finds the (at most one, by construction — see get_active_run_for_thread)
+    'input-required' run elsewhere that paused specifically waiting on
+    `child_thread_id` to resolve (see souk/pause.py's waitingOnThreadId).
+    Called when a run in `child_thread_id` completes, to decide whether to
+    auto-resume the waiting parent (see grpc_server._resume_parent_run).
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                SELECT * FROM thread_history
+                WHERE kind = 'run_status' AND status = 'input-required'
+                  AND metadata->>'waitingOnThreadId' = :child_thread_id
+                ORDER BY id DESC LIMIT 1
+                """
+            ),
+            {"child_thread_id": child_thread_id},
+        )
+    ).mappings().first()
+    return dict(row) if row else None
 
 
 async def touch_run_activity(session: AsyncSession, run_id: str) -> None:

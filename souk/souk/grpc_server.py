@@ -20,12 +20,23 @@ from collections.abc import AsyncIterator
 import grpc
 
 from souk import repo
+from souk.agui import build_run_agent_input
 from souk.broker import broker
 from souk.config import settings
 from souk.db import SessionLocal
 from souk.grpc_gen import souk_pb2, souk_pb2_grpc
+from souk.pause import is_pause_event
 
 logger = logging.getLogger("souk.grpc")
+
+
+def _last_assistant_text(messages: list[dict]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "assistant":
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+    return ""
 
 
 class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
@@ -92,6 +103,13 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         # never delivered — surfaced as "AgentSession: error handling
         # frame" by the caller in handle_incoming(), not swallowed.
         event = json.loads(json_payload)
+        if is_pause_event(event):
+            # Remembered for _finish_run, which decides the run's final
+            # status once the stream actually ends — a pause event isn't
+            # itself a stream terminator (see souk/pause.py).
+            state = broker.get(run_id)
+            if state is not None:
+                state.pause_payload = event.get("value") or {}
         seq = broker.next_seq(run_id)
         async with SessionLocal() as session:
             await repo.append_run_event(session, run_id, seq, event)
@@ -105,12 +123,70 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
     async def _finish_run(self, run_id: str, outbound: asyncio.Queue) -> None:
         state = broker.get(run_id)
         async with SessionLocal() as session:
-            await repo.mark_run_status(session, run_id, "completed")
+            if state is not None and state.pause_payload is not None:
+                await repo.mark_run_status(session, run_id, "input-required", metadata=state.pause_payload)
+            else:
+                await repo.mark_run_status(session, run_id, "completed")
         await broker.close_run(run_id)
         await outbound.put(
             souk_pb2.AgentEventEnvelope(
                 run_id=run_id, agent_name=state.agent_name if state else "", ack=True
             )
+        )
+        # A plain completion (not a pause) may be exactly what an outer
+        # thread's run was waiting on — see souk/pause.py's
+        # waitingOnThreadId. Best-effort: this only ever matters for
+        # sub-agent-style delegation, so a failure here is logged, not
+        # allowed to break the run that just legitimately finished.
+        if state is not None and state.pause_payload is None:
+            try:
+                await self._resume_parent_run_if_waiting(state.thread_id)
+            except Exception:
+                logger.exception("failed to check/resume parent run waiting on thread=%s", state.thread_id)
+
+    async def _resume_parent_run_if_waiting(self, child_thread_id: str) -> None:
+        async with SessionLocal() as session:
+            parent_run = await repo.find_parent_run_waiting_on(session, child_thread_id)
+            if parent_run is None:
+                return
+            parent_thread_id = parent_run["thread_id"]
+            child_messages = await repo.get_thread_messages(session, child_thread_id)
+            result_text = _last_assistant_text(child_messages)
+            forwarded_props = {
+                "resume": {"waitingOnThreadId": child_thread_id, "result": result_text}
+            }
+            created = await repo.create_run(
+                session,
+                parent_thread_id,
+                parent_run["agent_name"],
+                parent_run["protocol"],
+                {"resume": forwarded_props["resume"]},
+                metadata={"resumedFrom": child_thread_id},
+            )
+            new_run_id = created["run_id"]
+            # Closes out the paused run now that its successor exists —
+            # otherwise both rows briefly look 'active' and
+            # get_active_run_for_thread could still surface the stale
+            # paused one once this new run itself finishes.
+            await repo.mark_run_resumed(session, parent_run["run_id"], new_run_id)
+            parent_messages = await repo.get_thread_messages(session, parent_thread_id)
+            try:
+                input_json = build_run_agent_input(
+                    parent_thread_id, new_run_id, parent_messages, forwarded_props=forwarded_props
+                )
+            except ValueError:
+                logger.exception("failed to build resume RunAgentInput for thread=%s", parent_thread_id)
+                await repo.mark_run_status(session, new_run_id, "failed", metadata={"failureReason": "resume_build_failed"})
+                return
+            await session.commit()
+        broker.enqueue_run(
+            new_run_id, parent_run["agent_name"], parent_thread_id, input_json, parent_run["protocol"]
+        )
+        logger.info(
+            "auto-resumed run=%s on thread=%s after child thread=%s completed",
+            new_run_id,
+            parent_thread_id,
+            child_thread_id,
         )
 
 

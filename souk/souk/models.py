@@ -59,3 +59,11 @@ class RunAgentInput(BaseModel):
     # Free-form extension data for this run, stored on its thread_history
     # row (see souk/db.py) — not interpreted by souk itself.
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # Set to explicitly continue a thread whose active run paused
+    # (status='input-required', see souk/pause.py) — this is the only
+    # thing that's allowed to start a new run on a thread that already
+    # has one. A plain call without this flag on a paused thread is
+    # treated as a duplicate/accidental re-trigger and gets back the
+    # thread's current state instead of starting anything (see
+    # repo.get_active_run_for_thread's docstring).
+    resume: bool = False

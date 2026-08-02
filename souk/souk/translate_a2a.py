@@ -15,6 +15,34 @@ from typing import Any
 
 from souk.ids import new_id
 
+# souk's run statuses <-> A2A's own task states. 'input-required' is
+# already A2A vocabulary (a task legitimately paused waiting on more
+# input) — reused as-is rather than inventing a souk-specific name, see
+# souk/pause.py.
+RUN_STATUS_TO_A2A_STATE = {
+    "queued": "submitted",
+    "running": "working",
+    "input-required": "input-required",
+    # souk-specific bookkeeping status with no A2A equivalent (see
+    # souk/db.py) — from an external A2A caller's perspective its wait
+    # did resolve, just via a new run/task rather than this one, so
+    # 'completed' is the closest honest answer to tasks/get on this id.
+    "resumed": "completed",
+    "completed": "completed",
+    "failed": "failed",
+    "cancelled": "canceled",
+}
+
+
+def status_update_for_run_status(task_id: str, run_status: str) -> dict[str, Any]:
+    """Builds a TaskStatusUpdateEvent directly from a persisted run status,
+    for when there's no live AG-UI event stream to translate from (e.g.
+    a tasks/sendSubscribe call on a run that's already paused or finished
+    — see api_a2a.rpc's tasks/sendSubscribe handler).
+    """
+    state = RUN_STATUS_TO_A2A_STATE.get(run_status, "unknown")
+    return _status_update(task_id, state, final=state in ("completed", "failed", "canceled"))
+
 
 def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, Any]]:
     role = "assistant" if a2a_message.get("role") == "agent" else "user"
@@ -63,13 +91,6 @@ def _status_update(
 def build_task(
     task_id: str, agent_name: str, run_status: str, run_events: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    state_by_run_status = {
-        "queued": "submitted",
-        "running": "working",
-        "completed": "completed",
-        "failed": "failed",
-        "cancelled": "canceled",
-    }
     artifacts = [
         update["artifact"]
         for event in run_events
@@ -77,6 +98,6 @@ def build_task(
     ]
     return {
         "id": task_id,
-        "status": {"state": state_by_run_status.get(run_status, "unknown")},
+        "status": {"state": RUN_STATUS_TO_A2A_STATE.get(run_status, "unknown")},
         "artifacts": artifacts,
     }

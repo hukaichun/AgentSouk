@@ -26,7 +26,12 @@ from souk.agui import build_run_agent_input
 from souk.broker import END_OF_STREAM, broker
 from souk.config import settings
 from souk.db import get_session
-from souk.translate_a2a import a2a_message_to_agui_messages, agui_event_to_a2a_update, build_task
+from souk.translate_a2a import (
+    a2a_message_to_agui_messages,
+    agui_event_to_a2a_update,
+    build_task,
+    status_update_for_run_status,
+)
 
 router = APIRouter()
 
@@ -48,8 +53,20 @@ async def agent_card(agent_name: str, session: AsyncSession = Depends(get_sessio
     }
 
 
-async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tuple[str, str]:
-    """Queues a run from A2A tasks/send(Subscribe) params. Returns (task_id, run_id)."""
+async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tuple[str, str, bool]:
+    """Queues a run from A2A tasks/send(Subscribe) params.
+    Returns (task_id, run_id, is_new).
+
+    is_new=False means this session already had an active run (see
+    repo.get_active_run_for_thread) and nothing new was queued — the
+    caller gets back the *existing* task_id/run_id instead, which may
+    already be paused ('input-required') or even finished by the time
+    they look at it. This is what stops a caller from re-triggering an
+    already-pending sub-agent task a second time (see souk/pause.py):
+    a repeated tasks/send(Subscribe) on the same session becomes
+    idempotent — same task_id back, current real state — rather than
+    forking a second concurrent run on the same thread.
+    """
     agent = await repo.get_agent(session, agent_name)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"agent '{agent_name}' is not registered")
@@ -71,6 +88,12 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
         )
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+
+    active = await repo.get_active_run_for_thread(session, thread_id)
+    if active is not None and not (metadata.get("resume") and active["status"] == "input-required"):
+        return active["task_id"] or task_id, active["run_id"], False
+    resuming_run_id = active["run_id"] if active is not None else None
+
     messages = a2a_message_to_agui_messages(params.get("message", {}))
 
     created = await repo.create_run(
@@ -83,6 +106,8 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
         metadata=metadata,
     )
     run_id = created["run_id"]
+    if resuming_run_id is not None:
+        await repo.mark_run_resumed(session, resuming_run_id, run_id)
 
     try:
         agui_input_json = build_run_agent_input(thread_id, run_id, messages)
@@ -96,7 +121,7 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     await session.commit()
 
     broker.enqueue_run(run_id, agent_name, thread_id, agui_input_json, "a2a")
-    return task_id, run_id
+    return task_id, run_id, True
 
 
 @router.post("/a2a/{agent_name}/rpc")
@@ -107,24 +132,44 @@ async def rpc(agent_name: str, request: Request, session: AsyncSession = Depends
     rpc_id = body.get("id")
 
     if method == "tasks/send":
-        task_id, run_id = await _start_run(session, agent_name, params)
-        state = broker.get(run_id)
-        events: list[dict] = []
-        while True:
-            item = await state.output_queue.get()
-            if item is END_OF_STREAM:
-                break
-            events.append(item)
-        broker.forget(run_id)
+        task_id, run_id, is_new = await _start_run(session, agent_name, params)
+        state = broker.get(run_id) if is_new else None
+        if state is not None:
+            events: list[dict] = []
+            while True:
+                item = await state.output_queue.get()
+                if item is END_OF_STREAM:
+                    break
+                events.append(item)
+            broker.forget(run_id)
+        else:
+            # Not a fresh run: either already paused/finished, or this is
+            # a duplicate call racing a run that's live under a different
+            # requester — either way, nothing to wait on here. Report
+            # its current persisted state instead (see _start_run).
+            events = await repo.get_run_events(session, run_id)
         run = await repo.get_run(session, run_id)
         task = build_task(task_id, agent_name, run["status"] if run else "completed", events)
         return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
     if method == "tasks/sendSubscribe":
-        task_id, run_id = await _start_run(session, agent_name, params)
-        state = broker.get(run_id)
+        task_id, run_id, is_new = await _start_run(session, agent_name, params)
+        state = broker.get(run_id) if is_new else None
 
         async def event_stream():
+            if state is None:
+                # Same "not fresh" situation as tasks/send above, but
+                # streaming: emit one status update reflecting the
+                # current persisted state and close — there's nothing
+                # live to subscribe to.
+                run = await repo.get_run(session, run_id)
+                status = run["status"] if run else "completed"
+                update = status_update_for_run_status(task_id, status)
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"jsonrpc": "2.0", "id": rpc_id, "result": update}),
+                }
+                return
             try:
                 while True:
                     item = await state.output_queue.get()

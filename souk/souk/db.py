@@ -58,7 +58,19 @@ CREATE TABLE IF NOT EXISTS thread_history (
     -- kind = 'run_status'
     agent_name    TEXT,
     protocol      TEXT CHECK (protocol IN ('ag-ui', 'a2a')),
-    status        TEXT CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled')),
+    -- 'input-required': the run ended paused/resumable instead of
+    -- finished — a provider signaled this via the souk.pause CUSTOM
+    -- event convention (see souk/pause.py) rather than completing
+    -- normally. Excluded from the stall sweep (souk.health) the same
+    -- way other terminal statuses are, and from being re-triggered by
+    -- a duplicate call on the same thread (see repo.get_active_run_for_thread).
+    --
+    -- 'resumed': an 'input-required' run whose pause was resolved by a
+    -- follow-up run on the same thread (see repo.mark_run_resumed) —
+    -- distinct from 'completed' because this run itself never produced
+    -- a final result, it handed off to the run named in its
+    -- metadata.resumedByRunId. Terminal, like 'completed'/'failed'.
+    status        TEXT CHECK (status IN ('queued', 'running', 'input-required', 'resumed', 'completed', 'failed', 'cancelled')),
     input_json    JSONB,
     task_id       TEXT,   -- souk-assigned: task_<hex>, set only for protocol='a2a'
     started_at    TIMESTAMPTZ,

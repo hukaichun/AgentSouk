@@ -30,6 +30,10 @@ class RunState:
     protocol: str  # "ag-ui" | "a2a"
     output_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
     seq: int = 0
+    # Set by grpc_server._relay_event when it sees a souk.pause CUSTOM
+    # event (see souk/pause.py) — read by _finish_run to decide whether
+    # this run ended paused ('input-required') rather than 'completed'.
+    pause_payload: dict[str, Any] | None = None
 
 
 class RunBroker:
