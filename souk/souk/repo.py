@@ -36,7 +36,13 @@ async def register_agents(
     ).mappings().all()
     conflicting = [row["name"] for row in existing if row["public_key"] != public_key]
     if conflicting:
-        raise ValueError(f"agent name(s) already registered under a different key: {conflicting}")
+        raise ValueError(
+            f"agent name(s) already registered under a different key: {conflicting}. "
+            "If this is the same provider as before, its identity key (souk_identity.key by "
+            "default) didn't persist across restarts — check it's on a durable path/volume, "
+            "not the container's ephemeral filesystem. If it's genuinely a different provider, "
+            "pick different agent names."
+        )
 
     for agent in agents:
         card = {

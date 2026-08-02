@@ -26,7 +26,7 @@ from souk.agui import build_run_agent_input
 from souk.broker import END_OF_STREAM, broker
 from souk.config import settings
 from souk.db import get_session
-from souk.identity import a2a_call_signing_payload, is_timestamp_fresh, verify_signature
+from souk.identity import InvalidActorChain, verify_actor_chain
 from souk.translate_a2a import (
     a2a_message_to_agui_messages,
     agui_event_to_a2a_update,
@@ -83,29 +83,31 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     # any A2A client that doesn't know about it.
     parent_thread_id = metadata.get("parentThreadId")
 
-    # Optional, opt-in caller identity: a caller that holds an Ed25519 key
-    # (e.g. a provider signing with the same identity it registered
-    # with — see providers/pydantic-ai-agent's sub-agent tool) can prove
-    # who it is by including callerPublicKey/callerSignature. Unsigned
-    # calls are still allowed (souk doesn't mandate caller auth — see
-    # souk/identity.py's a2a_call_signing_payload docstring); a signature
-    # that's present but doesn't verify is rejected outright rather than
-    # silently treated as anonymous, since that's more likely tampering
-    # than a legitimate caller who simply chose not to sign.
-    verified_caller_name = None
-    caller_public_key = metadata.get("callerPublicKey")
-    caller_signature = metadata.get("callerSignature")
-    caller_timestamp = metadata.get("callerTimestamp")
-    if caller_public_key and caller_signature:
-        if not isinstance(caller_timestamp, int) or not is_timestamp_fresh(caller_timestamp):
-            raise HTTPException(status_code=401, detail="caller timestamp missing or too far from souk's clock")
-        payload = a2a_call_signing_payload(task_id, session_id, caller_timestamp)
-        if not verify_signature(caller_public_key, caller_signature, payload):
-            raise HTTPException(status_code=401, detail="invalid caller signature")
-        verified_caller_name = await repo.get_agent_name_for_public_key(session, caller_public_key)
+    # Optional, opt-in caller identity: params.metadata.actorChain is an
+    # ordered list of compact JWTs (see souk.identity.verify_actor_chain
+    # and souk_agent_sdk.identity.new_actor_chain/extend_actor_chain) —
+    # each hop signed by whoever performed it, chained together so the
+    # whole path (and who it's ultimately on behalf of) can be verified
+    # at once. Unsigned calls are still allowed (souk doesn't mandate
+    # caller auth); a chain that's present but fails to verify is
+    # rejected outright rather than silently treated as anonymous, since
+    # that's more likely tampering than a caller that simply chose not
+    # to send one.
+    verified_subject = None
+    verified_actors: list[dict] = []
+    actor_chain = metadata.get("actorChain")
+    if actor_chain:
+        try:
+            result = verify_actor_chain(actor_chain)
+        except InvalidActorChain as e:
+            raise HTTPException(status_code=401, detail=f"invalid actor chain: {e}") from e
+        verified_subject = result.subject
+        for public_key in result.actor_public_keys:
+            resolved_actor_name = await repo.get_agent_name_for_public_key(session, public_key)
+            verified_actors.append({"publicKey": public_key, "agentName": resolved_actor_name})
         metadata = {
             **metadata,
-            "verifiedCaller": {"agentName": verified_caller_name, "publicKey": caller_public_key},
+            "verifiedActorChain": {"subject": verified_subject, "actors": verified_actors},
         }
 
     try:
@@ -135,9 +137,14 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     if resuming_run_id is not None:
         await repo.mark_run_resumed(session, resuming_run_id, run_id)
 
+    # The raw chain (not just the resolved summary) is forwarded too — a
+    # provider that wants to delegate further itself needs the actual
+    # prior JWTs to extend the chain (see
+    # souk_agent_sdk.identity.extend_actor_chain), not just souk's
+    # human-readable summary of what it verified.
     forwarded_props = (
-        {"caller": {"agentName": verified_caller_name, "publicKey": caller_public_key}}
-        if verified_caller_name
+        {"caller": {"subject": verified_subject, "actors": verified_actors, "chain": actor_chain}}
+        if verified_subject is not None
         else None
     )
     try:

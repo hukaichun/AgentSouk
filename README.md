@@ -103,20 +103,28 @@ with a different key is rejected. This is the entirety of the identity
 model — no signup flow, no souk-side account database. See
 `souk/identity.py` and `souk_agent_sdk/identity.py`.
 
-An agent-to-agent call (e.g. a sub-agent delegation) can optionally be
-signed with the same identity, so the callee's souk can attribute it to a
-known registered agent instead of an anonymous caller — see
-`souk/identity.py`'s `a2a_call_signing_payload` and
-`souk_agent_sdk.a2a_client.call_agent_streaming`'s `signing_key` param.
-Caller identity for plain human/app callers (not agent-to-agent) isn't
-implemented — souk doesn't mandate caller auth at all, that's left as a
-per-agent policy decision (see the A2A Agent Card's own `authentication`
-field).
+A caller (e.g. a sub-agent delegation, or an "agency" agent acting on
+behalf of a human user it authenticated by its own means) can optionally
+prove its identity — and who it's ultimately acting on behalf of — via an
+**actor chain**: an ordered list of compact, individually-signed JWTs
+(`alg=EdDSA`), each hop's payload binding to the previous one's hash so the
+chain can't be reordered, truncated, or spliced. souk verifies the whole
+chain cryptographically but does *not* verify the claimed `subject` itself
+(e.g. that "employee_x" is real) — that's the vouching agent's own
+responsibility, the same way an OAuth token issuer is trusted to assert
+subject identity rather than the relying party re-deriving it. See
+`souk/identity.py`'s `verify_actor_chain` and
+`souk_agent_sdk.identity`'s `new_actor_chain`/`extend_actor_chain`, and
+`souk_agent_sdk.a2a_client.call_agent_streaming`'s `actor_chain` param.
+Caller identity for a plain human/app caller originating a chain (as
+opposed to an agent relaying/extending one) isn't implemented — souk
+doesn't mandate caller auth at all, that's left as a per-agent policy
+decision (see the A2A Agent Card's own `authentication` field).
 
-Every signed request also carries a timestamp souk checks against its own
-clock (`souk.identity.SIGNATURE_FRESHNESS_WINDOW_SECONDS`, 60s) — without
-it, anyone who merely observed one valid signed request on the wire could
-replay it indefinitely.
+Every signed request (registration, or an actor chain hop) also carries a
+timestamp souk checks against its own clock — without it, anyone who
+merely observed one valid signed request on the wire could replay it
+indefinitely.
 
 **None of this matters without TLS** — an unencrypted connection means
 session tokens and signed requests are visible to anyone on the network

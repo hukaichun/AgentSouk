@@ -13,6 +13,7 @@ dependencies = [
     "sse-starlette>=2.1",
     "ag-ui-protocol>=0.1.19",
     "cryptography>=42.0",
+    "pyjwt>=2.9",
 ]
 
 [project.scripts]

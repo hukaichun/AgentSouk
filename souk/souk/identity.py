@@ -31,7 +31,9 @@ import hashlib
 import hmac
 import json
 import time
+from dataclasses import dataclass
 
+import jwt
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -60,18 +62,101 @@ def registration_signing_payload(sdk_client_id: str, agent_names: list[str], tim
     return f"{sdk_client_id}:{','.join(sorted(agent_names))}:{timestamp}".encode()
 
 
-def a2a_call_signing_payload(task_id: str, session_id: str | None, timestamp: int) -> bytes:
-    """What a *caller* signs when it wants souk to know who it is on an
-    A2A tasks/send(Subscribe) call — see api_a2a._start_run. Currently
-    used for agent-to-agent calls (a provider signing with the same
-    identity key it registered with, see
-    providers/pydantic-ai-agent/pydantic_ai_agent/sub_agent_tool.py) but
-    nothing here is specific to that — any caller holding an Ed25519 key
-    could use the same mechanism. Doesn't cover the message text itself:
-    the goal is knowing *who* initiated this task, not tamper-proofing
-    its content.
+ACTOR_CHAIN_TTL_SECONDS = 60
+
+
+@dataclass
+class ChainResult:
+    subject: dict
+    # Ordered oldest -> newest, mirroring the input chain: actor_public_keys[0]
+    # is whoever originated the chain, actor_public_keys[-1] is the immediate
+    # caller souk received this request from.
+    actor_public_keys: list[str]
+
+
+class InvalidActorChain(ValueError):
+    pass
+
+
+def _hop_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def verify_actor_chain(chain: list[str]) -> ChainResult:
+    """Verifies a caller-supplied identity chain — see
+    souk_agent_sdk.identity.new_actor_chain/extend_actor_chain for how one
+    is built, and api_a2a._start_run for where this is called.
+
+    Each entry in `chain` is a standard compact JWT (alg=EdDSA), signed by
+    whoever performed that hop, so any off-the-shelf JWT library can
+    decode/verify an individual entry — this is deliberately *not* an
+    invented wire format of our own. What's souk-specific is only how
+    entries are chained together: each entry's payload carries
+    `prevHash` = sha256 of the previous entry's raw token string (or None
+    for the first), binding them into an ordered, tamper-evident sequence
+    that can't be reordered, truncated, or spliced with hops from a
+    different chain. This is intentionally simpler than RFC 8693 OAuth
+    Token Exchange's nested `act` claim, which assumes a central token
+    issuer re-signing at every hop — souk has no such issuer; each actor
+    signs for itself instead.
+
+    `subject` (who the chain is fundamentally about — see each hop's
+    payload) is carried unchanged through every entry and must match
+    across all of them; it does NOT have to correspond to a registered
+    souk identity or even to any of the actors that signed a hop — e.g.
+    an "agency" agent can originate a chain asserting
+    `subject={"type": "user", "id": "..."}` for a human it authenticated
+    by whatever means are its own business, and souk has no way to (and
+    makes no attempt to) verify that claim independently. What souk *does*
+    cryptographically verify is that every actor in the chain really is
+    who it claims (matching the same Ed25519-keypair-is-identity model as
+    provider registration), and that the chain hasn't been tampered with.
+
+    Raises InvalidActorChain with a human-readable reason on any failure;
+    never returns a partially-verified result.
     """
-    return f"{task_id}:{session_id or ''}:{timestamp}".encode()
+    if not chain:
+        raise InvalidActorChain("empty actor chain")
+
+    subject: dict | None = None
+    actor_public_keys: list[str] = []
+    prev_token: str | None = None
+
+    for i, token in enumerate(chain):
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+        except jwt.PyJWTError as e:
+            raise InvalidActorChain(f"hop {i}: unparseable token: {e}") from e
+
+        actor_public_key = unverified.get("actorPublicKey")
+        if not isinstance(actor_public_key, str):
+            raise InvalidActorChain(f"hop {i}: missing actorPublicKey")
+        try:
+            public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(actor_public_key))
+        except ValueError as e:
+            raise InvalidActorChain(f"hop {i}: malformed actorPublicKey: {e}") from e
+
+        try:
+            payload = jwt.decode(token, key=public_key, algorithms=["EdDSA"])
+        except jwt.PyJWTError as e:
+            raise InvalidActorChain(f"hop {i}: signature/expiry check failed: {e}") from e
+
+        expected_prev_hash = _hop_hash(prev_token) if prev_token is not None else None
+        if payload.get("prevHash") != expected_prev_hash:
+            raise InvalidActorChain(f"hop {i}: prevHash doesn't match — chain reordered, truncated, or spliced")
+
+        if i == 0:
+            subject = payload.get("subject")
+            if not isinstance(subject, dict):
+                raise InvalidActorChain("hop 0: missing subject")
+        elif payload.get("subject") != subject:
+            raise InvalidActorChain(f"hop {i}: subject changed partway through the chain")
+
+        actor_public_keys.append(actor_public_key)
+        prev_token = token
+
+    assert subject is not None
+    return ChainResult(subject=subject, actor_public_keys=actor_public_keys)
 
 
 def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:

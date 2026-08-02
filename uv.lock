@@ -2054,6 +2054,7 @@ dependencies = [
     { name = "grpcio" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic-settings" },
+    { name = "pyjwt" },
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "sse-starlette" },
     { name = "uvicorn", extra = ["standard"] },
@@ -2067,6 +2068,7 @@ requires-dist = [
     { name = "grpcio", specifier = ">=1.66" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
     { name = "pydantic-settings", specifier = ">=2.6" },
+    { name = "pyjwt", specifier = ">=2.9" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "sse-starlette", specifier = ">=2.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32" },
@@ -2081,6 +2083,7 @@ dependencies = [
     { name = "grpcio" },
     { name = "httpx" },
     { name = "httpx-sse" },
+    { name = "pyjwt" },
 ]
 
 [package.metadata]
@@ -2089,6 +2092,7 @@ requires-dist = [
     { name = "grpcio", specifier = ">=1.66" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "httpx-sse", specifier = ">=0.4" },
+    { name = "pyjwt", specifier = ">=2.9" },
 ]
 
 [[package]]

@@ -12,14 +12,13 @@ import os
 from collections.abc import AsyncIterator
 from typing import Any
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.ui.ag_ui import AGUIAdapter
 from souk_agent_sdk import AgentHandle, SoukAgentClient
-from souk_agent_sdk.identity import load_or_create_identity
+from souk_agent_sdk.identity import load_or_create_identity, new_actor_chain, public_key_hex
 
 from pydantic_ai_agent.config import AgentConfig, load_config
 from pydantic_ai_agent.sub_agent_tool import AgentDeps, build_sub_agent_tools
@@ -61,7 +60,7 @@ def build_pydantic_agent(cfg: AgentConfig) -> Agent:
     )
 
 
-def make_run_stream(agent: Agent, signing_key: Ed25519PrivateKey):
+def make_run_stream(agent: Agent, signing_key):
     async def run_stream(run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
         # `combined` is where the AG-UI adapter's own events AND any
         # sub-agent CUSTOM progress events (pushed by tools via AgentDeps)
@@ -70,8 +69,15 @@ def make_run_stream(agent: Agent, signing_key: Ed25519PrivateKey):
         # run_input is a real AG-UI RunAgentInput JSON dict from souk (see
         # souk.agui.build_run_agent_input) — camelCase wire keys.
         combined: asyncio.Queue = asyncio.Queue()
+        # Built fresh per run, not once at startup — chains are
+        # short-lived (souk_agent_sdk.identity.ACTOR_CHAIN_TTL_SECONDS),
+        # a process that lives longer than that would otherwise hand
+        # sub-agent calls an already-expired chain.
+        actor_chain = new_actor_chain(
+            signing_key, subject={"type": "agent", "publicKey": public_key_hex(signing_key)}
+        )
         deps = AgentDeps(
-            progress_queue=combined, thread_id=run_input.get("threadId"), signing_key=signing_key
+            progress_queue=combined, thread_id=run_input.get("threadId"), actor_chain=actor_chain
         )
 
         async def drain_adapter() -> None:
@@ -106,8 +112,8 @@ async def main() -> None:
     cfg = load_config(config_path)
 
     # Loaded once up front (not inside SoukAgentClient) so the exact same
-    # identity is available here for signing sub-agent calls (see
-    # sub_agent_tool.AgentDeps.signing_key) — SoukAgentClient loads the
+    # identity is available here for signing sub-agent actor chains (see
+    # sub_agent_tool.AgentDeps.actor_chain) — SoukAgentClient loads the
     # same on-disk key itself for registration, so both end up with
     # identical keys without this being passed between them.
     identity_key_path = os.environ.get("SOUK_IDENTITY_KEY_PATH", "souk_identity.key")

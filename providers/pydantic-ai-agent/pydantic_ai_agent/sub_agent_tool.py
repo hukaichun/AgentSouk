@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic_ai import RunContext, Tool
 from souk_agent_sdk.a2a_client import call_agent_streaming
 
@@ -26,13 +25,14 @@ class AgentDeps:
     # directly into the caller-visible output.
     progress_queue: asyncio.Queue
     thread_id: str | None = None
-    # This provider's own registered identity (see
-    # souk_agent_sdk.identity) — reused to sign outgoing sub-agent calls
-    # so the callee's souk can attribute them to a known, registered
-    # agent instead of an anonymous caller (see souk/identity.py's
-    # a2a_call_signing_payload). Optional: a sub-agent call without one
-    # is still allowed, just unattributed.
-    signing_key: Ed25519PrivateKey | None = None
+    # A fresh, single-hop identity chain asserting "this call comes from
+    # me" (see souk_agent_sdk.identity.new_actor_chain), built once from
+    # this provider's own registered key — reused for every sub-agent
+    # call in this run so the callee's souk can attribute the call to a
+    # known, registered agent instead of an anonymous caller (see
+    # souk/identity.py's verify_actor_chain). Optional: a sub-agent call
+    # without one is still allowed, just unattributed.
+    actor_chain: list[str] | None = None
 
 
 def build_sub_agent_tools(sub_agents: list[SubAgentConfig]) -> list[Tool]:
@@ -55,7 +55,7 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
             sub.a2a_url,
             message,
             metadata={"parentThreadId": main_thread_id} if main_thread_id else None,
-            signing_key=ctx.deps.signing_key,
+            actor_chain=ctx.deps.actor_chain,
         ):
             await ctx.deps.progress_queue.put(
                 {

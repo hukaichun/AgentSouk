@@ -35,7 +35,15 @@ services:
       - souk
     volumes:
       - ./providers/pydantic-ai-agent/config.example.yaml:/app/config.yaml:ro
+      # Without this, every rebuild/recreate of this container gets a
+      # fresh identity (see souk_agent_sdk/identity.py) — the *old* one
+      # still owns "greeter"/"translator" in souk's agents table, so the
+      # new container's very first registration attempt 409s trying to
+      # reclaim its own agent names. Persisting the key file is what
+      # makes `docker compose up --build` idempotent across restarts.
+      - agent_demo_identity:/data
     environment:
+      SOUK_IDENTITY_KEY_PATH: /data/souk_identity.key
       # config.example.yaml uses `model: custom-openai`, resolved by
       # pydantic_ai_agent.main.resolve_model against these — point them at
       # any OpenAI-compatible endpoint. Swap the model string to
@@ -48,3 +56,4 @@ services:
 
 volumes:
   paradedb_data:
+  agent_demo_identity:
