@@ -8,6 +8,21 @@ engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 SCHEMA_SQL = """
+-- A "provider" isn't a first-class registration concept the way an agent
+-- is — it's just whoever holds a given public_key, identified purely by
+-- that key (see agents.public_key). This table exists only to attach an
+-- optional, non-unique display label to that key for humans browsing the
+-- directory (souk-directory groups agents by public_key into
+-- "storefronts"). Deliberately not folded into `agents`: a provider's
+-- name is set once per key, not once per agent, and shouldn't get wiped
+-- out just because one particular registration batch didn't happen to
+-- pass it (see repo.upsert_provider_name).
+CREATE TABLE IF NOT EXISTS providers (
+    public_key    TEXT PRIMARY KEY,
+    display_name  TEXT NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS agents (
     -- souk-assigned: agent_<hex> (souk.ids.new_id) — the real routing/
     -- ownership key. `name` below is deliberately NOT this: it's a free,

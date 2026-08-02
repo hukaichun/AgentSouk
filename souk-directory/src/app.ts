@@ -26,6 +26,41 @@ export interface AgentRosterEntry {
   joined_at: string;
   last_seen_at: string;
   online: boolean;
+  public_key: string;
+  provider_name: string | null;
+}
+
+// Provider identity is purely the public_key (see souk/db.py's providers
+// table docstring) — provider_name is an optional label on top of it, not
+// a replacement. Groups a flat agent list into "who registered these."
+export interface ProviderGroup {
+  publicKey: string;
+  providerName: string | null;
+  agents: AgentRosterEntry[];
+}
+
+export function shortKey(publicKey: string): string {
+  return publicKey.length <= 14 ? publicKey : `${publicKey.slice(0, 8)}…${publicKey.slice(-6)}`;
+}
+
+export function groupByProvider(agents: AgentRosterEntry[]): ProviderGroup[] {
+  const groups = new Map<string, ProviderGroup>();
+  for (const agent of agents) {
+    let group = groups.get(agent.public_key);
+    if (!group) {
+      group = { publicKey: agent.public_key, providerName: agent.provider_name, agents: [] };
+      groups.set(agent.public_key, group);
+    }
+    group.agents.push(agent);
+  }
+  // Named storefronts first (alphabetically), anonymous ones after,
+  // ordered by key so the grouping is at least stable across reloads.
+  return [...groups.values()].sort((a, b) => {
+    if (!!a.providerName !== !!b.providerName) return a.providerName ? -1 : 1;
+    const an = a.providerName || a.publicKey;
+    const bn = b.providerName || b.publicKey;
+    return an.localeCompare(bn);
+  });
 }
 
 export function getSoukUrl(): string {

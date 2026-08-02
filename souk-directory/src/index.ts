@@ -1,6 +1,35 @@
-import { AgentRosterEntry, escapeHtml, fetchAgents, getSoukUrl, linkWithSouk, renderSoukBar } from "./app.js";
+import {
+  AgentRosterEntry,
+  escapeHtml,
+  fetchAgents,
+  getSoukUrl,
+  groupByProvider,
+  linkWithSouk,
+  renderSoukBar,
+  shortKey,
+} from "./app.js";
 
 let allAgents: AgentRosterEntry[] = [];
+
+function renderAgentCard(agent: AgentRosterEntry, soukUrl: string): string {
+  const href = linkWithSouk(`agent.html?id=${encodeURIComponent(agent.agent_id)}`, soukUrl);
+  const statusClass = agent.online ? "online" : "offline";
+  const statusLabel = agent.online ? "online" : "offline";
+  return `
+    <a class="card" href="${href}">
+      <div class="card-header">
+        <span class="status-dot ${statusClass}" title="${statusLabel}"></span>
+        <span class="card-name">${escapeHtml(agent.name)}</span>
+      </div>
+      <div class="card-meta">
+        ${statusLabel} · agent_id ${escapeHtml(agent.agent_id)} · joined ${new Date(
+    agent.joined_at
+  ).toLocaleDateString()}
+      </div>
+      <div class="card-desc">${escapeHtml(agent.description || "(no description)")}</div>
+    </a>
+  `;
+}
 
 function render(agents: AgentRosterEntry[]): void {
   const container = document.getElementById("agents")!;
@@ -9,24 +38,25 @@ function render(agents: AgentRosterEntry[]): void {
     container.innerHTML = `<p class="empty-state">No agents match.</p>`;
     return;
   }
-  container.innerHTML = agents
-    .map((agent) => {
-      const href = linkWithSouk(`agent.html?id=${encodeURIComponent(agent.agent_id)}`, soukUrl);
-      const statusClass = agent.online ? "online" : "offline";
-      const statusLabel = agent.online ? "online" : "offline";
+  container.innerHTML = groupByProvider(agents)
+    .map((group) => {
+      const onlineCount = group.agents.filter((a) => a.online).length;
+      const title = group.providerName
+        ? escapeHtml(group.providerName)
+        : `<span class="stall-anon">unnamed provider</span>`;
       return `
-        <a class="card" href="${href}">
-          <div class="card-header">
-            <span class="status-dot ${statusClass}" title="${statusLabel}"></span>
-            <span class="card-name">${escapeHtml(agent.name)}</span>
+        <section class="stall">
+          <div class="stall-header">
+            <span class="stall-name">${title}</span>
+            <span class="stall-key" title="${escapeHtml(group.publicKey)}">${escapeHtml(
+        shortKey(group.publicKey)
+      )}</span>
+            <span class="stall-count">${group.agents.length} agent${group.agents.length === 1 ? "" : "s"} · ${onlineCount} online</span>
           </div>
-          <div class="card-meta">
-            ${statusLabel} · agent_id ${escapeHtml(agent.agent_id)} · joined ${new Date(
-        agent.joined_at
-      ).toLocaleDateString()}
+          <div class="stall-cards">
+            ${group.agents.map((agent) => renderAgentCard(agent, soukUrl)).join("")}
           </div>
-          <div class="card-desc">${escapeHtml(agent.description || "(no description)")}</div>
-        </a>
+        </section>
       `;
     })
     .join("");

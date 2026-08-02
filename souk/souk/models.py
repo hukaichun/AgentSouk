@@ -27,6 +27,13 @@ class AgentRegistration(BaseModel):
 class RegisterBatchRequest(BaseModel):
     sdk_client_id: str
     agents: list[AgentRegistration]
+    # Optional storefront label for this public_key, shown when
+    # souk-directory groups agents by provider — see souk/db.py's
+    # providers table. Purely descriptive (like AgentRegistration.
+    # description below), so — like description — it's not part of what
+    # registration_signing_payload covers; only which names are being
+    # claimed needs to be tamper-proof.
+    provider_name: str | None = Field(default=None, max_length=128)
     # Ed25519 public key (hex) this provider's identity is backed by, and
     # a signature (hex) over souk.identity.registration_signing_payload —
     # proves possession of the matching private key. See
@@ -54,6 +61,12 @@ class AgentRosterEntry(BaseModel):
     joined_at: datetime
     last_seen_at: datetime
     online: bool
+    # Whoever holds this key owns this agent — see AgentRosterEntry's
+    # module docstring / repo.register_agents. provider_name is the
+    # optional storefront label for that key (souk.db's providers table),
+    # None if that public_key never set one.
+    public_key: str
+    provider_name: str | None = None
 
 
 class RosterResponse(BaseModel):

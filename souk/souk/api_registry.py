@@ -24,6 +24,7 @@ async def register_agents(
         body.sdk_client_id,
         body.public_key,
         [agent.model_dump() for agent in body.agents],
+        provider_name=body.provider_name,
     )
 
     agents = await repo.list_agents(session)

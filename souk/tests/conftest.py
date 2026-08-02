@@ -28,7 +28,7 @@ from souk.db import SessionLocal, bootstrap_schema, engine
 from souk.identity import registration_signing_payload
 from souk.server import app
 
-TRUNCATE_SQL = "TRUNCATE agents, threads, thread_history, run_events RESTART IDENTITY CASCADE"
+TRUNCATE_SQL = "TRUNCATE providers, agents, threads, thread_history, run_events RESTART IDENTITY CASCADE"
 
 
 @pytest.fixture(scope="session", autouse=True)
