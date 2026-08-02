@@ -210,3 +210,43 @@ a {
   margin-bottom: 1rem;
   font-size: 0.9rem;
 }
+
+.call-chain {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.call-chain-title {
+  font-size: 0.75rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 0.5rem;
+}
+
+.call-chain-tree,
+.call-chain-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.call-chain-tree ul {
+  margin-left: 1rem;
+  padding-left: 0.75rem;
+  border-left: 1px dashed var(--border);
+}
+
+.call-chain-tree li {
+  padding: 0.15rem 0;
+  font-size: 0.9rem;
+}
+
+.call-chain-tree .agent-name::before {
+  content: "↳ ";
+  color: var(--muted);
+}
+
+.call-chain-tree > li > .agent-name::before {
+  content: "";
+}

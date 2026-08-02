@@ -45,6 +45,15 @@ app.add_middleware(
     allow_origins=settings.cors_allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
+    # Browsers only expose CORS-safelisted response headers to JS by
+    # default (Content-Type, Cache-Control, ...) — a cross-origin caller
+    # like souk-directory (:8080 fetching :8000) silently gets `null` back
+    # from resp.headers.get("X-Souk-Thread-Id") without this, even though
+    # curl (no CORS enforcement) sees the header just fine. That silently
+    # broke thread continuity across turns in the browser UI: every send
+    # looked like it had no thread_id yet, so every message started a
+    # brand-new thread instead of continuing the conversation.
+    expose_headers=["X-Souk-Thread-Id", "X-Souk-Run-Id"],
 )
 app.include_router(api_registry.router)
 app.include_router(api_agui.router)

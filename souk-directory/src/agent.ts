@@ -1,9 +1,18 @@
 import { AgentRosterEntry, escapeHtml, fetchAgents, linkWithSouk, renderSoukBar, streamSse } from "./app.js";
 
+interface ThreadTreeNode {
+  thread_id: string;
+  agent_id: string;
+  children: ThreadTreeNode[];
+}
+
 const params = new URLSearchParams(window.location.search);
 const agentId = params.get("id");
 let threadId: string | null = null;
 let currentAssistantEl: HTMLElement | null = null;
+// agent_id -> display name, from the roster fetched once at page load —
+// used to label the call-chain tree with names instead of raw agent_ids.
+const agentNameById = new Map<string, string>();
 // Keyed by the sub-agent's A2A task id — one accumulating bubble per
 // delegated call, so a streamed multi-hop response reads like the main
 // assistant's own streaming text instead of one raw JSON blob per event.
@@ -26,6 +35,9 @@ async function loadAgentInfo(soukUrl: string): Promise<AgentRosterEntry | null> 
   backLink.href = linkWithSouk("index.html", soukUrl);
 
   const agents = await fetchAgents(soukUrl);
+  for (const a of agents) {
+    agentNameById.set(a.agent_id, a.name);
+  }
   const agent = agents.find((a) => a.agent_id === agentId);
   if (!agent) {
     document.getElementById("agent-title")!.textContent = "Agent not found";
@@ -108,6 +120,36 @@ function handleAguiEvent(event: any): void {
   }
 }
 
+function renderTreeNode(node: ThreadTreeNode): string {
+  const name = escapeHtml(agentNameById.get(node.agent_id) || node.agent_id);
+  const children = node.children.length
+    ? `<ul>${node.children.map((child) => renderTreeNode(child)).join("")}</ul>`
+    : "";
+  return `<li><span class="agent-name">${name}</span>${children}</li>`;
+}
+
+async function renderCallChain(soukUrl: string, forThreadId: string): Promise<void> {
+  const container = document.getElementById("call-chain")!;
+  try {
+    const resp = await fetch(`${soukUrl}/threads/${encodeURIComponent(forThreadId)}/tree`);
+    if (!resp.ok) return;
+    const root: ThreadTreeNode = await resp.json();
+    // Only worth showing once there's an actual delegation — a plain
+    // agent with no sub-calls would otherwise render a pointless
+    // single-node tree on every reply.
+    if (root.children.length === 0) {
+      container.innerHTML = "";
+      return;
+    }
+    container.innerHTML =
+      `<div class="call-chain-title">call chain</div>` +
+      `<ul class="call-chain-tree">${renderTreeNode(root)}</ul>`;
+  } catch {
+    // Best-effort UI sugar — a failed fetch here shouldn't disrupt the
+    // chat itself, which already succeeded by the time this runs.
+  }
+}
+
 async function sendMessage(soukUrl: string, text: string): Promise<void> {
   const sendBtn = document.getElementById("chat-send") as HTMLButtonElement;
   sendBtn.disabled = true;
@@ -144,6 +186,9 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
       return;
     }
     await streamSse(resp, handleAguiEvent);
+    if (threadId) {
+      await renderCallChain(soukUrl, threadId);
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     appendMessage("error", `request failed: ${message}`, "error");
