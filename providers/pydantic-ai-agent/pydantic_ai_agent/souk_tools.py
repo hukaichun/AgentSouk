@@ -74,7 +74,7 @@ Then open `http://localhost:8080` for the Web Directory & Live Chat UI!
 
 
 def build_souk_tools(souk_http_url: str) -> list[Tool]:
-    async def list_souk_agents(include_offline: bool = True, **_kwargs) -> str:
+    async def list_souk_agents(include_offline: bool = True) -> str:
         """List agents currently registered on this souk, with their
         online status and description — use this to answer "what agents
         are here" / "is X online" / "what does X do" instead of guessing.
@@ -99,7 +99,7 @@ def build_souk_tools(souk_http_url: str) -> list[Tool]:
         except Exception as e:
             return f"Error listing souk agents: {e}"
 
-    async def get_agent_card(agent_name_or_id: str, **_kwargs) -> str:
+    async def get_agent_card(agent_name_or_id: str) -> str:
         """Fetch the detailed Agent Card for a specific agent by name or agent_id.
         Use this when a user asks about specific capabilities, parameters, skills,
         or schema details of an agent on this souk.
@@ -131,7 +131,7 @@ def build_souk_tools(souk_http_url: str) -> list[Tool]:
         except Exception as e:
             return f"Error fetching agent card for '{agent_name_or_id}': {e}"
 
-    async def get_souk_stats(**_kwargs) -> str:
+    async def get_souk_stats(query: str = "") -> str:
         """Get real-time operational statistics and health status of this souk gateway.
         Use this to answer questions about platform status, total registered agents, or online agent count.
         """
@@ -159,7 +159,7 @@ def build_souk_tools(souk_http_url: str) -> list[Tool]:
         except Exception as e:
             return f"Error fetching souk statistics: {e}"
 
-    async def get_souk_developer_guide(topic: str = "quickstart", **_kwargs) -> str:
+    async def get_souk_developer_guide(topic: str = "quickstart") -> str:
         """Get developer onboarding guides and documentation for Agent Souk.
         Allowed topics: 'quickstart', 'architecture', 'how_to_connect', 'identity'.
         Use this when users or developers ask how Souk works or how to build and connect their own agents.
@@ -179,20 +179,24 @@ def build_souk_tools(souk_http_url: str) -> list[Tool]:
             list_souk_agents,
             name="list_souk_agents",
             description="List every agent currently registered on this souk, with online status and description.",
+            max_retries=3,
         ),
         Tool(
             get_agent_card,
             name="get_agent_card",
             description="Fetch the detailed Agent Card (capabilities, skills, schemas) for a specific agent on this souk.",
+            max_retries=3,
         ),
         Tool(
             get_souk_stats,
             name="get_souk_stats",
             description="Get real-time operational statistics and health status of this souk gateway.",
+            max_retries=3,
         ),
         Tool(
             get_souk_developer_guide,
             name="get_souk_developer_guide",
             description="Get developer onboarding guides and documentation for Agent Souk (topics: quickstart, architecture, how_to_connect, identity).",
+            max_retries=3,
         ),
     ]
