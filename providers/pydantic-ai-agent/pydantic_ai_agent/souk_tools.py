@@ -24,6 +24,8 @@ aware this tool exists.
 from __future__ import annotations
 
 import json
+from typing import Literal
+
 import httpx
 from pydantic_ai import Tool
 
@@ -131,9 +133,11 @@ def build_souk_tools(souk_http_url: str) -> list[Tool]:
         except Exception as e:
             return f"Error fetching agent card for '{agent_name_or_id}': {e}"
 
-    async def get_souk_stats(query: str = "") -> str:
+    async def get_souk_stats(category: Literal["all", "online", "offline"] = "all") -> str:
         """Get real-time operational statistics and health status of this souk gateway.
-        Use this to answer questions about platform status, total registered agents, or online agent count.
+
+        Args:
+            category: Filter category. Default is 'all'.
         """
         try:
             async with httpx.AsyncClient() as client:
@@ -152,7 +156,7 @@ def build_souk_tools(souk_http_url: str) -> list[Tool]:
                 f"- **Online Agents**: {online_agents}",
                 f"- **Offline Agents**: {offline_agents}",
             ]
-            if online_agents > 0:
+            if online_agents > 0 and str(category).lower() in ("all", "online"):
                 online_names = ", ".join([a["name"] for a in agents_data if a.get("online")])
                 lines.append(f"- **Currently Online**: {online_names}")
             return "\n".join(lines)
