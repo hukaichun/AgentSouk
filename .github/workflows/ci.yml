@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Mirrors the repo's own "independent projects" shape (see README's
+# Components section) — one job per subproject rather than one monolithic
+# build, since any one of them can be built/shipped/forked on its own.
+jobs:
+  souk:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: souk
+          POSTGRES_PASSWORD: souk
+          POSTGRES_DB: souk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk
+      - run: uv run bash ../scripts/gen_proto.sh souk/grpc_gen
+        working-directory: souk
+      - run: uv run pytest -v
+        working-directory: souk
+        env:
+          SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
+
+  souk-agent-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk-agent-sdk
+      - run: uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+        working-directory: souk-agent-sdk
+      # No test suite here yet (see souk/tests/ for where the coverage
+      # actually is) — this is an import-sanity check that the SDK's
+      # public surface still loads cleanly.
+      - run: uv run python -c "import souk_agent_sdk.client, souk_agent_sdk.a2a_client, souk_agent_sdk.identity"
+        working-directory: souk-agent-sdk
+
+  # Exercises souk-agent-sdk as a real dependency (path source, not just
+  # its own package) — catches accidental breakage of its public surface
+  # from a consumer's point of view, without needing an LLM key to run a
+  # full agent.
+  agent-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+        working-directory: souk-agent-sdk
+      - run: uv sync
+        working-directory: agent-template
+      - run: uv run python -c "import agent_template.main"
+        working-directory: agent-template
+
+  pydantic-ai-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+        working-directory: souk-agent-sdk
+      - run: uv sync
+        working-directory: providers/pydantic-ai-agent
+      - run: uv run python -c "import pydantic_ai_agent.main"
+        working-directory: providers/pydantic-ai-agent
+
+  souk-directory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install
+        working-directory: souk-directory
+      - run: npm run build
+        working-directory: souk-directory

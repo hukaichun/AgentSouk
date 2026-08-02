@@ -19,3 +19,9 @@ souk/souk/grpc_gen/*_pb2_grpc.py
 souk-agent-sdk/souk_agent_sdk/grpc_gen/*_pb2.py
 souk-agent-sdk/souk_agent_sdk/grpc_gen/*_pb2.pyi
 souk-agent-sdk/souk_agent_sdk/grpc_gen/*_pb2_grpc.py
+
+# souk-directory: compiled output + npm deps, regenerate via `npm run build`.
+souk-directory/node_modules/
+souk-directory/dist/
+
+.pytest_cache/

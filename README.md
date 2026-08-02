@@ -1,5 +1,7 @@
 # Agent Souk
 
+[![CI](https://github.com/hukaichun/AgentSouk/actions/workflows/ci.yml/badge.svg)](https://github.com/hukaichun/AgentSouk/actions/workflows/ci.yml)
+
 A **souk** is a public-IP server that agents without a public IP (behind
 NAT, running locally, on your own laptop, ...) connect out to and become
 reachable through. Once joined, humans or other agents can interact with
@@ -34,13 +36,44 @@ non-issue, so the interesting work stays in the agents themselves.
 **Where this stands today**: the core relay (outbound connectivity, dual
 AG-UI/A2A protocol support, durable run/thread history, HITL and
 async-task pause/resume, self-sovereign provider and caller identity) is
-built and tested — see [Provider identity](#provider-identity) below. What
-the vision still needs — letting a souk you've never heard of be
-discoverable and trustworthy, real payment rails, a human-browsable
-directory — is not built yet; see [Roadmap](#roadmap). For how this
+built and tested — see [Provider identity](#provider-identity) below.
+`souk-directory/` gives a single souk a human-browsable directory and
+live chat UI. What the vision still needs — letting a souk you've never
+heard of be discoverable and trustworthy in the first place, real payment
+rails — is not built yet; see [Roadmap](#roadmap). For how this
 compares to nearby projects (tunneling tools, agent marketplaces,
 decentralized identity protocols) and where the real gaps are, see
 [`docs/prior-art.md`](docs/prior-art.md).
+
+## How it works
+
+```mermaid
+graph TD
+    Human([Human / AG-UI client]) -->|"POST /agui/... (SSE)"| HTTP
+    Caller([Other agent / A2A caller]) -->|"POST /a2a/.../rpc (JSON-RPC)"| HTTP
+
+    subgraph SoukProcess["souk (single process)"]
+        HTTP["HTTP surface — FastAPI"]
+        GRPC["gRPC surface — PollForWork / AgentSession"]
+        Broker["in-process broker (asyncio)<br/>not shared across replicas"]
+        HTTP --> Broker
+        GRPC --> Broker
+    end
+
+    SoukProcess --> DB[(Postgres / ParadeDB<br/>roster, threads, run history)]
+
+    GRPC <-->|"outbound-only gRPC<br/>poll + persistent stream"| SDK[souk-agent-sdk]
+    SDK --> AgentA[Your Agent A]
+    SDK --> AgentB[Your Agent B]
+```
+
+Neither `AgentA` nor `AgentB` accept inbound connections — souk never
+pushes to them. `souk-agent-sdk` polls for work and, once a run is
+waiting, opens the persistent `AgentSession` gRPC stream itself; that's
+the entire reachability trick. The broker is deliberately drawn as
+in-process, not behind Postgres — dispatch state doesn't survive a souk
+restart or scale past one replica today, see
+[Horizontal scaling of souk](#roadmap).
 
 ## Components
 
@@ -52,6 +85,7 @@ decentralized identity protocols) and where the real gaps are, see
 | `souk-client-sdk/` | Caller-side SDK: thin AG-UI client for talking to an agent through a souk |
 | `agent-template/` | Minimal reference provider: the smallest possible `souk_agent_sdk.AgentHandle` implementation, no framework attached. Copy this to start a new provider from scratch |
 | `providers/` | Fuller example providers (see `providers/README.md`) — currently `pydantic-ai-agent/`, a YAML-configured pydantic-ai agent runner with MCP tool support and A2A sub-agent delegation |
+| `souk-directory/` | Human-browsable directory + live chat for a single souk: TypeScript compiled to plain ES modules, served static — a pure browser client of souk's public HTTP API, no backend of its own (see `souk-directory/README.md`) |
 
 souk itself runs no agent logic — every agent is a "provider" that speaks `proto/souk.proto` and connects out to a souk. `souk-agent-sdk` is a convenience client for that contract, not the contract itself: any implementation (any language) is an equally valid provider. `agent-template/` and `providers/*` are examples, not the only way to build one.
 
@@ -88,10 +122,13 @@ cd agent-template && uv sync && uv run agent-template
 (Both providers need `souk-agent-sdk`'s own gRPC stubs generated once — `cd souk-agent-sdk && uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen` — before their first `uv sync`, since they depend on it as a plain path dependency built from what's on disk.)
 
 `docker compose up --build` starts ParadeDB, souk (HTTP `:8000`, gRPC
-`:50051`), and one `agent-demo` container (the pydantic-ai provider)
-running two agents from `providers/pydantic-ai-agent/config.example.yaml`:
+`:50051`), one `agent-demo` container (the pydantic-ai provider) running
+two agents from `providers/pydantic-ai-agent/config.example.yaml`:
 `greeter` (which can delegate to a sub-agent) and `translator` (the
-sub-agent it calls via A2A).
+sub-agent it calls via A2A) — and `souk-directory` (`:8080`). Open
+`http://localhost:8080/index.html` for a browsable list of `greeter`/
+`translator` and a live chat UI, no setup needed (see
+`souk-directory/README.md`).
 
 ## Verifying the flow
 
@@ -139,11 +176,15 @@ A provider's identity is its Ed25519 keypair, not a souk-issued account —
 `souk_identity.key`; back it up like any other credential, it's gitignored
 by default). `/agents/register` requires a signature proving possession of
 the matching private key, and every gRPC call afterwards requires the
-bearer token issued in that response. First registration of an agent name
-binds it to that key; anyone else attempting to register the same name
-with a different key is rejected. This is the entirety of the identity
-model — no signup flow, no souk-side account database. See
-`souk/identity.py` and `souk_agent_sdk/identity.py`.
+bearer token issued in that response. Registering under a `name` doesn't
+grant exclusive ownership of that name — it isn't unique across identities
+(multiple keys may register the same one) — what a key owns is the
+souk-assigned `agent_id` for each (its own public key, name) pair it
+registers; re-registering the same name with the same key returns the
+same `agent_id` back, a different key registering that name gets an
+unrelated one. This is the entirety of the identity model — no signup
+flow, no souk-side account database. See `souk/identity.py` and
+`souk_agent_sdk/identity.py`.
 
 A caller (e.g. a sub-agent delegation, or an "agency" agent acting on
 behalf of a human user it authenticated by its own means) can optionally
@@ -199,8 +240,6 @@ it's already being worked on.
 - **Payments** — almost certainly by integrating an existing rail
   ([x402](https://www.x402.org/) is the leading candidate given it's
   HTTP-native) rather than building billing infrastructure from scratch.
-- **A human-browsable directory** — souk only exposes `GET /agents` today;
-  actually finding agents worth calling needs something more than an API.
 - **Caller-side identity convenience** — the actor-chain mechanism (see
   [Provider identity](#provider-identity)) already lets any Ed25519
   keypair holder identify itself, agent or human; `souk-client-sdk`

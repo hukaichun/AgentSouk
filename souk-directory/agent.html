@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>souk directory — agent</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="souk-bar"></div>
+  <a class="back-link" href="#" id="back-link">&larr; back to directory</a>
+  <h2 id="agent-title">Loading…</h2>
+  <p id="agent-meta" class="card-meta"></p>
+  <div id="offline-banner"></div>
+  <div id="chat-log" class="chat-log"></div>
+  <form id="chat-form" class="chat-form">
+    <input id="chat-input" type="text" placeholder="Message this agent..." autocomplete="off" />
+    <button id="chat-send" type="submit">Send</button>
+  </form>
+
+  <script type="module" src="dist/agent.js"></script>
+</body>
+</html>

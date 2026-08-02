@@ -36,11 +36,15 @@ services:
     volumes:
       - ./providers/pydantic-ai-agent/config.example.yaml:/app/config.yaml:ro
       # Without this, every rebuild/recreate of this container gets a
-      # fresh identity (see souk_agent_sdk/identity.py) — the *old* one
-      # still owns "greeter"/"translator" in souk's agents table, so the
-      # new container's very first registration attempt 409s trying to
-      # reclaim its own agent names. Persisting the key file is what
-      # makes `docker compose up --build` idempotent across restarts.
+      # fresh identity (see souk_agent_sdk/identity.py) — the *old* one's
+      # "greeter"/"translator" agent_ids are left behind as orphans (souk
+      # doesn't 409 a fresh key registering the same names, it just mints
+      # new, unrelated agent_ids for them — see souk/db.py's
+      # UNIQUE(public_key, name)), and a second "translator" existing makes
+      # the name-based route this demo's sub_agents config uses
+      # (/a2a/translator/rpc) ambiguous (409) instead of resolving to the
+      # live one. Persisting the key file is what makes
+      # `docker compose up --build` idempotent across restarts.
       - agent_demo_identity:/data
     environment:
       SOUK_IDENTITY_KEY_PATH: /data/souk_identity.key
@@ -53,6 +57,17 @@ services:
       LLM_MODEL_NAME: "${LLM_MODEL_NAME}"
       LLM_API_KEY: "${LLM_API_KEY}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+
+  # Human-browsable directory + chat UI for the `souk` service above — see
+  # souk-directory/README.md. Static output only (compiled TypeScript +
+  # HTML/CSS), no runtime dependency on souk beyond its public HTTP API.
+  souk-directory:
+    build:
+      context: souk-directory
+    ports:
+      - "8080:8080"
+    depends_on:
+      - souk
 
 volumes:
   paradedb_data:
