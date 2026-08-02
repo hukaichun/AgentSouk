@@ -17,8 +17,33 @@ from souk.config import settings
 from souk.ids import new_id
 
 
+async def upsert_provider_name(session: AsyncSession, public_key: str, display_name: str) -> None:
+    """Sets/updates this public_key's storefront label — see
+    souk/db.py's providers table notes. Only called when a registration
+    batch actually includes `provider_name`; register_agents leaves any
+    existing label untouched otherwise (a registration that doesn't
+    happen to pass one isn't "no name", it's "didn't say").
+    """
+    await session.execute(
+        text(
+            """
+            INSERT INTO providers (public_key, display_name, updated_at)
+            VALUES (:public_key, :display_name, now())
+            ON CONFLICT (public_key) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                updated_at = now()
+            """
+        ),
+        {"public_key": public_key, "display_name": display_name},
+    )
+
+
 async def register_agents(
-    session: AsyncSession, sdk_client_id: str, public_key: str, agents: list[dict[str, Any]]
+    session: AsyncSession,
+    sdk_client_id: str,
+    public_key: str,
+    agents: list[dict[str, Any]],
+    provider_name: str | None = None,
 ) -> dict[str, str]:
     """Upserts this batch under `public_key`, then de-lists (soft-delete)
     anything previously owned by this same `public_key` that's absent from
@@ -35,6 +60,9 @@ async def register_agents(
 
     Returns {name: agent_id} for this batch.
     """
+    if provider_name is not None:
+        await upsert_provider_name(session, public_key, provider_name)
+
     names = [agent["name"] for agent in agents]
     existing = (
         await session.execute(
@@ -163,10 +191,12 @@ async def list_agents(session: AsyncSession) -> list[dict[str, Any]]:
         await session.execute(
             text(
                 """
-                SELECT agent_id, name, agent_card, joined_at, last_seen_at
-                FROM agents
-                WHERE delisted_at IS NULL AND last_seen_at >= :stale_cutoff
-                ORDER BY name
+                SELECT a.agent_id, a.name, a.agent_card, a.joined_at, a.last_seen_at,
+                       a.public_key, p.display_name AS provider_name
+                FROM agents a
+                LEFT JOIN providers p ON p.public_key = a.public_key
+                WHERE a.delisted_at IS NULL AND a.last_seen_at >= :stale_cutoff
+                ORDER BY a.name
                 """
             ),
             {"stale_cutoff": stale_cutoff},
@@ -181,6 +211,8 @@ async def list_agents(session: AsyncSession) -> list[dict[str, Any]]:
             "joined_at": row["joined_at"],
             "last_seen_at": row["last_seen_at"],
             "online": is_agent_online(row["last_seen_at"]),
+            "public_key": row["public_key"],
+            "provider_name": row["provider_name"],
         }
         for row in rows
     ]

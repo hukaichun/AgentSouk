@@ -56,8 +56,15 @@ class SoukAgentClient:
         max_concurrent_runs: int | None = None,
         identity_key_path: str = "souk_identity.key",
         ca_cert_path: str | None = None,
+        provider_name: str | None = None,
     ) -> None:
         self.souk_http_url = souk_http_url.rstrip("/")
+        # Optional storefront label for this provider's public_key,
+        # shown when souk-directory groups agents by provider — see
+        # souk/db.py's providers table. Purely descriptive; unset means
+        # "didn't say", not "cleared" (souk leaves any previously-set
+        # name alone rather than blanking it — see repo.register_agents).
+        self.provider_name = provider_name
         self.souk_grpc_url = souk_grpc_url
         # Path to a CA (or self-signed) cert this souk's TLS certificate
         # should be verified against — leave unset only for plaintext
@@ -113,6 +120,7 @@ class SoukAgentClient:
                     "public_key": public_key_hex(self._identity),
                     "signature": sign(self._identity, payload),
                     "timestamp": timestamp,
+                    "provider_name": self.provider_name,
                     "agents": [
                         {
                             "name": a.name,

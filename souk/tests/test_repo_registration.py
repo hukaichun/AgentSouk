@@ -92,6 +92,33 @@ async def test_list_agents_excludes_stale_and_reports_online(session, new_identi
     assert await repo.list_agents(session) == []
 
 
+async def test_list_agents_reports_public_key_and_provider_name(session, new_identity):
+    identity = new_identity()
+    await repo.register_agents(
+        session, "sdk_1", identity.public_key, [{"name": "greeter"}], provider_name="Ada's Stall"
+    )
+
+    listed = await repo.list_agents(session)
+    assert listed[0]["public_key"] == identity.public_key
+    assert listed[0]["provider_name"] == "Ada's Stall"
+
+
+async def test_provider_name_defaults_to_none_and_is_sticky_across_registrations(session, new_identity):
+    identity = new_identity()
+    await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    assert (await repo.list_agents(session))[0]["provider_name"] is None
+
+    await repo.register_agents(
+        session, "sdk_1", identity.public_key, [{"name": "greeter"}], provider_name="Ada's Stall"
+    )
+    assert (await repo.list_agents(session))[0]["provider_name"] == "Ada's Stall"
+
+    # A later registration that doesn't pass provider_name at all must not
+    # blank out the name a previous one set.
+    await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    assert (await repo.list_agents(session))[0]["provider_name"] == "Ada's Stall"
+
+
 async def test_resolve_agents_by_name_zero_one_many(session, new_identity):
     assert await repo.resolve_agents_by_name(session, "nobody") == []
 

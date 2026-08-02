@@ -136,7 +136,11 @@ async def main() -> None:
         logger.info("built pydantic-ai agent '%s' (model=%s)", agent_cfg.name, agent_cfg.model)
 
     client = SoukAgentClient(
-        cfg.souk_http_url, cfg.souk_grpc_url, handles, identity_key_path=identity_key_path
+        cfg.souk_http_url,
+        cfg.souk_grpc_url,
+        handles,
+        identity_key_path=identity_key_path,
+        provider_name=cfg.provider_name,
     )
     await client.run_forever()
 
