@@ -1,8 +1,10 @@
 """Agent-side SDK: registers a batch of AG-UI-shaped agents with a souk,
-polls for work, and drives every discovered run through one persistent,
-multiplexed gRPC AgentSession stream — opened once per connection and kept
-open for as long as the connection lasts, not reopened per run (see
-proto/souk.proto).
+long-polls for work while idle, and — only once there's actually work to
+do — opens one persistent, multiplexed gRPC AgentSession stream shared by
+every run currently in flight, not reopened per run (see proto/souk.proto).
+The stream closes again once no more work is queued, so an idle provider
+holds no persistent stream at all, just a periodic long-polling PollForWork
+call (see _run_connection/_active_session).
 
 This SDK is a convenience client, not the protocol itself — anything that
 speaks proto/souk.proto's gRPC contract directly (in any language) is an
@@ -52,6 +54,7 @@ class SoukAgentClient:
         agents: list[AgentHandle],
         sdk_client_id: str | None = None,
         poll_interval: float = 2.0,
+        long_poll_seconds: float = 25.0,
         reconnect_delay: float = 2.0,
         max_concurrent_runs: int | None = None,
         identity_key_path: str = "souk_identity.key",
@@ -84,7 +87,19 @@ class SoukAgentClient:
         # first successful registration.
         self._handle_by_id: dict[str, AgentHandle] = {}
         self.sdk_client_id = sdk_client_id or f"sdk_{secrets.token_hex(8)}"
+        # How often to re-check for more work while already actively
+        # processing runs on an open AgentSession stream (see
+        # _active_session) — a plain sleep between top-up checks, not a
+        # long-poll, since the stream being open already means there's
+        # something to do.
         self.poll_interval = poll_interval
+        # How long an idle PollForWork call (no AgentSession stream open —
+        # see _run_connection) is allowed to block waiting for work before
+        # souk responds empty and this SDK asks again. Long-polling here
+        # is what lets an idle provider react to new work in roughly the
+        # time it takes one round trip, without holding a permanent
+        # stream open the whole time it has nothing to do.
+        self.long_poll_seconds = long_poll_seconds
         self.reconnect_delay = reconnect_delay
         # This provider's identity to any souk it connects to — see
         # souk_agent_sdk.identity. Persisted to disk: restarting this
@@ -142,13 +157,13 @@ class SoukAgentClient:
 
     async def run_forever(self) -> None:
         """Keeps a connection to souk alive indefinitely — reconnecting
-        with a fixed delay if the AgentSession stream or the poll loop
-        itself ever errors out, so a transient network blip doesn't
-        permanently stop this provider from checking for and responding
-        to souk's work. Re-registers on every (re)connect, not just the
-        first — that's also how the bearer token gets refreshed before it
-        expires (see souk.identity.SESSION_TOKEN_TTL_SECONDS), without a
-        separate renewal mechanism.
+        with a fixed delay if a stream or poll call ever errors out, so a
+        transient network blip doesn't permanently stop this provider from
+        checking for and responding to souk's work. Re-registers on every
+        (re)connect, not just the first — that's also how the bearer token
+        gets refreshed before it expires (see
+        souk.identity.SESSION_TOKEN_TTL_SECONDS), without a separate
+        renewal mechanism.
         """
         while True:
             try:
@@ -163,6 +178,15 @@ class SoukAgentClient:
             await asyncio.sleep(self.reconnect_delay)
 
     async def _run_connection(self) -> None:
+        """Alternates between two phases on one gRPC channel, kept open
+        across both so idle cycles don't pay a fresh handshake: an idle
+        phase that only long-polls PollForWork (no AgentSession stream —
+        see _poll_for_work), and an active phase that opens AgentSession
+        to actually claim and run work, staying open only for as long as
+        there's work to do (see _active_session). This keeps this
+        provider's connection count proportional to whether it's actually
+        working, not permanently open regardless of load.
+        """
         if self.ca_cert_path:
             with open(self.ca_cert_path, "rb") as f:
                 credentials = grpc.ssl_channel_credentials(root_certificates=f.read())
@@ -170,6 +194,47 @@ class SoukAgentClient:
         else:
             channel = grpc.aio.insecure_channel(self.souk_grpc_url)
         stub = souk_pb2_grpc.SoukAgentGatewayStub(channel)
+        try:
+            while True:
+                pending = await self._poll_for_work(stub, wait_seconds=self.long_poll_seconds)
+                if pending:
+                    await self._active_session(stub, pending)
+        finally:
+            await channel.close()
+
+    async def _poll_for_work(
+        self, stub: souk_pb2_grpc.SoukAgentGatewayStub, wait_seconds: float = 0
+    ) -> list[Any]:
+        # Field left unset entirely when there's no configured limit —
+        # PollRequest.max_claim distinguishes "unset" (unlimited) from an
+        # explicit 0 ("no spare capacity right now"), so this must not
+        # send 0 as a stand-in for "unlimited".
+        kwargs: dict[str, Any] = {"agent_ids": list(self._handle_by_id.keys())}
+        max_claim = None
+        if self.max_concurrent_runs is not None:
+            max_claim = max(0, self.max_concurrent_runs - len(self._in_flight))
+            kwargs["max_claim"] = max_claim
+        # No point asking souk to hold the call open when we've already
+        # told it we have zero spare capacity — nothing souk-side will
+        # change that; capacity only frees up here as in-flight runs
+        # finish (souk enforces the same skip, see grpc_server.PollForWork).
+        if wait_seconds > 0 and max_claim != 0:
+            kwargs["wait_seconds"] = int(wait_seconds)
+        response = await stub.PollForWork(
+            souk_pb2.PollRequest(**kwargs), metadata=(("authorization", self._session_token),)
+        )
+        return list(response.pending)
+
+    async def _active_session(
+        self, stub: souk_pb2_grpc.SoukAgentGatewayStub, initial_pending: list[Any]
+    ) -> None:
+        """Opens AgentSession, claims/processes `initial_pending`, and
+        keeps checking for more work as capacity frees up — closing the
+        stream (returning to the caller's idle long-poll loop) only once a
+        check comes back empty, rather than tearing the stream down and
+        making souk wait for a fresh connection when there's already more
+        queued for this provider.
+        """
         auth_metadata = (("authorization", self._session_token),)
         self._session_call = stub.AgentSession(metadata=auth_metadata)
         self._outbound = asyncio.Queue()
@@ -178,27 +243,43 @@ class SoukAgentClient:
         writer = asyncio.create_task(self._write_loop())
         reader = asyncio.create_task(self._read_loop())
         try:
+            self._dispatch(initial_pending)
             while True:
-                await self._poll_once(stub)
                 # The writer/reader tasks only ever exit via an exception
                 # (dead stream) — surface that here so it triggers a
-                # reconnect instead of the poll loop spinning obliviously
+                # reconnect instead of this loop spinning obliviously
                 # against a stream that's no longer delivering anything.
                 if writer.done():
                     writer.result()
                 if reader.done():
                     reader.result()
+                if not self._in_flight:
+                    # Drained — one last non-blocking check before giving
+                    # up this stream.
+                    more = await self._poll_for_work(stub)
+                    if not more:
+                        return
+                    self._dispatch(more)
+                    continue
                 await asyncio.sleep(self.poll_interval)
+                more = await self._poll_for_work(stub)
+                if more:
+                    self._dispatch(more)
         finally:
             writer.cancel()
             reader.cancel()
-            # This connection is gone — any run still waiting on it can
+            # This stream is going away — any run still waiting on it can
             # never receive its input or an ack again. Cancel them rather
             # than let them hang forever; _handle_run's cleanup is
             # bounded (see its finally block) regardless of why it woke up.
             for task in list(self._in_flight):
                 task.cancel()
-            await channel.close()
+
+    def _dispatch(self, pending: list[Any]) -> None:
+        for p in pending:
+            task = asyncio.create_task(self._handle_run(p.run_id, p.agent_id))
+            self._in_flight.add(task)
+            task.add_done_callback(self._in_flight.discard)
 
     async def _write_loop(self) -> None:
         # Single writer serializing all outbound envelopes onto the one
@@ -217,22 +298,6 @@ class SoukAgentClient:
                 await inbox.put(envelope)
             else:
                 logger.warning("AgentSession: frame for unknown/finished run_id=%s", envelope.run_id)
-
-    async def _poll_once(self, stub: souk_pb2_grpc.SoukAgentGatewayStub) -> None:
-        # Field left unset entirely when there's no configured limit —
-        # PollRequest.max_claim distinguishes "unset" (unlimited) from an
-        # explicit 0 ("no spare capacity right now"), so this must not
-        # send 0 as a stand-in for "unlimited".
-        kwargs: dict[str, Any] = {"agent_ids": list(self._handle_by_id.keys())}
-        if self.max_concurrent_runs is not None:
-            kwargs["max_claim"] = max(0, self.max_concurrent_runs - len(self._in_flight))
-        response = await stub.PollForWork(
-            souk_pb2.PollRequest(**kwargs), metadata=(("authorization", self._session_token),)
-        )
-        for pending in response.pending:
-            task = asyncio.create_task(self._handle_run(pending.run_id, pending.agent_id))
-            self._in_flight.add(task)
-            task.add_done_callback(self._in_flight.discard)
 
     async def _handle_run(self, run_id: str, agent_id: str) -> None:
         handle = self._handle_by_id.get(agent_id)

@@ -74,6 +74,20 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         max_claim = request.max_claim if request.HasField("max_claim") else None
         states = broker.poll(agent_ids, max_claim=max_claim)
 
+        wait_seconds = request.wait_seconds if request.HasField("wait_seconds") else 0
+        # No point holding the call open when the caller explicitly
+        # reported zero spare capacity (max_claim=0) — nothing souk-side
+        # will change that; capacity only frees up on the caller's end.
+        if not states and wait_seconds > 0 and max_claim != 0:
+            event = broker.subscribe_wake(agent_ids)
+            try:
+                await asyncio.wait_for(event.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                broker.unsubscribe_wake(agent_ids, event)
+            states = broker.poll(agent_ids, max_claim=max_claim)
+
         async with SessionLocal() as session:
             for agent_id in agent_ids:
                 await repo.touch_agent(session, agent_id)

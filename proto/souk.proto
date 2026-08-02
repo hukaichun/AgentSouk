@@ -15,13 +15,15 @@ service SoukAgentGateway {
   // stream per run.
   rpc PollForWork(PollRequest) returns (PollResponse);
 
-  // One persistent, multiplexed, bidirectional stream per SDK client
-  // connection: the SDK opens this once (right after registering) and
-  // keeps it open for its whole lifetime. Every run the SDK discovers via
-  // PollForWork is claimed, delivered, and drained through this single
-  // connection — disambiguated by run_id on each envelope — rather than
-  // opening a new stream per run, so one long-lived connection consumes
-  // every call.
+  // One persistent, multiplexed, bidirectional stream shared by every run
+  // an SDK client currently has in flight. The reference SDK
+  // (souk-agent-sdk) opens this only once PollForWork has actually handed
+  // it work, and keeps it open only for as long as it keeps finding more
+  // — an idle client holds no AgentSession stream at all, just a
+  // periodic PollForWork call (see souk_agent_sdk.client for the exact
+  // lifecycle). Every run is claimed, delivered, and drained through
+  // whichever single connection is currently open — disambiguated by
+  // run_id on each envelope — rather than opening a new stream per run.
   //
   // Per run_id, the exchange is:
   //   1. sdk->souk: a claim envelope (json_payload empty, end_of_stream
@@ -52,6 +54,13 @@ message PollRequest {
   // capacity, claim nothing this poll" — hence `optional` here rather
   // than relying on proto3's normal zero-value-means-absent default.
   optional int32 max_claim = 2;
+  // Long-poll duration: if nothing is queued for these agent_ids, souk
+  // holds this call open for up to this many seconds, returning as soon
+  // as a run is queued (or empty once the wait times out) rather than
+  // making the caller poll again on a fixed timer. Unset or <= 0 means
+  // the old behavior — return immediately regardless of whether anything
+  // was found.
+  optional int32 wait_seconds = 3;
 }
 
 message PollResponse {

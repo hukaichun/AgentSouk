@@ -40,6 +40,14 @@ class RunBroker:
     def __init__(self) -> None:
         self._runs: dict[str, RunState] = {}
         self._pending_by_agent: dict[str, deque[str]] = defaultdict(deque)
+        # Lets a long-polling PollForWork call block until a run actually
+        # shows up for one of its agent_ids instead of sleeping through a
+        # fixed poll interval — see grpc_server.PollForWork. Plain
+        # asyncio.Event rather than anything grpc/pb2-shaped, so this stays
+        # a swap-in seam for a distributed backend (e.g. Postgres
+        # LISTEN/NOTIFY) if souk is ever split across multiple processes;
+        # nothing above this depends on wakes being in-process.
+        self._wake_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
 
     def enqueue_run(
         self,
@@ -58,7 +66,19 @@ class RunBroker:
         )
         self._runs[run_id] = state
         self._pending_by_agent[agent_id].append(run_id)
+        for event in self._wake_subscribers.get(agent_id, ()):
+            event.set()
         return state
+
+    def subscribe_wake(self, agent_ids: list[str]) -> asyncio.Event:
+        event = asyncio.Event()
+        for agent_id in agent_ids:
+            self._wake_subscribers[agent_id].add(event)
+        return event
+
+    def unsubscribe_wake(self, agent_ids: list[str], event: asyncio.Event) -> None:
+        for agent_id in agent_ids:
+            self._wake_subscribers[agent_id].discard(event)
 
     def poll(self, agent_ids: list[str], max_claim: int | None = None) -> list[RunState]:
         """Returns (and removes from the pending queue) up to `max_claim`
