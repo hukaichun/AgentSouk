@@ -1,3 +1,5 @@
+import DOMPurify from "dompurify";
+import { marked } from "marked";
 import { AgentRosterEntry, escapeHtml, fetchAgents, linkWithSouk, renderSoukBar, streamSse } from "./app.js";
 
 interface ThreadTreeNode {
@@ -6,11 +8,25 @@ interface ThreadTreeNode {
   children: ThreadTreeNode[];
 }
 
+marked.setOptions({ breaks: true, gfm: true });
+
+// Agent-produced prose (assistant replies, sub-agent replies, reasoning
+// text, tool results) is near-always markdown — the models are prompted
+// (and generally trained) to format that way. Rendered through DOMPurify
+// rather than trusted raw: this text ultimately originates from whatever
+// model a possibly-untrusted third-party provider is running, so treat it
+// like any other untrusted HTML source before it hits innerHTML.
+function renderMarkdown(el: HTMLElement, raw: string): void {
+  el.innerHTML = DOMPurify.sanitize(marked.parse(raw, { async: false }) as string);
+  el.classList.add("markdown");
+}
+
 const params = new URLSearchParams(window.location.search);
 const agentId = params.get("id");
 let threadId: string | null = null;
 let selfName = "assistant";
 let currentAssistantEl: HTMLElement | null = null;
+let currentAssistantRaw = "";
 let typingEl: HTMLElement | null = null;
 // agent_id -> display name, from the roster fetched once at page load —
 // used to label the call-chain route with names instead of raw agent_ids.
@@ -19,6 +35,18 @@ const agentNameById = new Map<string, string>();
 // delegated call, so a streamed multi-hop response reads like the main
 // assistant's own streaming text instead of one raw JSON blob per event.
 const subAgentEls = new Map<string, HTMLElement>();
+const subAgentRaw = new Map<string, string>();
+// Keyed by toolCallId — one placeholder bubble per in-flight tool call,
+// filled in with the tool's result once it comes back. Surfacing this is
+// what keeps a multi-second tool round trip from reading as unexplained
+// silence (see the souk<->provider latency work this pairs with).
+const toolCallEls = new Map<string, HTMLElement>();
+// Keyed by the reasoning message_id AG-UI's REASONING_* events share
+// across REASONING_START/MESSAGE_CONTENT/ENCRYPTED_VALUE/END for one
+// "thought". Not every model exposes readable reasoning text — some only
+// ever send an opaque REASONING_ENCRYPTED_VALUE — so the bubble falls
+// back to a plain "thinking" placeholder when no content ever arrives.
+const reasoningEls = new Map<string, { el: HTMLElement; raw: string }>();
 
 function appendEntry(tag: string, text: string, cssClass: string): HTMLElement {
   const log = document.getElementById("chat-log")!;
@@ -89,12 +117,59 @@ function handleAguiEvent(event: any): void {
     clearTyping();
     if (!currentAssistantEl) {
       currentAssistantEl = appendEntry(selfName, "", "assistant");
+      currentAssistantRaw = "";
     }
-    currentAssistantEl.textContent += delta;
+    currentAssistantRaw += delta;
+    renderMarkdown(currentAssistantEl, currentAssistantRaw);
+    return;
+  }
+  if (event.type === "TOOL_CALL_START") {
+    clearTyping();
+    const el = appendEntry(`tool · ${event.toolCallName || "?"}`, "…", "tool");
+    toolCallEls.set(event.toolCallId, el);
+    return;
+  }
+  if (event.type === "TOOL_CALL_RESULT") {
+    const el = toolCallEls.get(event.toolCallId);
+    toolCallEls.delete(event.toolCallId);
+    if (!el) return;
+    const content = typeof event.content === "string" ? event.content : JSON.stringify(event.content);
+    renderMarkdown(el, content || "(no result)");
+    return;
+  }
+  if (event.type === "REASONING_START") {
+    clearTyping();
+    const el = appendEntry("thinking", "…", "reasoning");
+    reasoningEls.set(event.messageId, { el, raw: "" });
+    return;
+  }
+  if (event.type === "REASONING_MESSAGE_CONTENT") {
+    const entry = reasoningEls.get(event.messageId);
+    if (!entry) return;
+    entry.raw += event.delta || "";
+    renderMarkdown(entry.el, entry.raw);
+    return;
+  }
+  if (event.type === "REASONING_ENCRYPTED_VALUE") {
+    // entityId is the same message_id REASONING_START used — see
+    // pydantic_ai.ui.ag_ui's _thinking_0_13.py. Some models never expose
+    // readable reasoning text, only this opaque blob; if nothing rendered
+    // yet, at least say a thought happened rather than leaving "…" stuck.
+    const entry = reasoningEls.get(event.entityId);
+    if (entry && !entry.raw) {
+      entry.el.textContent = "(reasoning hidden by the model)";
+    }
+    return;
+  }
+  if (event.type === "REASONING_END") {
+    reasoningEls.delete(event.messageId);
     return;
   }
   if (event.type === "RUN_FINISHED") {
     currentAssistantEl = null;
+    currentAssistantRaw = "";
+    toolCallEls.clear();
+    reasoningEls.clear();
     clearTyping();
     return;
   }
@@ -117,6 +192,7 @@ function handleAguiEvent(event: any): void {
 
     if (state === "completed" || state === "failed") {
       subAgentEls.delete(taskId);
+      subAgentRaw.delete(taskId);
       return;
     }
 
@@ -132,14 +208,15 @@ function handleAguiEvent(event: any): void {
     }
 
     let el = subAgentEls.get(taskId);
-    if (!el || el.textContent === "…") {
+    if (!el || !subAgentRaw.get(taskId)) {
       el = el || appendEntry(subAgent, "", "sub");
-      el.textContent = "";
       subAgentEls.set(taskId, el);
+      subAgentRaw.set(taskId, "");
     }
     for (const part of textParts) {
-      el.textContent += part.text;
+      subAgentRaw.set(taskId, (subAgentRaw.get(taskId) || "") + part.text);
     }
+    renderMarkdown(el, subAgentRaw.get(taskId) || "");
   }
 }
 
@@ -192,7 +269,11 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
   sendBtn.disabled = true;
   appendEntry("you", text, "user");
   currentAssistantEl = null;
+  currentAssistantRaw = "";
   subAgentEls.clear();
+  subAgentRaw.clear();
+  toolCallEls.clear();
+  reasoningEls.clear();
   document.getElementById("call-chain")!.innerHTML = "";
   document.getElementById("call-chain")!.classList.remove("has-chain");
   showTyping();
