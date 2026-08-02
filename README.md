@@ -103,6 +103,35 @@ with a different key is rejected. This is the entirety of the identity
 model — no signup flow, no souk-side account database. See
 `souk/identity.py` and `souk_agent_sdk/identity.py`.
 
+An agent-to-agent call (e.g. a sub-agent delegation) can optionally be
+signed with the same identity, so the callee's souk can attribute it to a
+known registered agent instead of an anonymous caller — see
+`souk/identity.py`'s `a2a_call_signing_payload` and
+`souk_agent_sdk.a2a_client.call_agent_streaming`'s `signing_key` param.
+Caller identity for plain human/app callers (not agent-to-agent) isn't
+implemented — souk doesn't mandate caller auth at all, that's left as a
+per-agent policy decision (see the A2A Agent Card's own `authentication`
+field).
+
+Every signed request also carries a timestamp souk checks against its own
+clock (`souk.identity.SIGNATURE_FRESHNESS_WINDOW_SECONDS`, 60s) — without
+it, anyone who merely observed one valid signed request on the wire could
+replay it indefinitely.
+
+**None of this matters without TLS** — an unencrypted connection means
+session tokens and signed requests are visible to anyone on the network
+path. Both the gRPC server and the HTTP server support TLS
+(`souk.config`'s `grpc_tls_cert_path`/`grpc_tls_key_path` and
+`http_tls_cert_path`/`http_tls_key_path`); `scripts/gen_dev_tls_cert.py`
+generates a self-signed pair for local testing, and
+`SoukAgentClient(..., ca_cert_path=...)` is what makes a provider actually
+verify it's talking to *this* souk and not an impostor — this is the same
+mechanism as encryption, not a separate one: TLS certificate verification
+is what proves server identity. Neither is enabled by default (plaintext
+is fine same-host, e.g. `docker compose up`); use a real CA-issued
+certificate (or terminate TLS at a reverse proxy in front of souk) for
+anything reachable over a real network.
+
 ## What's deferred beyond v1
 
 Stdio MCP servers, multi-souk federation, broadcast messaging,

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import secrets
+import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -54,9 +55,20 @@ class SoukAgentClient:
         reconnect_delay: float = 2.0,
         max_concurrent_runs: int | None = None,
         identity_key_path: str = "souk_identity.key",
+        ca_cert_path: str | None = None,
     ) -> None:
         self.souk_http_url = souk_http_url.rstrip("/")
         self.souk_grpc_url = souk_grpc_url
+        # Path to a CA (or self-signed) cert this souk's TLS certificate
+        # should be verified against — leave unset only for plaintext
+        # development. Verifying against a specific file here (rather
+        # than the system trust store) is what makes this provider
+        # actually confirm it's talking to *this* souk and not an
+        # impostor on the network; skipping verification (or not using
+        # TLS at all) means it can't tell the difference. See
+        # scripts/gen_dev_tls_cert.py and souk.config's http_tls_*/
+        # grpc_tls_* settings.
+        self.ca_cert_path = ca_cert_path
         self.agents: dict[str, AgentHandle] = {a.name: a for a in agents}
         self.sdk_client_id = sdk_client_id or f"sdk_{secrets.token_hex(8)}"
         self.poll_interval = poll_interval
@@ -84,14 +96,16 @@ class SoukAgentClient:
 
     async def register(self) -> None:
         names = [a.name for a in self.agents.values()]
-        payload = registration_signing_payload(self.sdk_client_id, names)
-        async with httpx.AsyncClient() as client:
+        timestamp = int(time.time())
+        payload = registration_signing_payload(self.sdk_client_id, names, timestamp)
+        async with httpx.AsyncClient(verify=self.ca_cert_path or True) as client:
             resp = await client.post(
                 f"{self.souk_http_url}/agents/register",
                 json={
                     "sdk_client_id": self.sdk_client_id,
                     "public_key": public_key_hex(self._identity),
                     "signature": sign(self._identity, payload),
+                    "timestamp": timestamp,
                     "agents": [
                         {
                             "name": a.name,
@@ -129,7 +143,12 @@ class SoukAgentClient:
             await asyncio.sleep(self.reconnect_delay)
 
     async def _run_connection(self) -> None:
-        channel = grpc.aio.insecure_channel(self.souk_grpc_url)
+        if self.ca_cert_path:
+            with open(self.ca_cert_path, "rb") as f:
+                credentials = grpc.ssl_channel_credentials(root_certificates=f.read())
+            channel = grpc.aio.secure_channel(self.souk_grpc_url, credentials)
+        else:
+            channel = grpc.aio.insecure_channel(self.souk_grpc_url)
         stub = souk_pb2_grpc.SoukAgentGatewayStub(channel)
         auth_metadata = (("authorization", self._session_token),)
         self._session_call = stub.AgentSession(metadata=auth_metadata)

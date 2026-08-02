@@ -30,5 +30,21 @@ class Settings(BaseSettings):
     # the default is only safe for a single-developer local souk.
     token_signing_secret: str = "dev-insecure-change-me"
 
+    # TLS for the gRPC server (PollForWork/AgentSession) and the HTTP
+    # server (/agents/register, /agui/*, /a2a/*). Both left unset means
+    # plaintext — fine for same-host development, never for a souk
+    # reachable over a real network: without TLS, session tokens and
+    # signed requests are visible to anyone on the path, and a captured
+    # registration signature is only bounded by
+    # souk.identity.SIGNATURE_FRESHNESS_WINDOW_SECONDS (60s), not
+    # prevented outright. See scripts/gen_dev_tls_cert.py for a
+    # self-signed pair to test with; use a real CA-issued cert (or
+    # terminate TLS at a reverse proxy in front of souk) for anything
+    # else.
+    grpc_tls_cert_path: str | None = None
+    grpc_tls_key_path: str | None = None
+    http_tls_cert_path: str | None = None
+    http_tls_key_path: str | None = None
+
 
 settings = Settings()

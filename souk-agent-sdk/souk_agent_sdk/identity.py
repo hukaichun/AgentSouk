@@ -37,16 +37,19 @@ def sign(private_key: Ed25519PrivateKey, payload: bytes) -> str:
     return private_key.sign(payload).hex()
 
 
-def registration_signing_payload(sdk_client_id: str, agent_names: list[str]) -> bytes:
+def registration_signing_payload(sdk_client_id: str, agent_names: list[str], timestamp: int) -> bytes:
     # Must match souk.identity.registration_signing_payload exactly —
     # souk verifies this signature against the same canonical string.
-    return f"{sdk_client_id}:{','.join(sorted(agent_names))}".encode()
+    # `timestamp` (unix seconds) must be current — souk rejects anything
+    # outside its freshness window, so a captured signed request can't be
+    # replayed indefinitely (see souk.identity.SIGNATURE_FRESHNESS_WINDOW_SECONDS).
+    return f"{sdk_client_id}:{','.join(sorted(agent_names))}:{timestamp}".encode()
 
 
-def a2a_call_signing_payload(task_id: str, session_id: str | None) -> bytes:
+def a2a_call_signing_payload(task_id: str, session_id: str | None, timestamp: int) -> bytes:
     # Must match souk.identity.a2a_call_signing_payload exactly. Used when
     # this provider itself acts as an A2A caller (e.g. delegating to a
     # sub-agent, see a2a_client.call_agent_streaming's signing_key param)
     # and wants the callee's souk to know which registered identity made
     # the call.
-    return f"{task_id}:{session_id or ''}".encode()
+    return f"{task_id}:{session_id or ''}:{timestamp}".encode()

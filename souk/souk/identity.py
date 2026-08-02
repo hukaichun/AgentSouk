@@ -39,12 +39,28 @@ from souk.config import settings
 
 SESSION_TOKEN_TTL_SECONDS = 3600
 
+# How far a signed request's own `timestamp` is allowed to drift from
+# souk's clock before the signature is refused outright, independent of
+# whether it's cryptographically valid. Without this, a signature has no
+# concept of "when" — anyone who merely *observes* one valid signed
+# request on the wire (no need to break Ed25519 or steal a private key)
+# could replay the exact same bytes indefinitely, e.g. to keep minting
+# fresh session tokens for a provider's identity forever. This bounds
+# that to a narrow window instead. Transport encryption (TLS) is what
+# stops the observation in the first place — this is defense in depth,
+# not a substitute for it.
+SIGNATURE_FRESHNESS_WINDOW_SECONDS = 60
 
-def registration_signing_payload(sdk_client_id: str, agent_names: list[str]) -> bytes:
-    return f"{sdk_client_id}:{','.join(sorted(agent_names))}".encode()
+
+def is_timestamp_fresh(timestamp: int) -> bool:
+    return abs(time.time() - timestamp) <= SIGNATURE_FRESHNESS_WINDOW_SECONDS
 
 
-def a2a_call_signing_payload(task_id: str, session_id: str | None) -> bytes:
+def registration_signing_payload(sdk_client_id: str, agent_names: list[str], timestamp: int) -> bytes:
+    return f"{sdk_client_id}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+
+
+def a2a_call_signing_payload(task_id: str, session_id: str | None, timestamp: int) -> bytes:
     """What a *caller* signs when it wants souk to know who it is on an
     A2A tasks/send(Subscribe) call — see api_a2a._start_run. Currently
     used for agent-to-agent calls (a provider signing with the same
@@ -55,7 +71,7 @@ def a2a_call_signing_payload(task_id: str, session_id: str | None) -> bytes:
     the goal is knowing *who* initiated this task, not tamper-proofing
     its content.
     """
-    return f"{task_id}:{session_id or ''}".encode()
+    return f"{task_id}:{session_id or ''}:{timestamp}".encode()
 
 
 def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:

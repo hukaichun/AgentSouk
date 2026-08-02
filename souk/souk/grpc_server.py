@@ -225,5 +225,18 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
 def create_grpc_server() -> grpc.aio.Server:
     server = grpc.aio.server()
     souk_pb2_grpc.add_SoukAgentGatewayServicer_to_server(SoukAgentGatewayServicer(), server)
-    server.add_insecure_port(f"{settings.grpc_host}:{settings.grpc_port}")
+    address = f"{settings.grpc_host}:{settings.grpc_port}"
+    if settings.grpc_tls_cert_path and settings.grpc_tls_key_path:
+        cert = open(settings.grpc_tls_cert_path, "rb").read()
+        key = open(settings.grpc_tls_key_path, "rb").read()
+        credentials = grpc.ssl_server_credentials([(key, cert)])
+        server.add_secure_port(address, credentials)
+        logger.info("gRPC server listening on %s with TLS", address)
+    else:
+        server.add_insecure_port(address)
+        logger.warning(
+            "gRPC server listening on %s WITHOUT TLS — fine for same-host development, "
+            "never for a souk reachable over a real network (see souk.config's grpc_tls_* settings)",
+            address,
+        )
     return server

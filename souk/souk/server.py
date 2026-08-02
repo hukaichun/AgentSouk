@@ -57,7 +57,21 @@ async def _serve() -> None:
     grpc_server = create_grpc_server()
     await grpc_server.start()
 
-    config = uvicorn.Config(app, host=settings.http_host, port=settings.http_port, log_level="info")
+    if not (settings.http_tls_cert_path and settings.http_tls_key_path):
+        logger.warning(
+            "HTTP server listening on %s:%s WITHOUT TLS — fine for same-host development, "
+            "never for a souk reachable over a real network (see souk.config's http_tls_* settings)",
+            settings.http_host,
+            settings.http_port,
+        )
+    config = uvicorn.Config(
+        app,
+        host=settings.http_host,
+        port=settings.http_port,
+        log_level="info",
+        ssl_certfile=settings.http_tls_cert_path,
+        ssl_keyfile=settings.http_tls_key_path,
+    )
     http_server = uvicorn.Server(config)
 
     try:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -46,9 +47,11 @@ async def call_agent_streaming(
     task_id = task_id or new_task_id()
     metadata = dict(metadata) if metadata else {}
     if signing_key is not None:
-        payload = a2a_call_signing_payload(task_id, session_id)
+        timestamp = int(time.time())
+        payload = a2a_call_signing_payload(task_id, session_id, timestamp)
         metadata["callerPublicKey"] = public_key_hex(signing_key)
         metadata["callerSignature"] = sign(signing_key, payload)
+        metadata["callerTimestamp"] = timestamp
 
     params: dict[str, Any] = {
         "id": task_id,

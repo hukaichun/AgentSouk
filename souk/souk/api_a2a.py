@@ -26,7 +26,7 @@ from souk.agui import build_run_agent_input
 from souk.broker import END_OF_STREAM, broker
 from souk.config import settings
 from souk.db import get_session
-from souk.identity import a2a_call_signing_payload, verify_signature
+from souk.identity import a2a_call_signing_payload, is_timestamp_fresh, verify_signature
 from souk.translate_a2a import (
     a2a_message_to_agui_messages,
     agui_event_to_a2a_update,
@@ -95,8 +95,11 @@ async def _start_run(session: AsyncSession, agent_name: str, params: dict) -> tu
     verified_caller_name = None
     caller_public_key = metadata.get("callerPublicKey")
     caller_signature = metadata.get("callerSignature")
+    caller_timestamp = metadata.get("callerTimestamp")
     if caller_public_key and caller_signature:
-        payload = a2a_call_signing_payload(task_id, session_id)
+        if not isinstance(caller_timestamp, int) or not is_timestamp_fresh(caller_timestamp):
+            raise HTTPException(status_code=401, detail="caller timestamp missing or too far from souk's clock")
+        payload = a2a_call_signing_payload(task_id, session_id, caller_timestamp)
         if not verify_signature(caller_public_key, caller_signature, payload):
             raise HTTPException(status_code=401, detail="invalid caller signature")
         verified_caller_name = await repo.get_agent_name_for_public_key(session, caller_public_key)

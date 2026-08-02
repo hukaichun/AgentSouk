@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk import repo
 from souk.db import get_session
-from souk.identity import issue_session_token, registration_signing_payload, verify_signature
+from souk.identity import is_timestamp_fresh, issue_session_token, registration_signing_payload, verify_signature
 from souk.models import AgentRosterEntry, RegisterBatchRequest, RegisterBatchResponse, RosterResponse
 
 router = APIRouter()
@@ -13,7 +13,9 @@ router = APIRouter()
 async def register_agents(
     body: RegisterBatchRequest, session: AsyncSession = Depends(get_session)
 ) -> RegisterBatchResponse:
-    payload = registration_signing_payload(body.sdk_client_id, [a.name for a in body.agents])
+    if not is_timestamp_fresh(body.timestamp):
+        raise HTTPException(status_code=401, detail="registration timestamp too far from souk's clock")
+    payload = registration_signing_payload(body.sdk_client_id, [a.name for a in body.agents], body.timestamp)
     if not verify_signature(body.public_key, body.signature, payload):
         raise HTTPException(status_code=401, detail="invalid registration signature")
 

@@ -37,6 +37,11 @@ class RegisterBatchRequest(BaseModel):
     # identity model: no signup flow, the keypair *is* the identity.
     public_key: str
     signature: str
+    # Unix timestamp (seconds) included in what was signed — souk rejects
+    # anything outside souk.identity.SIGNATURE_FRESHNESS_WINDOW_SECONDS of
+    # its own clock, so a captured signed request can't be replayed
+    # indefinitely to keep minting fresh session tokens.
+    timestamp: int
 
 
 class AgentRosterEntry(BaseModel):
