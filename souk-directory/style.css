@@ -360,6 +360,27 @@ a {
   font-size: 0.86rem;
   border-radius: 8px;
 }
+.entry.tool { align-self: flex-start; max-width: 70%; margin-left: 1.6rem; }
+.entry.tool .tag { color: var(--sage); }
+.entry.tool .tag::before { content: "⚙ "; }
+.entry.tool .bubble {
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  border-radius: 8px;
+}
+.entry.reasoning { align-self: flex-start; max-width: 70%; }
+.entry.reasoning .tag { color: var(--ink-soft); }
+.entry.reasoning .tag::before { content: "◌ "; }
+.entry.reasoning .bubble {
+  background: transparent;
+  border: none;
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+  font-style: italic;
+  padding: 0.3rem 0.85rem;
+}
 .entry.error .bubble {
   border: 1px solid var(--clay);
   color: var(--clay);
@@ -369,6 +390,72 @@ a {
   border: 1px dashed var(--line);
   color: var(--ink-soft);
   font-size: 0.85rem;
+}
+
+/* Rendered markdown (agent replies, sub-agent/tool/reasoning text) — the
+   bubble's own `white-space: pre-wrap` is for plain-text bubbles (user
+   messages, errors); block elements below bring their own spacing, so
+   turn that off here to avoid doubled-up blank lines. */
+.bubble.markdown {
+  white-space: normal;
+}
+.bubble.markdown > :first-child { margin-top: 0; }
+.bubble.markdown > :last-child { margin-bottom: 0; }
+.bubble.markdown p { margin: 0.5em 0; }
+.bubble.markdown ul,
+.bubble.markdown ol {
+  margin: 0.5em 0;
+  padding-left: 1.3em;
+}
+.bubble.markdown li { margin: 0.15em 0; }
+.bubble.markdown a { color: var(--teal); }
+.bubble.markdown strong { color: inherit; font-weight: 700; }
+.bubble.markdown code {
+  font-family: var(--mono);
+  font-size: 0.85em;
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  border-radius: 3px;
+  padding: 0.1em 0.3em;
+}
+.bubble.markdown pre {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+  border-radius: var(--radius);
+  padding: 0.6em 0.75em;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.bubble.markdown pre code {
+  background: none;
+  padding: 0;
+}
+.bubble.markdown blockquote {
+  margin: 0.5em 0;
+  padding-left: 0.75em;
+  border-left: 2px solid var(--line);
+  color: var(--ink-soft);
+}
+.bubble.markdown h1,
+.bubble.markdown h2,
+.bubble.markdown h3,
+.bubble.markdown h4 {
+  margin: 0.6em 0 0.3em;
+  font-size: 1em;
+  font-weight: 700;
+}
+.bubble.markdown hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0.6em 0;
+}
+.bubble.markdown table {
+  border-collapse: collapse;
+  margin: 0.5em 0;
+  font-size: 0.9em;
+}
+.bubble.markdown th,
+.bubble.markdown td {
+  border: 1px solid var(--line);
+  padding: 0.25em 0.5em;
 }
 
 .typing {
