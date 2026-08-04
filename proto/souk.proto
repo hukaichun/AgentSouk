@@ -78,4 +78,11 @@ message AgentEventEnvelope {
   string json_payload = 3;
   bool end_of_stream = 4;
   bool ack = 5;
+  // souk->sdk only: the run's consumer is gone (HTTP/SSE caller
+  // disconnected, or an explicit A2A tasks/cancel) and souk will never
+  // read another event for this run_id. The SDK should stop iterating
+  // that run's run_stream as soon as it observes this rather than
+  // running it to completion for no one — see souk_agent_sdk.client's
+  // _handle_run.
+  bool cancel = 6;
 }

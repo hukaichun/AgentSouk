@@ -19,7 +19,7 @@ import asyncio
 import logging
 
 from souk import repo
-from souk.broker import broker
+from souk.broker import Fail, broker
 from souk.config import settings
 from souk.db import SessionLocal
 
@@ -30,19 +30,19 @@ async def _close_with_terminal_event(run_id: str, failure_reason: str) -> None:
     """Unblocks whoever's still waiting on this run's output (an open AG-UI
     SSE connection or an A2A tasks/sendSubscribe stream) — otherwise they'd
     hang until their own client-side timeout with no idea the run had
-    already been given up on. Pushes an explicit RUN_ERROR event before
-    closing (rather than just closing the stream) so a live subscriber gets
-    a real terminal signal — translate_a2a.agui_event_to_a2a_update already
-    maps RUN_ERROR to a final `status: failed` update, so this serves AG-UI
-    and A2A callers alike.
+    already been given up on. Pushing Fail (see grpc_server._handle_fail)
+    persists an explicit RUN_ERROR event before closing the stream, so a
+    live subscriber gets a real terminal signal — translate_a2a's
+    agui_event_to_a2a_update already maps RUN_ERROR to a final
+    `status: failed` update, so this serves AG-UI and A2A callers alike.
+
+    A no-op if the run has already been forgotten (finished, or already
+    cancelled) — this is just a command push, not a direct mutation, so
+    unlike the rest of this module it doesn't touch a Run's fields itself.
     """
-    event = {"type": "RUN_ERROR", "message": failure_reason}
-    if broker.get(run_id) is not None:
-        async with SessionLocal() as session:
-            seq = broker.next_seq(run_id)
-            await repo.append_run_event(session, run_id, seq, event)
-        await broker.deliver_event(run_id, event)
-    await broker.close_run(run_id)
+    run = broker.get(run_id)
+    if run is not None:
+        run.in_queue.put_nowait(Fail(failure_reason))
 
 
 async def sweep_once() -> None:

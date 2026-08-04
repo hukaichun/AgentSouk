@@ -417,6 +417,39 @@ async def set_task_id(session: AsyncSession, run_id: str, task_id: str) -> None:
     )
 
 
+async def reopen_run(
+    session: AsyncSession, run_id: str, input_json: dict[str, Any], metadata: dict[str, Any] | None = None
+) -> None:
+    """Restarts a paused ('input-required') run for another round under
+    its *same* run_id/task_id, instead of minting a new one via
+    create_run — see souk/pause.py's module docstring: a stable identity
+    across however many pause/resume rounds a run goes through (HITL
+    approval, or waiting on a delegated sub-agent call) is what lets a
+    waiter's waitingOnRunId subscription stay valid without ever needing
+    to be retargeted, and lets a caller's task_id keep pointing at the
+    same task for its whole life (see api_a2a.py's tasks/get,
+    tasks/cancel) instead of needing to chase a resume chain.
+
+    Sets status back to 'queued' so PollForWork can hand it out again;
+    deliberately does not touch started_at (this run's *first* claim is
+    still when it truly started, not this round) or completed_at (this
+    round isn't done either — mirrors mark_run_status's 'input-required'
+    handling, just in the other direction).
+    """
+    metadata_set = ", metadata = metadata || CAST(:metadata AS jsonb)" if metadata else ""
+    params: dict[str, Any] = {"run_id": run_id, "input_json": json.dumps(input_json)}
+    if metadata:
+        params["metadata"] = json.dumps(metadata)
+    await session.execute(
+        text(
+            "UPDATE thread_history SET status = 'queued', input_json = :input_json, "
+            f"last_activity_at = now(){metadata_set} WHERE run_id = :run_id AND kind = 'run_status'"
+        ),
+        params,
+    )
+    await session.commit()
+
+
 async def mark_run_status(
     session: AsyncSession, run_id: str, status: str, metadata: dict[str, Any] | None = None
 ) -> None:
@@ -452,16 +485,24 @@ async def mark_run_status(
     await session.commit()
 
 
-async def mark_run_resumed(session: AsyncSession, old_run_id: str, new_run_id: str) -> None:
-    """Closes out a paused ('input-required') run once a follow-up run has
-    been created to continue its thread — see api_agui.run_agent's/
-    api_a2a._start_run's resume path and grpc_server._resume_parent_run_if_waiting.
-    Must happen before (or as part of the same transaction as) creating
-    that follow-up run: otherwise both rows are briefly 'active'
-    simultaneously and get_active_run_for_thread's tie-break could still
-    surface the stale paused one instead of the new run.
+async def merge_run_metadata(session: AsyncSession, run_id: str, metadata: dict[str, Any]) -> None:
+    """Merges into a run's metadata without touching status or any
+    timestamp column — unlike mark_run_status, which always implies a
+    real state transition (and, for some statuses, stamps started_at/
+    completed_at). Used for bookkeeping that piggybacks on a run without
+    claiming it changed state: souk marking a run as waiting on a
+    specific run it just delegated to (see
+    api_a2a._finalize_delegated_call), without pretending the run itself
+    was ever paused.
     """
-    await mark_run_status(session, old_run_id, "resumed", metadata={"resumedByRunId": new_run_id})
+    await session.execute(
+        text(
+            "UPDATE thread_history SET metadata = metadata || CAST(:metadata AS jsonb), "
+            "last_activity_at = now() WHERE run_id = :run_id AND kind = 'run_status'"
+        ),
+        {"run_id": run_id, "metadata": json.dumps(metadata)},
+    )
+    await session.commit()
 
 
 async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
@@ -504,24 +545,37 @@ async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str
     return {"thread_id": thread_id, "messages": messages, "active_run": active_run}
 
 
-async def find_parent_run_waiting_on(session: AsyncSession, child_thread_id: str) -> dict[str, Any] | None:
-    """Finds the (at most one, by construction — see get_active_run_for_thread)
-    'input-required' run elsewhere that paused specifically waiting on
-    `child_thread_id` to resolve (see souk/pause.py's waitingOnThreadId).
-    Called when a run in `child_thread_id` completes, to decide whether to
-    auto-resume the waiting parent (see grpc_server._resume_parent_run).
+async def find_run_waiting_on(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
+    """Finds the run (at most one, by construction) that declared it's
+    waiting specifically on `run_id` (see souk/pause.py's
+    waitingOnRunId). Called when a run reaches a terminal state, to
+    decide whether to auto-resume the run waiting on it (see
+    grpc_server._resume_parent_run_if_waiting).
+
+    Deliberately scoped to one specific run, not its whole thread: two
+    separate delegations to the same reused callee thread (see
+    ensure_thread's parent_thread_id reuse) point at two different
+    run_ids, so resolving one can never be mistaken for resolving the
+    other, no matter what order they finish in. This is also why a
+    waited-on run keeps its identity stable across however many
+    pause/resume rounds it goes through (see reopen_run) — the run_id a
+    waiter named at delegation time is guaranteed to still be the
+    *current* one when it finally resolves, no retargeting needed. This
+    replaced an earlier, thread-scoped version that needed a separate
+    "already consumed" marker, `ORDER BY id DESC`, and an explicit
+    pointer-retargeting step to paper over exactly that ambiguity — see
+    git history on this file.
     """
     row = (
         await session.execute(
             text(
                 """
                 SELECT * FROM thread_history
-                WHERE kind = 'run_status' AND status = 'input-required'
-                  AND metadata->>'waitingOnThreadId' = :child_thread_id
-                ORDER BY id DESC LIMIT 1
+                WHERE kind = 'run_status' AND metadata->>'waitingOnRunId' = :run_id
+                LIMIT 1
                 """
             ),
-            {"child_thread_id": child_thread_id},
+            {"run_id": run_id},
         )
     ).mappings().first()
     return dict(row) if row else None
@@ -666,6 +720,7 @@ async def get_run_by_task_id(session: AsyncSession, task_id: str) -> dict[str, A
     return dict(row) if row else None
 
 
+
 async def append_run_event(session: AsyncSession, run_id: str, seq: int, event_json: dict[str, Any]) -> None:
     await session.execute(
         text(
@@ -684,3 +739,21 @@ async def get_run_events(session: AsyncSession, run_id: str) -> list[dict[str, A
         )
     ).mappings().all()
     return [row["event_json"] for row in rows]
+
+
+async def get_last_event_seq(session: AsyncSession, run_id: str) -> int:
+    """The highest seq already persisted for this run_id, or 0 if none
+    yet. Needed when reopening a run for another round (see
+    repo.reopen_run) — the in-memory broker.Run object driving that
+    round is a brand new object (the previous round's pipeline already
+    terminated), so its seq counter would otherwise restart at 0 and
+    collide with run_events rows this same run_id already wrote in an
+    earlier round — see broker.RunBroker.enqueue_run's `seq` parameter.
+    """
+    row = (
+        await session.execute(
+            text("SELECT COALESCE(MAX(seq), 0) AS max_seq FROM run_events WHERE run_id = :run_id"),
+            {"run_id": run_id},
+        )
+    ).mappings().first()
+    return row["max_seq"]
