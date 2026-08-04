@@ -19,6 +19,7 @@ adapter already produces.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import secrets
@@ -313,12 +314,44 @@ class SoukAgentClient:
             first = await inbox.get()
             run_input = json.loads(first.json_payload)
 
-            async for event in handle.run_stream(run_input):
-                await outbound.put(
-                    souk_pb2.AgentEventEnvelope(
-                        run_id=run_id, agent_id=agent_id, json_payload=json.dumps(event)
+            async def consume() -> None:
+                async for event in handle.run_stream(run_input):
+                    await outbound.put(
+                        souk_pb2.AgentEventEnvelope(
+                            run_id=run_id, agent_id=agent_id, json_payload=json.dumps(event)
+                        )
                     )
-                )
+
+            async def watch_cancel() -> None:
+                # souk's cancel envelope is the only thing that should show
+                # up here while a run is in flight — the ack this run is
+                # itself waiting for (below) arrives after end_of_stream,
+                # by which point this watcher has already been cancelled.
+                while True:
+                    envelope = await inbox.get()
+                    if envelope.cancel:
+                        return
+                    logger.warning("run %s: unexpected frame while running, ignoring", run_id)
+
+            consumer = asyncio.create_task(consume())
+            watcher = asyncio.create_task(watch_cancel())
+            done, _pending = await asyncio.wait({consumer, watcher}, return_when=asyncio.FIRST_COMPLETED)
+            if consumer in done:
+                watcher.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watcher
+                consumer.result()
+            else:
+                # souk will never read another event for this run (its
+                # consumer disconnected) — stop running run_stream instead
+                # of paying for an LLM call/tool loop nobody will see.
+                # Cancelling the task delivers CancelledError into
+                # run_stream's *current* await, not just between yields,
+                # so an in-flight LLM/tool call is actually interrupted.
+                logger.info("run %s: cancelled by souk (consumer gone)", run_id)
+                consumer.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await consumer
         except Exception:
             logger.exception("run %s for agent_id '%s' failed", run_id, agent_id)
         finally:

@@ -8,7 +8,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
 from souk.agui import build_run_agent_input, fill_message_ids, rewrite_message_ids
-from souk.broker import END_OF_STREAM, broker
+from souk.broker import broker, drain_run
+from souk.grpc_server import HANDLERS
 from souk.db import get_session
 from souk.models import RunAgentInput
 
@@ -123,12 +124,22 @@ async def _run_agent(
 
     thread_id = await repo.ensure_thread(session, agent_id, body.thread_id, metadata=body.metadata)
 
-    created = await repo.create_run(
-        session, thread_id, agent_id, "ag-ui", body.model_dump(mode="json"), metadata=body.metadata
-    )
-    run_id = created["run_id"]
     if resuming_run_id is not None:
-        await repo.mark_run_resumed(session, resuming_run_id, run_id)
+        # Reopens the *same* run_id for another round rather than
+        # minting a new one — see repo.reopen_run's docstring for why a
+        # stable identity across pause/resume rounds matters (it's what
+        # lets a delegating caller's waitingOnRunId subscription, and
+        # this run's own task_id if it's an A2A one, stay valid without
+        # ever needing to be retargeted or chased through a chain).
+        run_id = resuming_run_id
+        starting_seq = await repo.get_last_event_seq(session, run_id)
+        await repo.reopen_run(session, run_id, body.model_dump(mode="json"), metadata=body.metadata)
+    else:
+        created = await repo.create_run(
+            session, thread_id, agent_id, "ag-ui", body.model_dump(mode="json"), metadata=body.metadata
+        )
+        run_id = created["run_id"]
+        starting_seq = 0
 
     messages = fill_message_ids(body.messages)
     await repo.append_thread_messages(session, thread_id, run_id, messages)
@@ -162,7 +173,7 @@ async def _run_agent(
 
     await session.commit()
 
-    state = broker.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui")
+    run = broker.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui", HANDLERS, seq=starting_seq)
 
     async def event_stream():
         # Maps the agent's own provider-generated messageId (e.g.
@@ -170,14 +181,21 @@ async def _run_agent(
         # one, consistently across a message's START/CONTENT/END events —
         # see souk.agui.rewrite_message_ids.
         message_id_map: dict[str, str] = {}
-        try:
-            while True:
-                item = await state.output_queue.get()
-                if item is END_OF_STREAM:
-                    break
-                yield {"event": "message", "data": json.dumps(rewrite_message_ids(item, message_id_map))}
-        finally:
-            broker.forget(run_id)
+        # No `finally` here, deliberately: this loop exiting some other
+        # way than drain_run's natural end (the caller disconnected, or
+        # this generator got closed out from under it) does not cancel
+        # the run. souk's own DB state is authoritative and the run keeps
+        # going regardless of whether anyone's still watching this
+        # particular stream — a dropped connection (network blip, tab
+        # closed and reopened) shouldn't throw away in-progress work a
+        # reconnect (GET /threads/{thread_id}) could otherwise catch up
+        # on. Cancelling a run is an explicit act only (see A2A's
+        # tasks/cancel; AG-UI has no equivalent endpoint yet). The run's
+        # own pipeline task forgets it from the registry once it
+        # naturally finishes either way — nothing for this generator to
+        # do on its way out.
+        async for item in drain_run(run):
+            yield {"event": "message", "data": json.dumps(rewrite_message_ids(item, message_id_map))}
 
     return EventSourceResponse(
         event_stream(),

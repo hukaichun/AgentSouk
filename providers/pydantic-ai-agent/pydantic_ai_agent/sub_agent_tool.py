@@ -52,6 +52,15 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
 
         final_text = ""
         failed = False
+        # Set when souk's final status update for this call reports
+        # 'input-required' — the callee paused (e.g. HITL approval, see
+        # souk/pause.py) rather than truly finishing. Distinct from
+        # "failed" or "no response": the call is still live, just not
+        # resolved yet. Reported honestly here (see
+        # souk.api_a2a._finalize_delegated_call — it's the one that makes
+        # sure this state update reflects reality rather than the raw
+        # RUN_FINISHED event a naive translation would otherwise send).
+        pending = False
         async for update in call_agent_streaming(
             sub.a2a_url,
             message,
@@ -65,8 +74,11 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
                     "value": {"sub_agent": sub.name, **update},
                 }
             )
-            if update.get("status", {}).get("state") == "failed":
+            state = update.get("status", {}).get("state")
+            if state == "failed":
                 failed = True
+            elif state == "input-required":
+                pending = True
             artifact = update.get("artifact")
             if artifact:
                 for part in artifact.get("parts", []):
@@ -74,6 +86,12 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
                         final_text += part["text"]
         if failed:
             return f"({sub.name} is currently unavailable — the call failed or timed out)"
+        if pending:
+            return (
+                f"({sub.name} needs more time to respond — e.g. it's waiting on human "
+                "approval — and hasn't resolved yet; you'll be notified once it does, "
+                "no need to call it again for this)"
+            )
         return final_text or f"(no response from {sub.name})"
 
     call_sub_agent.__name__ = f"call_{sub.name}"

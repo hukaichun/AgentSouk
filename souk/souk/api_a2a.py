@@ -33,9 +33,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
 from souk.agui import build_run_agent_input
-from souk.broker import END_OF_STREAM, broker
+from souk.broker import broker, drain_run, request_cancel
 from souk.config import settings
 from souk.db import get_session
+from souk.grpc_server import HANDLERS
 from souk.identity import InvalidActorChain, verify_actor_chain
 from souk.translate_a2a import (
     a2a_message_to_agui_messages,
@@ -181,19 +182,24 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
     resuming_run_id = active["run_id"] if active is not None else None
 
     messages = a2a_message_to_agui_messages(params.get("message", {}))
+    resume_input = {"thread_id": thread_id, "messages": messages}
 
-    created = await repo.create_run(
-        session,
-        thread_id,
-        agent_id,
-        "a2a",
-        {"thread_id": thread_id, "messages": messages},
-        assign_task_id=False,
-        metadata=metadata,
-    )
-    run_id = created["run_id"]
     if resuming_run_id is not None:
-        await repo.mark_run_resumed(session, resuming_run_id, run_id)
+        # Reopens the *same* run_id for another round rather than
+        # minting a new one — see repo.reopen_run's docstring for why a
+        # stable identity across pause/resume rounds matters (it's what
+        # lets a caller's task_id, and anyone else's waitingOnRunId
+        # subscription on this run, stay valid without ever needing to
+        # be retargeted or chased through a chain).
+        run_id = resuming_run_id
+        starting_seq = await repo.get_last_event_seq(session, run_id)
+        await repo.reopen_run(session, run_id, resume_input, metadata=metadata)
+    else:
+        created = await repo.create_run(
+            session, thread_id, agent_id, "a2a", resume_input, assign_task_id=False, metadata=metadata
+        )
+        run_id = created["run_id"]
+        starting_seq = 0
 
     # tasks/send(Subscribe) task ids are caller-supplied (see module docstring),
     # so store it directly rather than souk's usual new_id("task").
@@ -231,8 +237,47 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
 
     await session.commit()
 
-    broker.enqueue_run(run_id, agent_id, thread_id, agui_input_json, "a2a")
+    broker.enqueue_run(run_id, agent_id, thread_id, agui_input_json, "a2a", HANDLERS, seq=starting_seq)
     return task_id, run_id, True
+
+
+async def _finalize_delegated_call(session: AsyncSession, run_id: str) -> dict | None:
+    """Runs after draining a call's (tasks/send or tasks/sendSubscribe)
+    live output, to react to what actually happened rather than what the
+    last translated AG-UI event claimed — see
+    translate_a2a.agui_event_to_a2a_update: a raw RUN_FINISHED always
+    maps to "completed" there, even when it was preceded by a
+    souk.pause CUSTOM event and the real persisted status is
+    'input-required'.
+
+    If the callee paused instead of truly finishing, and this call was
+    itself a sub-agent delegation (see threads.parent_thread_id, set via
+    metadata.parentThreadId — see _start_run), marks whichever run is
+    currently active on the delegating thread as waiting on this
+    *specific* run — so it gets a resume notification once this run
+    eventually reaches a true terminal state, however many further
+    pause/resume rounds it goes through in between under this same
+    run_id (see repo.reopen_run) — see repo.find_run_waiting_on /
+    grpc_server._resume_parent_run_if_waiting,
+    without requiring the delegating agent's own code to do anything
+    beyond honestly reading back an "input-required" tool result instead
+    of misreading a mistranslated "completed" (see
+    pydantic_ai_agent.sub_agent_tool). Pinned to this run_id rather than
+    the callee's thread_id because that thread may be reused across
+    other, unrelated delegation calls over its lifetime (see
+    souk/pause.py's waitingOnRunId for why that ambiguity matters).
+    """
+    db_run = await repo.get_run(session, run_id)
+    if db_run is not None and db_run["status"] == "input-required":
+        thread = await repo.get_thread(session, db_run["thread_id"])
+        parent_thread_id = thread["parent_thread_id"] if thread else None
+        if parent_thread_id is not None:
+            caller_run = await repo.get_active_run_for_thread(session, parent_thread_id)
+            if caller_run is not None:
+                await repo.merge_run_metadata(
+                    session, caller_run["run_id"], {"waitingOnRunId": run_id}
+                )
+    return db_run
 
 
 async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventSourceResponse | dict:
@@ -243,15 +288,14 @@ async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventS
 
     if method == "tasks/send":
         task_id, run_id, is_new = await _start_run(session, agent_id, params)
-        state = broker.get(run_id) if is_new else None
-        if state is not None:
-            events: list[dict] = []
-            while True:
-                item = await state.output_queue.get()
-                if item is END_OF_STREAM:
-                    break
-                events.append(item)
-            broker.forget(run_id)
+        run = broker.get(run_id) if is_new else None
+        if run is not None:
+            # No cleanup on early exit, deliberately: a caller
+            # disconnecting mid-wait does not cancel the run — see
+            # api_agui.run_agent's event_stream for why. The run's own
+            # pipeline task forgets it from the registry once it
+            # naturally finishes either way.
+            events = [item async for item in drain_run(run)]
         else:
             # Not a fresh run: either already paused/finished, already
             # failed fast (see _start_run's offline check), or this is a
@@ -259,41 +303,51 @@ async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventS
             # requester — either way, nothing to wait on here. Report its
             # current persisted state instead.
             events = await repo.get_run_events(session, run_id)
-        run = await repo.get_run(session, run_id)
+        db_run = await _finalize_delegated_call(session, run_id)
         display_name = await _display_name(session, agent_id)
-        task = build_task(task_id, display_name, run["status"] if run else "completed", events)
+        task = build_task(task_id, display_name, db_run["status"] if db_run else "completed", events)
         return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
     if method == "tasks/sendSubscribe":
         task_id, run_id, is_new = await _start_run(session, agent_id, params)
-        state = broker.get(run_id) if is_new else None
+        run = broker.get(run_id) if is_new else None
 
         async def event_stream():
-            if state is None:
+            if run is None:
                 # Same "not fresh" situation as tasks/send above, but
                 # streaming: emit one status update reflecting the
                 # current persisted state and close — there's nothing
                 # live to subscribe to.
-                run = await repo.get_run(session, run_id)
-                status = run["status"] if run else "completed"
+                db_run = await _finalize_delegated_call(session, run_id)
+                status = db_run["status"] if db_run else "completed"
                 update = status_update_for_run_status(task_id, status)
                 yield {
                     "event": "message",
                     "data": json.dumps({"jsonrpc": "2.0", "id": rpc_id, "result": update}),
                 }
                 return
-            try:
-                while True:
-                    item = await state.output_queue.get()
-                    if item is END_OF_STREAM:
-                        break
-                    update = agui_event_to_a2a_update(item, task_id)
-                    yield {
-                        "event": "message",
-                        "data": json.dumps({"jsonrpc": "2.0", "id": rpc_id, "result": update}),
-                    }
-            finally:
-                broker.forget(run_id)
+            # No cleanup on early exit, deliberately — see
+            # api_agui.run_agent's event_stream for why a disconnected
+            # caller does not cancel the run.
+            async for item in drain_run(run):
+                update = agui_event_to_a2a_update(item, task_id)
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"jsonrpc": "2.0", "id": rpc_id, "result": update}),
+                }
+            db_run = await _finalize_delegated_call(session, run_id)
+            if db_run is not None and db_run["status"] == "input-required":
+                # Corrects the record: the loop above already sent
+                # whatever the raw RUN_FINISHED event translated to
+                # (always "completed", see agui_event_to_a2a_update) —
+                # this final message overrides it with the real
+                # persisted outcome, so a live watcher isn't left with a
+                # false "completed" as the last word.
+                final_update = status_update_for_run_status(task_id, db_run["status"])
+                yield {
+                    "event": "message",
+                    "data": json.dumps({"jsonrpc": "2.0", "id": rpc_id, "result": final_update}),
+                }
 
         return EventSourceResponse(event_stream())
 
@@ -309,13 +363,26 @@ async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventS
 
     if method == "tasks/cancel":
         task_id = params.get("id")
-        run = await repo.get_run_by_task_id(session, task_id)
-        if run is None:
+        db_run = await repo.get_run_by_task_id(session, task_id)
+        if db_run is None:
             return {"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32001, "message": "task not found"}}
-        # Best-effort: marks the run cancelled so tasks/get reflects it; the
-        # agent-side run in flight (if any) isn't forcibly interrupted in v1.
-        await repo.mark_run_status(session, run["run_id"], "cancelled")
-        events = await repo.get_run_events(session, run["run_id"])
+        # This is the only place in AG-UI/A2A that actually cancels a run
+        # — a disconnected caller (tasks/sendSubscribe, AG-UI's
+        # run_agent) never does, only this explicit request. broker.
+        # request_cancel flips run.cancelled immediately (see its
+        # docstring), then — if this run is still live on some
+        # AgentSession connection — its own pipeline task writes the DB
+        # status and tells the agent side to stop producing further
+        # events for it (best-effort: a no-op if it already finished or
+        # has no live connection). Not a synchronous wait for that DB
+        # write to land — this response hardcodes "cancelled" regardless,
+        # so there's nothing here that actually depends on it, just a
+        # caller doing tasks/get immediately after could in principle
+        # still observe the old status for a moment.
+        run = broker.get(db_run["run_id"])
+        if run is not None:
+            request_cancel(run)
+        events = await repo.get_run_events(session, db_run["run_id"])
         display_name = await _display_name(session, agent_id)
         task = build_task(task_id, display_name, "cancelled", events)
         return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
