@@ -30,16 +30,24 @@ class SoukClient:
         *,
         thread_id: str | None = None,
         role: str = "user",
+        metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """POSTs a RunAgentInput to /agui/{agent_name} and yields each AG-UI
         event as it streams back. Pass `thread_id` from a previous call's
         `last_thread_id` to continue that conversation; omit it to start a
         new one (souk assigns and returns the id).
+
+        `metadata` is stored on the run/thread as-is and, notably, is
+        where a Keep Your Own Key caller passes
+        `{"kyok": {"sessionId": ...}}` — see KyokBridge and
+        docs/keep-your-own-key.md in the souk repo.
         """
-        body = {
+        body: dict[str, Any] = {
             "thread_id": thread_id,
             "messages": [{"id": str(uuid4()), "role": role, "content": message}],
         }
+        if metadata is not None:
+            body["metadata"] = metadata
         url = f"{self.souk_http_url}/agui/{agent_name}"
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:

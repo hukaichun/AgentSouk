@@ -48,3 +48,8 @@ agents:
       only the translation, nothing else.
     mcp_servers: []
     sub_agents: []
+    # Keep Your Own Key demo (see docs/keep-your-own-key.md): a caller
+    # that starts a run with metadata.kyok.sessionId gets its LLM calls
+    # routed through souk's /kyok/v1 relay and paid for with the caller's
+    # own key instead of this container's LLM_API_KEY.
+    use_kyok: true

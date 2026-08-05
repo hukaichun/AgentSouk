@@ -6,7 +6,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from souk import api_a2a, api_agui, api_registry, repo
+from souk import api_a2a, api_agui, api_llm_bridge, api_registry, repo
 from souk.config import settings
 from souk.db import SessionLocal, bootstrap_schema
 from souk.grpc_server import create_grpc_server
@@ -58,6 +58,7 @@ app.add_middleware(
 app.include_router(api_registry.router)
 app.include_router(api_agui.router)
 app.include_router(api_a2a.router)
+app.include_router(api_llm_bridge.router)
 
 
 async def _serve() -> None:
