@@ -32,7 +32,7 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity
     identity = new_identity()
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "b"}])
     agent_b = agent_ids["b"]
-    thread_b = await repo.ensure_thread(session, agent_b, None)
+    thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
     run_id = created["run_id"]
     await session.commit()
@@ -62,7 +62,7 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, ne
     identity = new_identity()
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "b"}])
     agent_b = agent_ids["b"]
-    thread_b = await repo.ensure_thread(session, agent_b, None)
+    thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
     run_id = created["run_id"]
     await session.commit()
@@ -91,7 +91,7 @@ async def test_finalize_delegated_call_reports_honestly_without_registering_any_
     )
     agent_b, agent_c = agent_ids["b"], agent_ids["c"]
 
-    thread_b = await repo.ensure_thread(session, agent_b, None)
+    thread_b = await repo.create_thread(session, agent_b)
     thread_c = await repo.ensure_thread(session, agent_c, None, parent_thread_id=thread_b)
 
     run_b = await repo.create_run(session, thread_b, agent_b, "a2a", {})
@@ -119,7 +119,7 @@ async def test_a_delegating_agent_gets_an_honest_answer_by_just_asking_again(ses
     identity = new_identity()
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "c"}])
     agent_c = agent_ids["c"]
-    thread_c = await repo.ensure_thread(session, agent_c, None)
+    thread_c = await repo.create_thread(session, agent_c)
 
     run_c = await repo.create_run(session, thread_c, agent_c, "a2a", {})
     await repo.mark_run_status(session, run_c["run_id"], "input-required")

@@ -278,20 +278,34 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
   document.getElementById("call-chain")!.classList.remove("has-chain");
   showTyping();
 
-  // No client-generated `id` here — souk backfills a message id for any
-  // AG-UI message that omits one (see souk.agui.fill_message_ids), the
-  // same way it already does for A2A-sourced messages. souk is the one
-  // party that actually needs ids in its own <category>_<hex> shape
-  // (thread history, run events, ...); a plain browser caller shouldn't
-  // have to reimplement that scheme just to satisfy AG-UI's schema.
-  const body: Record<string, unknown> = {
-    messages: [{ role: "user", content: text }],
-  };
-  if (threadId) {
-    body.thread_id = threadId;
-  }
-
+  // souk has no implicit thread-creation path (see souk/api_agui.py's
+  // module docstring) — every run addresses a thread_id POST /threads
+  // already handed out, so a first message here means creating one
+  // first. The message itself still needs an `id` — real AG-UI's own
+  // Message schema requires one, no default — but souk discards
+  // whatever value this is and assigns its own real one regardless (see
+  // repo.append_thread_messages), so any locally-unique placeholder
+  // satisfies the schema without meaning anything beyond that.
   try {
+    if (!threadId) {
+      const created = await fetch(`${soukUrl}/threads/id/${encodeURIComponent(agentId!)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      threadId = (await created.json()).thread_id;
+    }
+
+    const body: Record<string, unknown> = {
+      threadId,
+      runId: crypto.randomUUID(),
+      state: null,
+      messages: [{ id: crypto.randomUUID(), role: "user", content: text }],
+      tools: [],
+      context: [],
+      forwardedProps: null,
+    };
+
     const resp = await fetch(`${soukUrl}/agui/id/${encodeURIComponent(agentId!)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },

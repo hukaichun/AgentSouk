@@ -8,10 +8,11 @@ engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 SCHEMA_SQL = """
--- Every souk-owned entity id (agent_id, thread_id, run_id, message_id,
--- souk-assigned task_id) is generated here, by the database, at insert
--- time — never precomputed in Python and handed to Postgres as a value
--- to store. `gen_random_bytes` needs pgcrypto.
+-- Every souk-owned entity id (agent_id, thread_id, run_id, message_id)
+-- is generated here, by the database, at insert time — never
+-- precomputed in Python and handed to Postgres as a value to store.
+-- A2A has no separate task_id concept; its Task.id is just this run_id
+-- (see api_a2a._start_run). `gen_random_bytes` needs pgcrypto.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE OR REPLACE FUNCTION souk_new_id(category TEXT) RETURNS TEXT AS $$
@@ -117,7 +118,7 @@ CREATE TABLE IF NOT EXISTS thread_history (
     -- interrupt outcome (see souk/pause.py) rather than completing
     -- normally. Not terminal like the other non-active statuses below:
     -- resuming a paused run reopens this *same* row under its existing
-    -- run_id/task_id for another round (see repo.reopen_run) rather
+    -- run_id for another round (see repo.reopen_run) rather
     -- than creating a new one, so a run's identity stays stable across
     -- however many pause/resume rounds it goes through. Excluded from
     -- the stall sweep (souk.health) as long as it's genuinely paused
@@ -130,17 +131,6 @@ CREATE TABLE IF NOT EXISTS thread_history (
     -- rows from before pause/resume rounds were tracked this way.
     status        TEXT CHECK (status IN ('queued', 'running', 'input-required', 'resumed', 'completed', 'failed', 'cancelled')),
     input_json    JSONB,
-    -- Set only for protocol='a2a'. Two distinct sources, deliberately not
-    -- unified: a real A2A tasks/send(Subscribe) call supplies its own
-    -- task_id per the A2A spec (the client picks it, souk just stores it
-    -- — see api_a2a._start_run/repo.set_task_id, a plain UPDATE after
-    -- this row already exists); repo.create_run(assign_task_id=True)
-    -- souk-generates one itself via souk_new_id('task') in the INSERT
-    -- below for the cases where souk needs one and no caller supplied
-    -- it. The A2A-caller-supplied case is a deliberate exception to
-    -- "every id is database-generated" — souk isn't the one who gets to
-    -- pick it there.
-    task_id       TEXT,
     started_at    TIMESTAMPTZ,
     completed_at  TIMESTAMPTZ,
     -- Bumped on every status change and every event relayed for this run
@@ -160,10 +150,12 @@ CREATE TABLE IF NOT EXISTS thread_history (
     UNIQUE (thread_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_thread_history_thread ON thread_history (thread_id, id);
+-- A2A's Task.id is just this run_id (see api_a2a._start_run) — no
+-- separate task_id concept, so this same unique index is what both
+-- souk's own dispatch and A2A's tasks/get/tasks/cancel lookups rely on;
+-- there's nothing else to index.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_history_run_status_run_id
     ON thread_history (run_id) WHERE kind = 'run_status';
-CREATE INDEX IF NOT EXISTS idx_thread_history_task_id
-    ON thread_history (task_id) WHERE kind = 'run_status';
 
 -- Finer-grained than thread_history's per-run status/history: the raw
 -- AG-UI event stream for a run (tool calls, state deltas, ...), kept

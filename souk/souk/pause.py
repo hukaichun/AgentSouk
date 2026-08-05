@@ -32,6 +32,22 @@ resolved — that's the whole point of `input-required`: it blocks a new
 run from starting on the same thread (see `repo.get_active_run_for_thread`)
 until the interrupt is addressed.
 
+**Only ever through AG-UI, never through A2A — this is a provider
+decision, not a protocol one.** A provider that pauses decides, itself,
+whether the human/caller on the other end can actually supply what it's
+waiting for. If the call reaching it came in via A2A, "the other end" is
+just another agent, not a human — there's no reason to let *that* agent
+resolve an interrupt it was never meant to approve in the first place.
+So `is_resuming` below is the one and only check either surface uses to
+decide whether to let a call bypass an active, paused run instead of
+just reporting its current state — `api_agui._run_agent` feeds it the
+real `resume` a caller sent (AG-UI is the one surface that legitimately
+can carry one); `api_a2a._start_run` always feeds it `None`, structurally
+incapable of ever bypassing this. An A2A-invoked provider that needs a
+human to actually resolve something must design for that human reaching
+it directly over AG-UI on this same thread_id — not for the delegating
+agent to do it on the human's behalf.
+
 Waiting on a sub-agent call to resolve is a different thing entirely,
 and deliberately does *not* go through this module: whether one agent
 can get an answer from another it delegated to is just a question of
@@ -69,3 +85,19 @@ def interrupt_outcome_of(event: dict) -> list[dict[str, Any]] | None:
     if not isinstance(outcome, dict) or outcome.get("type") != "interrupt":
         return None
     return outcome.get("interrupts") or []
+
+
+def is_resuming(active_run: dict[str, Any] | None, resume: list[dict[str, Any]] | None) -> bool:
+    """True only if `active_run` is genuinely paused (`input-required`)
+    and `resume` is real, non-empty AG-UI `ResumeEntry` data — the one
+    condition either HTTP surface uses to decide whether a call may
+    bypass an active run instead of just reporting its current state
+    (see `repo.get_active_run_for_thread`'s callers). `api_a2a._start_run`
+    always passes `resume=None` here — see this module's docstring for
+    why that's not an oversight.
+    """
+    return (
+        active_run is not None
+        and bool(resume)
+        and active_run["status"] == "input-required"
+    )
