@@ -45,6 +45,22 @@ class AgentHandle:
     run_stream: RunStream
     description: str = ""
     agent_card_extra: dict[str, Any] = field(default_factory=dict)
+    # If your run_stream already keeps its own record of a thread's
+    # conversation (keyed by run_input["threadId"]), set this so souk
+    # doesn't hand you a full replay of everything you already have.
+    # Concretely: this changes exactly one thing — when souk auto-resumes
+    # a run that was waiting on a delegated sub-agent call (see the
+    # README's "Pausing a run" section), souk normally refetches and
+    # resends the *entire* parent thread's message history in `messages`
+    # since there's no caller-supplied new turn to relay for that kind of
+    # resume. With this set, souk sends `messages: []` instead — you still
+    # get everything you need to react (the actual result is in
+    # `forwardedProps.resume`), just not a redundant copy of history
+    # you're already storing yourself. Every other path (`/agui`, `/a2a`,
+    # a caller-driven HITL resume) already only ever sends the caller's
+    # new message(s) for that turn regardless of this flag — there was
+    # nothing to opt out of there.
+    manages_own_history: bool = False
 
 
 class SoukAgentClient:
@@ -142,6 +158,7 @@ class SoukAgentClient:
                             "name": a.name,
                             "description": a.description,
                             "agent_card_extra": a.agent_card_extra,
+                            "metadata": {"manages_own_history": a.manages_own_history},
                         }
                         for a in self.agents.values()
                     ],

@@ -26,11 +26,12 @@ class SoukClient:
     async def run(
         self,
         agent_name: str,
-        message: str,
+        message: str = "",
         *,
         thread_id: str | None = None,
         role: str = "user",
         metadata: dict[str, Any] | None = None,
+        resume: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """POSTs a RunAgentInput to /agui/{agent_name} and yields each AG-UI
         event as it streams back. Pass `thread_id` from a previous call's
@@ -41,13 +42,24 @@ class SoukClient:
         where a Keep Your Own Key caller passes
         `{"kyok": {"sessionId": ...}}` — see KyokBridge and
         docs/keep-your-own-key.md in the souk repo.
+
+        `resume` is AG-UI's own interrupt/resume mechanism
+        (`ag_ui.core.ResumeEntry`: `{"interruptId": ..., "status":
+        "resolved"|"cancelled", "payload": ...}`) — pass it, on the same
+        `thread_id` a previous call's stream ended paused on (its last
+        `RUN_FINISHED` carried `outcome.type == "interrupt"`), to resolve
+        one or more of those interrupts. `message` isn't required
+        alongside it — resolving an interrupt isn't necessarily saying
+        anything new in the conversation, so an empty `message` sends no
+        message at all rather than an empty one.
         """
-        body: dict[str, Any] = {
-            "thread_id": thread_id,
-            "messages": [{"id": str(uuid4()), "role": role, "content": message}],
-        }
+        body: dict[str, Any] = {"thread_id": thread_id, "messages": []}
+        if message:
+            body["messages"] = [{"id": str(uuid4()), "role": role, "content": message}]
         if metadata is not None:
             body["metadata"] = metadata
+        if resume is not None:
+            body["resume"] = resume
         url = f"{self.souk_http_url}/agui/{agent_name}"
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:

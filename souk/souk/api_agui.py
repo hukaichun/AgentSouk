@@ -206,6 +206,7 @@ async def _run_agent(
             run_id,
             messages,
             forwarded_props=_build_forwarded_props(run_id, agent_id, body.metadata),
+            resume=body.resume,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

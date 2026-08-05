@@ -44,12 +44,15 @@ async def run_stream(run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]
             last_user_text = message.get("content", "")
             break
 
-    # A run can also end paused instead of finished — e.g. waiting on a
-    # tool-call approval, or on another (sub-agent) thread to resolve —
-    # by emitting a souk.run_paused CUSTOM event before RUN_FINISHED and
-    # then ending the stream normally; see souk/pause.py for the full
-    # convention and providers/pydantic-ai-agent for a worked example
-    # (deferred tool calls + sub-agent delegation).
+    # A run can also end paused instead of finished — e.g. a tool-call
+    # approval (RUN_FINISHED's own outcome={"type": "interrupt", ...},
+    # AG-UI's native mechanism — pydantic-ai's Tool(requires_approval=True)
+    # does this for you), or waiting on another (sub-agent) thread to
+    # resolve (a souk.run_paused CUSTOM event, souk's own extension since
+    # AG-UI has no native concept of that) — then ending the stream
+    # normally either way; see souk/pause.py for the full convention and
+    # providers/pydantic-ai-agent for a worked example (deferred tool
+    # calls + sub-agent delegation).
 
     message_id = f"{run_id}-reply"
     yield {"type": "TEXT_MESSAGE_START", "messageId": message_id, "role": "assistant"}

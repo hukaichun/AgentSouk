@@ -72,6 +72,7 @@ def build_run_agent_input(
     tools: list[dict[str, Any]] | None = None,
     context: list[dict[str, Any]] | None = None,
     forwarded_props: Any = None,
+    resume: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     try:
         model = RunAgentInput.model_validate(
@@ -83,6 +84,12 @@ def build_run_agent_input(
                 "tools": tools or [],
                 "context": context or [],
                 "forwardedProps": forwarded_props,
+                # AG-UI's own field (ag_ui.core.ResumeEntry) — forwarded
+                # byte-for-byte from whatever the caller (or, on souk's
+                # sub-agent auto-resume path, nobody at all) supplied. See
+                # souk/pause.py for how a provider's own RUN_FINISHED
+                # interrupt outcome round-trips into this.
+                "resume": resume,
             }
         )
     except ValidationError as e:

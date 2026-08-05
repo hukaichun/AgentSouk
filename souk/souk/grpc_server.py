@@ -40,7 +40,7 @@ from souk.config import settings
 from souk.db import SessionLocal
 from souk.grpc_gen import souk_pb2, souk_pb2_grpc
 from souk.identity import verify_session_token
-from souk.pause import is_pause_event
+from souk.pause import interrupt_outcome_of, is_pause_event
 
 logger = logging.getLogger("souk.grpc")
 
@@ -122,6 +122,12 @@ async def _handle_relay(run: Run, cmd: RelayEvent) -> None:
         # status once the stream actually ends — a pause event isn't
         # itself a stream terminator (see souk/pause.py).
         run.pause_payload = event.get("value") or {}
+    interrupts = interrupt_outcome_of(event)
+    if interrupts is not None:
+        # AG-UI's own interrupt outcome (souk.pause's case 1) — same
+        # remembered-until-stream-ends handling as the CUSTOM pause event
+        # above, just a different provider-side trigger for it.
+        run.pause_payload = {"interrupts": interrupts}
     run.seq += 1
     async with SessionLocal() as session:
         await repo.append_run_event(session, run.run_id, run.seq, event)
@@ -234,19 +240,21 @@ async def _resume_parent_run_if_waiting(
         if parent_run is None:
             return
         parent_thread_id = parent_run["thread_id"]
+        parent_agent = await repo.get_agent_by_id(session, parent_run["agent_id"])
+        manages_own_history = bool(
+            (parent_agent or {}).get("metadata", {}).get("manages_own_history")
+        )
         if status == "completed":
             child_messages = await repo.get_thread_messages(session, child_thread_id)
             result_text = _last_assistant_text(child_messages)
         else:
             result_text = reason or status
-        forwarded_props = {
-            "resume": {
-                "waitingOnThreadId": child_thread_id,
-                "status": status,
-                "result": result_text,
-            }
+        resume_payload = {
+            "waitingOnThreadId": child_thread_id,
+            "status": status,
+            "result": result_text,
         }
-        resume_input = {"resume": forwarded_props["resume"]}
+        resume_input = {"resume": resume_payload}
         if parent_run["status"] == "input-required":
             # Reopens the *same* run_id/task_id for another round — see
             # repo.reopen_run's docstring for why a stable identity
@@ -278,10 +286,34 @@ async def _resume_parent_run_if_waiting(
             )
             new_run_id = created["run_id"]
             starting_seq = 0
-        parent_messages = await repo.get_thread_messages(session, parent_thread_id)
+        # A provider that keeps its own storage (AgentHandle.
+        # manages_own_history — see souk-agent-sdk's README) already has
+        # everything before this point under parent_thread_id; all it
+        # needs from this auto-resume is the context entry below, so skip
+        # the full-thread refetch/redump entirely rather than paying for a
+        # query result no one's going to read. A provider that didn't opt
+        # in still gets the full replay it relies on.
+        parent_messages = (
+            [] if manages_own_history else await repo.get_thread_messages(session, parent_thread_id)
+        )
+        # AG-UI's `context` field ("additional context for the agent" —
+        # ag_ui.core.Context: {description, value}, both plain strings) is
+        # the protocol-native slot for exactly this: information for the
+        # agent to fold in however it sees fit, not a literal conversation
+        # turn. Deliberately not forwardedProps (that field is a generic,
+        # already-multi-purpose passthrough bag — KYOK's token, actor
+        # chains — and not shaped for this at all) and deliberately not a
+        # synthesized `messages` entry (that would force a specific role/
+        # framing on every provider, and risks a model mistaking a system
+        # notification for something the human actually said). souk hands
+        # over the raw facts; how — or whether — to fold this into an LLM
+        # prompt is entirely the provider's call.
+        context = [
+            {"description": "souk.sub_agent_resume", "value": json.dumps(resume_payload)}
+        ]
         try:
             input_json = build_run_agent_input(
-                parent_thread_id, new_run_id, parent_messages, forwarded_props=forwarded_props
+                parent_thread_id, new_run_id, parent_messages, context=context
             )
         except ValueError:
             logger.exception("failed to build resume RunAgentInput for thread=%s", parent_thread_id)

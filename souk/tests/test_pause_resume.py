@@ -25,9 +25,11 @@ Covers four things:
 
 from __future__ import annotations
 
+import json
+
 from souk import repo
-from souk.broker import broker
-from souk.grpc_server import _resume_parent_run_if_waiting
+from souk.broker import FinishStream, RelayEvent, broker
+from souk.grpc_server import _handle_finish, _handle_relay, _resume_parent_run_if_waiting
 
 
 async def test_single_hop_notification_does_not_propagate_past_a_non_waiting_caller(session, new_identity):
@@ -310,3 +312,133 @@ async def test_resume_parent_run_if_waiting_wakes_a_completed_parent_that_delega
     assert new_run["input_json"]["resume"]["waitingOnThreadId"] == thread_c
     assert broker.get(new_run["run_id"]) is not None
     broker.forget(new_run["run_id"])
+
+
+async def test_resume_parent_run_if_waiting_sends_full_history_by_default(session, new_identity):
+    """The default (AgentHandle.manages_own_history=False, souk-side just
+    'no manages_own_history metadata at all') — the parent's real message
+    history is re-sent on auto-resume, same as before this flag existed.
+    """
+    identity = new_identity()
+    agent_ids = await repo.register_agents(
+        session, "sdk_1", identity.public_key, [{"name": "b"}, {"name": "c"}]
+    )
+    agent_b, agent_c = agent_ids["b"], agent_ids["c"]
+
+    thread_b = await repo.ensure_thread(session, agent_b, None)
+    thread_c = await repo.ensure_thread(session, agent_c, None)
+
+    run_c = await repo.create_run(session, thread_c, agent_c, "a2a", {})
+    run_b1 = await repo.create_run(session, thread_b, agent_b, "a2a", {})
+    await repo.append_thread_messages(
+        session, thread_b, run_b1["run_id"], [{"id": "m1", "role": "user", "content": "hi"}]
+    )
+    await repo.mark_run_status(
+        session, run_b1["run_id"], "input-required", metadata={"waitingOnRunId": run_c["run_id"]}
+    )
+    await repo.mark_run_status(session, run_c["run_id"], "completed")
+
+    await _resume_parent_run_if_waiting(run_c["run_id"], thread_c, "completed")
+
+    run = broker.get(run_b1["run_id"])
+    assert run is not None
+    assert [m["id"] for m in run.input_json["messages"]] == ["m1"]
+    broker.forget(run_b1["run_id"])
+
+
+async def test_resume_parent_run_if_waiting_skips_history_for_manages_own_history_agents(
+    session, new_identity
+):
+    """AgentHandle(manages_own_history=True) (souk-agent-sdk) registers as
+    agents.metadata.manages_own_history=True — souk must send `messages:
+    []` on auto-resume instead of re-dumping the parent thread's history,
+    since a provider that opted into this already has it under
+    threadId. The delegated call's actual result still arrives, just via
+    the `context` entry (see grpc_server._resume_parent_run_if_waiting),
+    not a redundant copy in `messages`.
+    """
+    identity = new_identity()
+    agent_ids = await repo.register_agents(
+        session,
+        "sdk_1",
+        identity.public_key,
+        [{"name": "b", "metadata": {"manages_own_history": True}}, {"name": "c"}],
+    )
+    agent_b, agent_c = agent_ids["b"], agent_ids["c"]
+
+    thread_b = await repo.ensure_thread(session, agent_b, None)
+    thread_c = await repo.ensure_thread(session, agent_c, None)
+
+    run_c = await repo.create_run(session, thread_c, agent_c, "a2a", {})
+    run_b1 = await repo.create_run(session, thread_b, agent_b, "a2a", {})
+    await repo.append_thread_messages(
+        session, thread_b, run_b1["run_id"], [{"id": "m1", "role": "user", "content": "hi"}]
+    )
+    await repo.mark_run_status(
+        session, run_b1["run_id"], "input-required", metadata={"waitingOnRunId": run_c["run_id"]}
+    )
+    await repo.mark_run_status(session, run_c["run_id"], "completed")
+
+    await _resume_parent_run_if_waiting(run_c["run_id"], thread_c, "completed")
+
+    run = broker.get(run_b1["run_id"])
+    assert run is not None
+    assert run.input_json["messages"] == []
+    [context_entry] = run.input_json["context"]
+    assert context_entry["description"] == "souk.sub_agent_resume"
+    assert json.loads(context_entry["value"])["waitingOnThreadId"] == thread_c
+
+
+async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity):
+    """The other half of souk/pause.py: a provider's own RUN_FINISHED
+    outcome (AG-UI's native interrupt mechanism — no souk-specific CUSTOM
+    event involved) end-to-end through the real handlers _handle_relay/
+    _handle_finish, not just souk.pause.interrupt_outcome_of in
+    isolation (see test_pause.py for that).
+    """
+    identity = new_identity()
+    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "b"}])
+    agent_b = agent_ids["b"]
+    thread_b = await repo.ensure_thread(session, agent_b, None)
+    created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
+    run_id = created["run_id"]
+    await session.commit()
+
+    run = broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
+    interrupt = {"id": "int_1", "reason": "tool_call", "message": "Approve foo(1)?"}
+    finished_event = {
+        "type": "RUN_FINISHED",
+        "threadId": thread_b,
+        "runId": run_id,
+        "outcome": {"type": "interrupt", "interrupts": [interrupt]},
+    }
+    await _handle_relay(run, RelayEvent(json_payload=json.dumps(finished_event)))
+    await _handle_finish(run, FinishStream())
+
+    reread = await repo.get_run(session, run_id)
+    assert reread["status"] == "input-required"
+    assert reread["metadata"]["interrupts"] == [interrupt]
+    broker.forget(run_id)
+
+
+async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, new_identity):
+    """Regression guard: a plain RUN_FINISHED (outcome absent, or
+    {"type": "success"}) must still complete normally — the interrupt
+    check must not fire on the common case.
+    """
+    identity = new_identity()
+    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "b"}])
+    agent_b = agent_ids["b"]
+    thread_b = await repo.ensure_thread(session, agent_b, None)
+    created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
+    run_id = created["run_id"]
+    await session.commit()
+
+    run = broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
+    finished_event = {"type": "RUN_FINISHED", "threadId": thread_b, "runId": run_id}
+    await _handle_relay(run, RelayEvent(json_payload=json.dumps(finished_event)))
+    await _handle_finish(run, FinishStream())
+
+    reread = await repo.get_run(session, run_id)
+    assert reread["status"] == "completed"
+    broker.forget(run_id)

@@ -11,6 +11,75 @@ If you just want a working example to copy, skip to
 [Reference implementations](#reference-implementations). This document is
 for understanding *why* each piece is required.
 
+## The actual pitch: your agent probably already qualifies
+
+souk's headline feature (see the top-level README) is making agents
+reachable — over **AG-UI** and **A2A** — without exposing any inbound
+port, tunnel, or public IP: the agent connects *out* to souk, souk does
+the rest. The part that matters for you here is what "becoming reachable"
+actually costs.
+
+Look again at the contract above: `run_stream(run_input)` takes a real
+AG-UI `RunAgentInput` and yields real AG-UI events. That's not a
+souk-specific shape layered on top of AG-UI — it *is* AG-UI. If you've
+already built an agent that speaks AG-UI (CopilotKit's `ag-ui-protocol`,
+your own hand-rolled event stream, whatever framework already emits
+`TEXT_MESSAGE_*`/`RUN_STARTED`/`RUN_FINISHED`), you have already written
+the one function this whole SDK exists to wrap. There is no separate
+"souk agent" you build — you take the agent you have, put its existing
+AG-UI-shaped streaming loop behind `AgentHandle(run_stream=...)`, and it's
+now a provider, reachable from anywhere, with zero inbound network
+exposure and no rewrite of your actual agent logic. Everything else this
+document describes (registration, polling, gRPC transport, cancellation,
+pause/resume, KYOK) is infrastructure *around* that one function — souk
+never asks you to change how your agent thinks or talks, only how it gets
+plugged in.
+
+## Why use this instead of talking gRPC directly
+
+Nothing stops you from implementing `proto/souk.proto` yourself — souk
+doesn't care. What `SoukAgentClient` buys you, in exchange for writing one
+`run_stream` function, is everything *around* that function that's easy to
+get subtly wrong if you write it by hand:
+
+- **Reconnection and token refresh are not your problem.** `run_forever()`
+  re-registers on every (re)connect and refreshes the gRPC bearer token
+  before it expires as a side effect of that — there's no separate timer
+  to manage, and no "the connection silently died three hours ago and
+  nobody's polling anymore" failure mode to debug.
+- **Cancellation actually cancels.** `_handle_run` races your `run_stream`
+  against souk's cancel signal and calls `.cancel()` on the real asyncio
+  task the moment it arrives — including into an in-flight LLM call, not
+  just at your next `yield`. Rolling this yourself means either polling
+  for cancellation manually inside every long-running step, or not really
+  supporting cancellation at all.
+- **Backpressure is a constructor argument.** `max_concurrent_runs=N` caps
+  how much work this process claims across all its agents; get this
+  wrong by hand and you either leave capacity idle or take on more
+  concurrent runs than your real LLM rate limit / GPU / whatever can
+  actually serve.
+- **Pause/resume and A2A delegation are a couple of function calls, not a
+  protocol you design.** Emitting one CUSTOM event pauses a run
+  resumably; `a2a_client.call_agent_streaming` drives a full
+  `tasks/sendSubscribe` exchange, including souk auto-resuming you when a
+  delegated sub-agent call finishes — see
+  [Pausing a run](#pausing-a-run-hitl-and-sub-agent-waits) and
+  [Delegating to another agent](#delegating-to-another-agent-a2a) below.
+- **Identity is a keypair the SDK manages for you**, not an account you
+  provision through some other channel — `load_or_create_identity`
+  generates and persists it, and the same key is what makes A2A
+  delegation and [KYOK](#keep-your-own-key-kyok-opt-in) attribution work
+  without extra setup.
+- **Opting into [KYOK](#keep-your-own-key-kyok-opt-in) costs one
+  constructor argument on your `httpx.Client`**, reusing the identity key
+  you already have — not a second SDK or a different wire protocol.
+
+None of this is large in isolation, but it's the kind of code that's easy
+to get almost-right and hard to notice is almost-right until a run hangs,
+a cancel doesn't propagate, or a token expires mid-stream. That's the
+actual trade you're making by depending on this package instead of the
+raw proto.
+
 ## The contract, minimally
 
 A provider is one or more named agents, each backed by a function:
@@ -108,48 +177,82 @@ nobody is waiting on anymore.
 
 ## Pausing a run (HITL and sub-agent waits)
 
-A run doesn't have to finish or fail — it can pause, resumable later,
-by emitting one CUSTOM event before ending the stream normally:
+A run doesn't have to finish or fail — it can pause, resumable later. Two
+different things trigger this, handled two different ways (see
+`souk/pause.py` for the full convention souk-side):
 
-```python
-yield {
-    "type": "CUSTOM",
-    "name": "souk.run_paused",
-    "value": {},  # or {"waitingOnRunId": <some other run_id>}
-}
-yield {"type": "RUN_FINISHED", ...}
-```
+- **Plain HITL pause — AG-UI's own mechanism, not souk's.** Use this when
+  your own run needs something only a human/caller can supply (tool-call
+  approval, missing information) before it can continue. End your stream
+  with a `RUN_FINISHED` whose `outcome` is AG-UI's native
+  `{"type": "interrupt", "interrupts": [...]}`
+  (`ag_ui.core.RunFinishedInterruptOutcome`/`Interrupt`, ag-ui-protocol
+  >= 0.1.19) instead of the default `{"type": "success"}`:
 
-This is deliberately not a new wire protocol — just a regular AG-UI
-CUSTOM event (see `souk/pause.py` for the full convention souk-side). A
-paused run **never holds the connection open**: end the stream normally
-right after, the same as any other completion. souk records
-`status='input-required'` instead of `'completed'`.
+  ```python
+  yield {
+      "type": "RUN_FINISHED",
+      "threadId": ..., "runId": ...,
+      "outcome": {
+          "type": "interrupt",
+          "interrupts": [{"id": "...", "reason": "...", "message": "..."}],
+      },
+  }
+  ```
 
-Two shapes:
+  **If you're on pydantic-ai, you likely don't need to build this by
+  hand at all**: `Tool(..., requires_approval=True)` makes pydantic-ai's
+  own AG-UI adapter emit and consume this outcome for you, end to end —
+  see `providers/pydantic-ai-agent`'s tool definitions for where that
+  flag goes. Nothing here is souk-specific; a provider built this way
+  needs zero souk-aware code to support pausing.
 
-- **Plain HITL pause** (`value` has no `waitingOnRunId`): use this when
-  your own run needs something only a human can supply (tool-call
-  approval, missing information) before it can continue. Someone resumes
-  it later with a normal AG-UI/A2A call carrying `resume: true` and
-  whatever new `messages` answer what you were waiting on (an approval
-  decision, the missing information — there's no special wrapper for
-  this, it's just the next ordinary message in the thread). souk handles
-  the resume specially even though the caller's request looks ordinary:
-  **your run keeps its same `run_id` (and A2A `task_id`, if any) for the
-  new round** — `run_stream` gets invoked again with a fresh
-  `RunAgentInput` on that same id, not handed off to a new one.
+  A paused run **never holds the connection open**: this `RUN_FINISHED`
+  ends the stream normally, same as any other completion. souk records
+  `status='input-required'` instead of `'completed'`, with the
+  interrupts preserved. Someone resumes it later with a normal AG-UI
+  call carrying `resume: [{"interruptId": ..., "status":
+  "resolved"|"cancelled", "payload": ...}]` — also AG-UI's own field
+  (`ag_ui.core.ResumeEntry`), forwarded to you byte-for-byte; souk never
+  interprets `payload`. **Your run keeps its same `run_id` (and A2A
+  `task_id`, if any) for the new round** — `run_stream` gets invoked
+  again with a fresh `RunAgentInput` on that same id, not handed off to
+  a new one.
 
-- **Waiting on a specific sub-agent call**
-  (`value.waitingOnRunId = <the callee's run_id>`): use this if your run
-  genuinely cannot proceed without a specific delegated call's result.
-  souk auto-resumes you (no external caller needed) once that run_id
-  reaches a real terminal state, with `forwardedProps.resume =
-  {"waitingOnThreadId": ..., "status": "completed"|"cancelled"|"failed",
-  "result": ...}`. `waitingOnRunId` is deliberately a run_id, not a
-  thread_id — the callee's thread may be reused across several separate
-  delegation calls over its lifetime, so pinning the specific run
-  removes any ambiguity about which call you mean.
+- **Waiting on a specific sub-agent call — a real souk extension, not
+  AG-UI's.** AG-UI's interrupt/resume has no concept of "wake me up once
+  some other run finishes" — that's not a caller resolving anything,
+  it's souk itself re-invoking your run with no external trigger at all,
+  so there's no native field to piggyback on. This one still goes
+  through a plain AG-UI CUSTOM event instead:
+
+  ```python
+  yield {
+      "type": "CUSTOM",
+      "name": "souk.run_paused",
+      "value": {"waitingOnRunId": "<the callee's run_id>"},
+  }
+  yield {"type": "RUN_FINISHED", ...}
+  ```
+
+  Use this if your run genuinely cannot proceed without a specific
+  delegated call's result. souk auto-resumes you (no external caller
+  needed) once that run_id reaches a real terminal state, reported via
+  AG-UI's own `context` field
+  (`ag_ui.core.Context`: `{"description": str, "value": str}`, the
+  protocol-native slot for "additional context for the agent" — not a
+  synthesized chat message, and not `forwardedProps`, which is a
+  different, already-multi-purpose passthrough bag). Look for an entry
+  with `description == "souk.sub_agent_resume"`; its `value` is a JSON
+  string: `{"waitingOnThreadId": ..., "status":
+  "completed"|"cancelled"|"failed", "result": ...}`. How — or whether —
+  to fold that into your next LLM call (a tool-result-shaped message, a
+  system note, ignored entirely) is entirely your call; souk hands over
+  the raw facts and takes no position on your message format.
+  `waitingOnRunId` is deliberately a run_id, not a thread_id — the
+  callee's thread may be reused across several separate delegation calls
+  over its lifetime, so pinning the specific run removes any ambiguity
+  about which call you mean.
 
   **You usually don't need to do this yourself.** If you delegate via
   `souk_agent_sdk.a2a_client` (see below) and the callee turns out to
@@ -166,6 +269,26 @@ own caller is waiting on you, your caller only gets notified once *your*
 run reaches a real terminal state — not on every intermediate pause you
 go through. See `souk/pause.py`'s module docstring for the exact
 boundary.
+
+### If you keep your own conversation storage
+
+Every other path into `run_stream` (a fresh `/agui` or `/a2a` call, or a
+caller-driven HITL resume) only ever puts *that turn's* new message(s) in
+`messages` — souk never expands it to a full history dump on its own;
+whatever's in there is exactly what the caller sent. The one exception is
+the sub-agent-wait auto-resume above: since there's no caller-supplied
+new turn for souk to relay in that case, it defaults to re-sending the
+*entire* parent thread's message history in `messages`, on the assumption
+you have nothing else to go on.
+
+If you already keep your own storage of a thread's conversation (keyed by
+`run_input["threadId"]`), that assumption is wrong for you, and you can
+turn it off: `AgentHandle(manages_own_history=True)`. souk then sends
+`messages: []` on that auto-resume instead — you still get everything you
+need to react, since the actual result lives in the `context` entry (see
+above), just not a redundant copy of history you already have. It costs
+one boolean; there's no wire-format change and nothing to opt into
+anywhere else, since nowhere else was over-sending in the first place.
 
 ## Delegating to another agent (A2A)
 
@@ -188,6 +311,42 @@ tool — read it for the full pattern, including:
   `extend_actor_chain`) if you want the callee's souk to attribute the
   call to a known, registered identity instead of an anonymous caller.
   Optional — an unattributed call still works.
+
+## Keep Your Own Key (KYOK) opt-in
+
+By default your agent calls whatever LLM you configure it to call, paid
+for however you normally pay for it. KYOK lets a *caller* offer to pay for
+a given run with their own key instead — see
+[docs/keep-your-own-key.md](../docs/keep-your-own-key.md) for the full
+design; this section is just the provider-side integration cost, which is
+small and entirely opt-in per agent.
+
+If a run's `forwardedProps.kyok.token` is present, souk is offering you a
+run-scoped OpenAI-compatible endpoint (`{souk_http_url}/kyok/v1`) instead
+of your own LLM config — point an `OpenAIChatModel`/`OpenAIProvider` at it
+with that token as the API key, same as any other OpenAI-compatible host.
+The one thing beyond ordinary OpenAI-wire-compatibility: souk verifies
+*who* is actually calling, live, on every request — so build your
+`httpx.Client`/`AsyncClient` with `auth=KyokSigningAuth(signing_key)`,
+reusing the same Ed25519 key `load_or_create_identity` already gave you
+for registration:
+
+```python
+from souk_agent_sdk import KyokSigningAuth
+
+http_client = httpx.AsyncClient(auth=KyokSigningAuth(signing_key))
+provider = OpenAIProvider(
+    base_url=f"{souk_http_url}/kyok/v1", api_key=kyok_token, http_client=http_client,
+)
+```
+
+That's the entire integration: no new keypair, no change to how you build
+the request body, no per-provider LLM translation code (the caller's own
+bridge is what normalizes across real LLM providers, via litellm — not
+something you need to think about). `providers/pydantic-ai-agent`'s
+`resolve_kyok_model` is the full ~15-line version of this, including how
+to fall back to your own configured model when a run carries no KYOK
+offer at all.
 
 ## Concurrency
 
@@ -221,8 +380,9 @@ the server-side settings this pairs with.
 - **`providers/pydantic-ai-agent/`** — the ceiling of what's demonstrated
   here: YAML-configured agents backed by
   [pydantic-ai](https://ai.pydantic.dev), MCP tool support, sub-agent
-  delegation over A2A, and pause/resume wiring. Start here if you want
-  an LLM already wired up.
+  delegation over A2A, pause/resume wiring, and per-agent
+  [KYOK](#keep-your-own-key-kyok-opt-in) opt-in (`use_kyok: true` in
+  `config.yaml`). Start here if you want an LLM already wired up.
 
 See `providers/README.md` for how to add a new provider example
 alongside these.
