@@ -1,15 +1,13 @@
-"""souk.agui id-assignment helpers — no DB needed, pure functions."""
+"""souk.agui id-assignment helpers — no DB needed, pure functions.
+
+Inbound message ids (fill_message_ids' old job) are now a database
+concern instead — see repo.append_thread_messages and its coverage in
+tests/test_repo_ids.py.
+"""
 
 from __future__ import annotations
 
-from souk.agui import fill_message_ids, rewrite_message_ids
-
-
-def test_fill_message_ids_assigns_only_missing_ids():
-    messages = [{"role": "user", "content": "hi"}, {"role": "user", "content": "already has one", "id": "keep-me"}]
-    filled = fill_message_ids(messages)
-    assert filled[0]["id"].startswith("msg_")
-    assert filled[1]["id"] == "keep-me"
+from souk.agui import rewrite_message_ids
 
 
 def test_rewrite_message_ids_reuses_souk_id_across_events_for_same_original():

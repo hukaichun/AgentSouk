@@ -8,6 +8,16 @@ engine = create_async_engine(settings.database_url, pool_pre_ping=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
 SCHEMA_SQL = """
+-- Every souk-owned entity id (agent_id, thread_id, run_id, message_id,
+-- souk-assigned task_id) is generated here, by the database, at insert
+-- time — never precomputed in Python and handed to Postgres as a value
+-- to store. `gen_random_bytes` needs pgcrypto.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE OR REPLACE FUNCTION souk_new_id(category TEXT) RETURNS TEXT AS $$
+    SELECT category || '_' || encode(gen_random_bytes(12), 'hex');
+$$ LANGUAGE sql VOLATILE;
+
 -- A "provider" isn't a first-class registration concept the way an agent
 -- is — it's just whoever holds a given public_key, identified purely by
 -- that key (see agents.public_key). This table exists only to attach an
@@ -24,10 +34,13 @@ CREATE TABLE IF NOT EXISTS providers (
 );
 
 CREATE TABLE IF NOT EXISTS agents (
-    -- souk-assigned: agent_<hex> (souk.ids.new_id) — the real routing/
-    -- ownership key. `name` below is deliberately NOT this: it's a free,
-    -- non-unique, human-facing label (multiple identities may register the
-    -- same name; see the UNIQUE(public_key, name) constraint instead).
+    -- Database-generated (souk_new_id('agent') — see repo.register_agents,
+    -- which only ever supplies an explicit value here to *reuse* an
+    -- already-existing (public_key, name) pair's id, never to mint a new
+    -- one itself) — the real routing/ownership key. `name` below is
+    -- deliberately NOT this: it's a free, non-unique, human-facing label
+    -- (multiple identities may register the same name; see the
+    -- UNIQUE(public_key, name) constraint instead).
     agent_id      TEXT PRIMARY KEY,
     name          TEXT NOT NULL,
     sdk_client_id TEXT NOT NULL,
@@ -55,7 +68,7 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 
 CREATE TABLE IF NOT EXISTS threads (
-    thread_id         TEXT PRIMARY KEY,   -- souk-assigned: thread_<hex>
+    thread_id         TEXT PRIMARY KEY DEFAULT souk_new_id('thread'),
     agent_id          TEXT NOT NULL REFERENCES agents(agent_id),
     -- Set when this thread was spawned by an A2A call from within another
     -- thread's run (e.g. a main agent delegating to a sub-agent) — pure
@@ -81,11 +94,19 @@ CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads (parent_thread_id);
 CREATE TABLE IF NOT EXISTS thread_history (
     id            BIGSERIAL PRIMARY KEY,
     thread_id     TEXT NOT NULL REFERENCES threads(thread_id),
-    run_id        TEXT NOT NULL,
+    -- Only actually generated here for a fresh 'run_status' row
+    -- (repo.create_run omits it from that INSERT's column list); a
+    -- 'message' row belonging to an existing run passes its run_id
+    -- explicitly, which bypasses this default entirely.
+    run_id        TEXT NOT NULL DEFAULT souk_new_id('run'),
     kind          TEXT NOT NULL CHECK (kind IN ('message', 'run_status')),
 
     -- kind = 'message'
-    message_id    TEXT,
+    -- Generated here, unconditionally — repo.append_thread_messages
+    -- never accepts a caller-supplied id for this column, and a
+    -- 'run_status' row's INSERT must explicitly set this NULL (not omit
+    -- it) to avoid picking up this default by accident.
+    message_id    TEXT DEFAULT souk_new_id('msg'),
     message_json  JSONB,
 
     -- kind = 'run_status'
@@ -109,7 +130,17 @@ CREATE TABLE IF NOT EXISTS thread_history (
     -- rows from before pause/resume rounds were tracked this way.
     status        TEXT CHECK (status IN ('queued', 'running', 'input-required', 'resumed', 'completed', 'failed', 'cancelled')),
     input_json    JSONB,
-    task_id       TEXT,   -- souk-assigned: task_<hex>, set only for protocol='a2a'
+    -- Set only for protocol='a2a'. Two distinct sources, deliberately not
+    -- unified: a real A2A tasks/send(Subscribe) call supplies its own
+    -- task_id per the A2A spec (the client picks it, souk just stores it
+    -- — see api_a2a._start_run/repo.set_task_id, a plain UPDATE after
+    -- this row already exists); repo.create_run(assign_task_id=True)
+    -- souk-generates one itself via souk_new_id('task') in the INSERT
+    -- below for the cases where souk needs one and no caller supplied
+    -- it. The A2A-caller-supplied case is a deliberate exception to
+    -- "every id is database-generated" — souk isn't the one who gets to
+    -- pick it there.
+    task_id       TEXT,
     started_at    TIMESTAMPTZ,
     completed_at  TIMESTAMPTZ,
     -- Bumped on every status change and every event relayed for this run

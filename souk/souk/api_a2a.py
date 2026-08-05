@@ -200,10 +200,16 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
         run_id = created["run_id"]
         starting_seq = 0
 
-    # tasks/send(Subscribe) task ids are caller-supplied (see module docstring),
-    # so store it directly rather than souk's usual new_id("task").
+    # tasks/send(Subscribe) task ids are caller-supplied (see module docstring)
+    # — a deliberate exception to souk's usual database-generated ids (see
+    # souk/db.py's thread_history.task_id column comment) — so store it
+    # directly.
     await repo.set_task_id(session, run_id, task_id)
-    await repo.append_thread_messages(session, thread_id, run_id, messages)
+    # append_thread_messages assigns each message its real, database-
+    # generated id (discarding the placeholder a2a_message_to_agui_messages
+    # set) and hands back the same messages with `id` set to that — this
+    # exact return value is what goes to the provider below.
+    messages = await repo.append_thread_messages(session, thread_id, run_id, messages)
 
     # Fast-fail (see souk.health's queued-timeout sweep for the fallback
     # covering the race where the target goes offline *after* this check):

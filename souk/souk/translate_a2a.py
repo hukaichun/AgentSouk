@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from souk.ids import new_id
-
 # souk's run statuses <-> A2A's own task states. 'input-required' is
 # already A2A vocabulary (a task legitimately paused waiting on more
 # input) — reused as-is rather than inventing a souk-specific name, see
@@ -45,11 +43,15 @@ def status_update_for_run_status(task_id: str, run_status: str) -> dict[str, Any
 
 
 def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, Any]]:
+    """No `id` here on purpose — repo.append_thread_messages assigns the
+    real, database-generated one for whatever it stores this under; an id
+    minted here would just be discarded.
+    """
     role = "assistant" if a2a_message.get("role") == "agent" else "user"
     text = "".join(
         part.get("text", "") for part in a2a_message.get("parts", []) if part.get("type") == "text"
     )
-    return [{"id": new_id("msg"), "role": role, "content": text}]
+    return [{"role": role, "content": text}]
 
 
 def agui_event_to_a2a_update(event: dict[str, Any], task_id: str) -> dict[str, Any]:

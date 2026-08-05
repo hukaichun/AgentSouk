@@ -14,7 +14,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import settings
-from souk.ids import new_id
 
 
 async def upsert_provider_name(session: AsyncSession, public_key: str, display_name: str) -> None:
@@ -77,37 +76,45 @@ async def register_agents(
     agent_ids: dict[str, str] = {}
     for agent in agents:
         name = agent["name"]
-        agent_id = existing_ids.get(name) or new_id("agent")
-        agent_ids[name] = agent_id
         card = {
             "name": name,
             "description": agent.get("description", ""),
             **agent.get("agent_card_extra", {}),
         }
-        await session.execute(
-            text(
-                """
-                INSERT INTO agents
-                    (agent_id, name, sdk_client_id, public_key, agent_card, metadata, joined_at, last_seen_at)
-                VALUES
-                    (:agent_id, :name, :sdk_client_id, :public_key, :agent_card, :metadata, now(), now())
-                ON CONFLICT (agent_id) DO UPDATE SET
-                    sdk_client_id = EXCLUDED.sdk_client_id,
-                    agent_card = EXCLUDED.agent_card,
-                    metadata = EXCLUDED.metadata,
-                    last_seen_at = now(),
-                    delisted_at = NULL
-                """
-            ),
-            {
-                "agent_id": agent_id,
-                "name": name,
-                "sdk_client_id": sdk_client_id,
-                "public_key": public_key,
-                "agent_card": json.dumps(card),
-                "metadata": json.dumps(agent.get("metadata", {})),
-            },
-        )
+        # `:agent_id` is the *existing* id when this (public_key, name)
+        # pair has already registered before — reused explicitly so the
+        # UPSERT below lands on that same row. For a genuinely new pair
+        # it's NULL, and the database itself generates the real id
+        # (souk_new_id('agent')) — never precomputed in Python.
+        row = (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO agents
+                        (agent_id, name, sdk_client_id, public_key, agent_card, metadata, joined_at, last_seen_at)
+                    VALUES
+                        (COALESCE(:agent_id, souk_new_id('agent')), :name, :sdk_client_id, :public_key,
+                         :agent_card, :metadata, now(), now())
+                    ON CONFLICT (agent_id) DO UPDATE SET
+                        sdk_client_id = EXCLUDED.sdk_client_id,
+                        agent_card = EXCLUDED.agent_card,
+                        metadata = EXCLUDED.metadata,
+                        last_seen_at = now(),
+                        delisted_at = NULL
+                    RETURNING agent_id
+                    """
+                ),
+                {
+                    "agent_id": existing_ids.get(name),
+                    "name": name,
+                    "sdk_client_id": sdk_client_id,
+                    "public_key": public_key,
+                    "agent_card": json.dumps(card),
+                    "metadata": json.dumps(agent.get("metadata", {})),
+                },
+            )
+        ).mappings().first()
+        agent_ids[name] = row["agent_id"]
 
     await session.execute(
         text(
@@ -313,25 +320,27 @@ async def ensure_thread(
                 {"thread_id": row["thread_id"]},
             )
             return row["thread_id"]
-        thread_id = new_id("thread")
-    else:
-        thread_id = new_id("thread")
 
-    await session.execute(
-        text(
-            """
-            INSERT INTO threads (thread_id, agent_id, parent_thread_id, metadata, created_at, last_activity_at)
-            VALUES (:thread_id, :agent_id, :parent_thread_id, :metadata, now(), now())
-            """
-        ),
-        {
-            "thread_id": thread_id,
-            "agent_id": agent_id,
-            "parent_thread_id": parent_thread_id,
-            "metadata": json.dumps(metadata or {}),
-        },
-    )
-    return thread_id
+    # A fresh thread either way at this point — thread_id is omitted from
+    # the INSERT below so the database generates it (souk_new_id('thread')
+    # — see souk/db.py), not Python.
+    row = (
+        await session.execute(
+            text(
+                """
+                INSERT INTO threads (agent_id, parent_thread_id, metadata, created_at, last_activity_at)
+                VALUES (:agent_id, :parent_thread_id, :metadata, now(), now())
+                RETURNING thread_id
+                """
+            ),
+            {
+                "agent_id": agent_id,
+                "parent_thread_id": parent_thread_id,
+                "metadata": json.dumps(metadata or {}),
+            },
+        )
+    ).mappings().first()
+    return row["thread_id"]
 
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
@@ -356,25 +365,50 @@ async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dic
 
 async def append_thread_messages(
     session: AsyncSession, thread_id: str, run_id: str, messages: list[dict[str, Any]]
-) -> None:
-    for index, message in enumerate(messages):
-        message_id = str(message.get("id") or f"{run_id}-{index}")
+) -> list[dict[str, Any]]:
+    """Stores each message under a database-generated message_id
+    (souk_new_id('msg') — see souk/db.py's thread_history.message_id
+    DEFAULT) — any `id` a message already carried (caller-supplied or
+    otherwise) is discarded, never trusted as this row's real identity.
+    Returns the same messages with `id` overwritten to the id that's now
+    authoritative in the database, since callers (api_agui.py/
+    api_a2a.py) hand this exact return value to build_run_agent_input —
+    the provider must see the same id souk itself now uses for this
+    message, not whatever it looked like before this call.
+    """
+    stored: list[dict[str, Any]] = []
+    for message in messages:
+        row = (
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO thread_history (thread_id, run_id, kind, message_json, metadata)
+                    VALUES (:thread_id, :run_id, 'message', :message_json, :metadata)
+                    RETURNING message_id
+                    """
+                ),
+                {
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                    "message_json": json.dumps(message),
+                    "metadata": json.dumps(message.get("metadata", {})),
+                },
+            )
+        ).mappings().first()
+        final_message = {**message, "id": row["message_id"]}
         await session.execute(
             text(
-                """
-                INSERT INTO thread_history (thread_id, run_id, kind, message_id, message_json, metadata)
-                VALUES (:thread_id, :run_id, 'message', :message_id, :message_json, :metadata)
-                ON CONFLICT (thread_id, message_id) DO NOTHING
-                """
+                "UPDATE thread_history SET message_json = :message_json "
+                "WHERE thread_id = :thread_id AND message_id = :message_id"
             ),
             {
+                "message_json": json.dumps(final_message),
                 "thread_id": thread_id,
-                "run_id": run_id,
-                "message_id": message_id,
-                "message_json": json.dumps(message),
-                "metadata": json.dumps(message.get("metadata", {})),
+                "message_id": row["message_id"],
             },
         )
+        stored.append(final_message)
+    return stored
 
 
 async def get_thread_messages(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
@@ -402,29 +436,38 @@ async def create_run(
     assign_task_id: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    run_id = new_id("run")
-    task_id = new_id("task") if assign_task_id else None
-    await session.execute(
-        text(
-            """
-            INSERT INTO thread_history
-                (thread_id, run_id, kind, agent_id, protocol, status, input_json, task_id, metadata, last_activity_at)
-            VALUES
-                (:thread_id, :run_id, 'run_status', :agent_id, :protocol, 'queued', :input_json, :task_id, :metadata, now())
-            """
-        ),
-        {
-            "thread_id": thread_id,
-            "run_id": run_id,
-            "agent_id": agent_id,
-            "protocol": protocol,
-            "input_json": json.dumps(input_json),
-            "task_id": task_id,
-            "metadata": json.dumps(metadata or {}),
-        },
-    )
+    # run_id is omitted from the INSERT below so the database generates it
+    # (souk_new_id('run') — see souk/db.py's thread_history.run_id
+    # DEFAULT), not Python. message_id must still be set explicitly to
+    # NULL — that column also has a database default (souk_new_id('msg'),
+    # for 'message'-kind rows), which a 'run_status' row must not pick up
+    # by accident. task_id has its own database-side generation only when
+    # `assign_task_id` — see souk/db.py's column comment for why that
+    # can't be a plain column DEFAULT.
+    row = (
+        await session.execute(
+            text(
+                """
+                INSERT INTO thread_history
+                    (thread_id, kind, agent_id, protocol, status, input_json, message_id, task_id, metadata, last_activity_at)
+                VALUES
+                    (:thread_id, 'run_status', :agent_id, :protocol, 'queued', :input_json, NULL,
+                     CASE WHEN :assign_task_id THEN souk_new_id('task') ELSE NULL END, :metadata, now())
+                RETURNING run_id, task_id
+                """
+            ),
+            {
+                "thread_id": thread_id,
+                "agent_id": agent_id,
+                "protocol": protocol,
+                "input_json": json.dumps(input_json),
+                "assign_task_id": assign_task_id,
+                "metadata": json.dumps(metadata or {}),
+            },
+        )
+    ).mappings().first()
     await session.commit()
-    return {"run_id": run_id, "task_id": task_id}
+    return {"run_id": row["run_id"], "task_id": row["task_id"]}
 
 
 async def set_task_id(session: AsyncSession, run_id: str, task_id: str) -> None:
