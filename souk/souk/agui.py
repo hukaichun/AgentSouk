@@ -85,8 +85,7 @@ def build_run_agent_input(
                 "context": context or [],
                 "forwardedProps": forwarded_props,
                 # AG-UI's own field (ag_ui.core.ResumeEntry) — forwarded
-                # byte-for-byte from whatever the caller (or, on souk's
-                # sub-agent auto-resume path, nobody at all) supplied. See
+                # byte-for-byte from whatever the caller supplied. See
                 # souk/pause.py for how a provider's own RUN_FINISHED
                 # interrupt outcome round-trips into this.
                 "resume": resume,

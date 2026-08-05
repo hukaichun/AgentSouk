@@ -92,8 +92,8 @@ CREATE TABLE IF NOT EXISTS thread_history (
     agent_id      TEXT,
     protocol      TEXT CHECK (protocol IN ('ag-ui', 'a2a')),
     -- 'input-required': the run is paused/resumable instead of
-    -- finished — a provider signaled this via the souk.pause CUSTOM
-    -- event convention (see souk/pause.py) rather than completing
+    -- finished — a provider signaled this via AG-UI's own native
+    -- interrupt outcome (see souk/pause.py) rather than completing
     -- normally. Not terminal like the other non-active statuses below:
     -- resuming a paused run reopens this *same* row under its existing
     -- run_id/task_id for another round (see repo.reopen_run) rather
@@ -133,19 +133,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_history_run_status_run_id
     ON thread_history (run_id) WHERE kind = 'run_status';
 CREATE INDEX IF NOT EXISTS idx_thread_history_task_id
     ON thread_history (task_id) WHERE kind = 'run_status';
--- Backs repo.find_run_waiting_on, called on every run's terminal
--- transition (not just delegated ones — see grpc_server._handle_finish/
--- _handle_cancel/_handle_fail) to check whether some other run is
--- waiting specifically on this one (souk/pause.py's waitingOnRunId) —
--- a full scan for every run finishing is wasteful once thread_history is
--- large, and this partial index keeps the search space to just rows
--- that declared *some* waitingOnRunId (the `? 'waitingOnRunId'` jsonb
--- "has key" operator — not narrowed to any particular status, since a
--- genuinely 'completed' run can still be watching a run_id it delegated
--- to, see api_a2a._finalize_delegated_call).
-CREATE INDEX IF NOT EXISTS idx_thread_history_waiting_on_run
-    ON thread_history ((metadata->>'waitingOnRunId'))
-    WHERE kind = 'run_status' AND metadata ? 'waitingOnRunId';
 
 -- Finer-grained than thread_history's per-run status/history: the raw
 -- AG-UI event stream for a run (tool calls, state deltas, ...), kept

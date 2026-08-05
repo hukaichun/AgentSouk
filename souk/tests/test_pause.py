@@ -1,16 +1,12 @@
-"""Pure-function coverage for souk.pause's two independent pause triggers
-— see that module's docstring for why they're separate mechanisms.
+"""Pure-function coverage for souk.pause.interrupt_outcome_of — the only
+souk-side detection logic left for AG-UI's native HITL pause mechanism.
+Waiting on a sub-agent call is not a pause at all (see that module's
+docstring) and has no dedicated detection function to test here.
 """
 
 from __future__ import annotations
 
-from souk.pause import interrupt_outcome_of, is_pause_event
-
-
-def test_is_pause_event_matches_the_custom_event_only():
-    assert is_pause_event({"type": "CUSTOM", "name": "souk.run_paused", "value": {}})
-    assert not is_pause_event({"type": "CUSTOM", "name": "something_else"})
-    assert not is_pause_event({"type": "RUN_FINISHED"})
+from souk.pause import interrupt_outcome_of
 
 
 def test_interrupt_outcome_of_extracts_interrupts_from_a_run_finished_event():
@@ -28,4 +24,4 @@ def test_interrupt_outcome_of_is_none_for_a_plain_success_finish():
 
 def test_interrupt_outcome_of_is_none_for_non_run_finished_events():
     assert interrupt_outcome_of({"type": "TEXT_MESSAGE_START"}) is None
-    assert interrupt_outcome_of({"type": "CUSTOM", "name": "souk.run_paused"}) is None
+    assert interrupt_outcome_of({"type": "CUSTOM", "name": "anything"}) is None

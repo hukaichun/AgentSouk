@@ -162,9 +162,8 @@ async def _run_agent(
         # Reopens the *same* run_id for another round rather than
         # minting a new one — see repo.reopen_run's docstring for why a
         # stable identity across pause/resume rounds matters (it's what
-        # lets a delegating caller's waitingOnRunId subscription, and
-        # this run's own task_id if it's an A2A one, stay valid without
-        # ever needing to be retargeted or chased through a chain).
+        # lets this run's own task_id, if it's an A2A one, stay valid
+        # without ever needing to be retargeted).
         run_id = resuming_run_id
         starting_seq = await repo.get_last_event_seq(session, run_id)
         await repo.reopen_run(session, run_id, body.model_dump(mode="json"), metadata=body.metadata)

@@ -58,13 +58,12 @@ get subtly wrong if you write it by hand:
   wrong by hand and you either leave capacity idle or take on more
   concurrent runs than your real LLM rate limit / GPU / whatever can
   actually serve.
-- **Pause/resume and A2A delegation are a couple of function calls, not a
-  protocol you design.** Emitting one CUSTOM event pauses a run
+- **Pausing and A2A delegation are a couple of function calls, not a
+  protocol you design.** A native AG-UI interrupt outcome pauses a run
   resumably; `a2a_client.call_agent_streaming` drives a full
-  `tasks/sendSubscribe` exchange, including souk auto-resuming you when a
-  delegated sub-agent call finishes — see
-  [Pausing a run](#pausing-a-run-hitl-and-sub-agent-waits) and
-  [Delegating to another agent](#delegating-to-another-agent-a2a) below.
+  `tasks/sendSubscribe` exchange — see [Pausing a run](#pausing-a-run-hitl)
+  and [Delegating to another agent](#delegating-to-another-agent-a2a)
+  below.
 - **Identity is a keypair the SDK manages for you**, not an account you
   provision through some other channel — `load_or_create_identity`
   generates and persists it, and the same key is what makes A2A
@@ -125,8 +124,9 @@ Every run must yield, in order:
    - `{"type": "RUN_FINISHED", ...}` — the run completed normally.
    - `{"type": "RUN_ERROR", "message": "..."}` — the run failed; souk
      records this and marks the run `failed`.
-   - A `souk.run_paused` CUSTOM event followed by `RUN_FINISHED` — see
-     [Pausing a run](#pausing-a-run-hitl-and-sub-agent-waits) below.
+   - `{"type": "RUN_FINISHED", "outcome": {"type": "interrupt", ...}}`
+     — the run paused, resumable later — see
+     [Pausing a run](#pausing-a-run-hitl) below.
 
 `run_stream` returning (the generator ending) without ever yielding
 `RUN_FINISHED`/`RUN_ERROR` is not itself an error souk detects — do not
@@ -175,120 +175,79 @@ into) ever catch it explicitly, or use a bare `except:`, make sure you
 re-raise: swallowing it means your run keeps burning LLM/tool calls
 nobody is waiting on anymore.
 
-## Pausing a run (HITL and sub-agent waits)
+## Pausing a run (HITL)
 
-A run doesn't have to finish or fail — it can pause, resumable later. Two
-different things trigger this, handled two different ways (see
-`souk/pause.py` for the full convention souk-side):
+A run doesn't have to finish or fail — it can pause, resumable later, if
+it genuinely cannot make further progress without something only a
+human/caller can supply (tool-call approval, missing information). This
+is AG-UI's own mechanism, not souk's — see `souk/pause.py` for the full
+convention souk-side.
 
-- **Plain HITL pause — AG-UI's own mechanism, not souk's.** Use this when
-  your own run needs something only a human/caller can supply (tool-call
-  approval, missing information) before it can continue. End your stream
-  with a `RUN_FINISHED` whose `outcome` is AG-UI's native
-  `{"type": "interrupt", "interrupts": [...]}`
-  (`ag_ui.core.RunFinishedInterruptOutcome`/`Interrupt`, ag-ui-protocol
-  >= 0.1.19) instead of the default `{"type": "success"}`:
+Use this when your own run needs that kind of input before it can
+continue. End your stream with a `RUN_FINISHED` whose `outcome` is
+AG-UI's native `{"type": "interrupt", "interrupts": [...]}`
+(`ag_ui.core.RunFinishedInterruptOutcome`/`Interrupt`, ag-ui-protocol
+>= 0.1.19) instead of the default `{"type": "success"}`:
 
-  ```python
-  yield {
-      "type": "RUN_FINISHED",
-      "threadId": ..., "runId": ...,
-      "outcome": {
-          "type": "interrupt",
-          "interrupts": [{"id": "...", "reason": "...", "message": "..."}],
-      },
-  }
-  ```
+```python
+yield {
+    "type": "RUN_FINISHED",
+    "threadId": ..., "runId": ...,
+    "outcome": {
+        "type": "interrupt",
+        "interrupts": [{"id": "...", "reason": "...", "message": "..."}],
+    },
+}
+```
 
-  **If you're on pydantic-ai, you likely don't need to build this by
-  hand at all**: `Tool(..., requires_approval=True)` makes pydantic-ai's
-  own AG-UI adapter emit and consume this outcome for you, end to end —
-  see `providers/pydantic-ai-agent`'s tool definitions for where that
-  flag goes. Nothing here is souk-specific; a provider built this way
-  needs zero souk-aware code to support pausing.
+**If you're on pydantic-ai, you likely don't need to build this by
+hand at all**: `Tool(..., requires_approval=True)` makes pydantic-ai's
+own AG-UI adapter emit and consume this outcome for you, end to end —
+see `providers/pydantic-ai-agent`'s tool definitions for where that
+flag goes. Nothing here is souk-specific; a provider built this way
+needs zero souk-aware code to support pausing.
 
-  A paused run **never holds the connection open**: this `RUN_FINISHED`
-  ends the stream normally, same as any other completion. souk records
-  `status='input-required'` instead of `'completed'`, with the
-  interrupts preserved. Someone resumes it later with a normal AG-UI
-  call carrying `resume: [{"interruptId": ..., "status":
-  "resolved"|"cancelled", "payload": ...}]` — also AG-UI's own field
-  (`ag_ui.core.ResumeEntry`), forwarded to you byte-for-byte; souk never
-  interprets `payload`. **Your run keeps its same `run_id` (and A2A
-  `task_id`, if any) for the new round** — `run_stream` gets invoked
-  again with a fresh `RunAgentInput` on that same id, not handed off to
-  a new one.
+A paused run **never holds the connection open**: this `RUN_FINISHED`
+ends the stream normally, same as any other completion. souk records
+`status='input-required'` instead of `'completed'`, with the
+interrupts preserved. Someone resumes it later with a normal AG-UI
+call carrying `resume: [{"interruptId": ..., "status":
+"resolved"|"cancelled", "payload": ...}]` — also AG-UI's own field
+(`ag_ui.core.ResumeEntry`), forwarded to you byte-for-byte; souk never
+interprets `payload`. **Your run keeps its same `run_id` (and A2A
+`task_id`, if any) for the new round** — `run_stream` gets invoked
+again with a fresh `RunAgentInput` on that same id, not handed off to
+a new one.
 
-- **Waiting on a specific sub-agent call — a real souk extension, not
-  AG-UI's.** AG-UI's interrupt/resume has no concept of "wake me up once
-  some other run finishes" — that's not a caller resolving anything,
-  it's souk itself re-invoking your run with no external trigger at all,
-  so there's no native field to piggyback on. This one still goes
-  through a plain AG-UI CUSTOM event instead:
+### Waiting on a specific sub-agent call — this isn't a pause at all
 
-  ```python
-  yield {
-      "type": "CUSTOM",
-      "name": "souk.run_paused",
-      "value": {"waitingOnRunId": "<the callee's run_id>"},
-  }
-  yield {"type": "RUN_FINISHED", ...}
-  ```
+If your run delegated to another agent and that call is still in
+progress (or itself paused), don't hold your own run open waiting for
+it, and don't declare any special pause state either — just answer
+honestly and finish normally:
 
-  Use this if your run genuinely cannot proceed without a specific
-  delegated call's result. souk auto-resumes you (no external caller
-  needed) once that run_id reaches a real terminal state, reported via
-  AG-UI's own `context` field
-  (`ag_ui.core.Context`: `{"description": str, "value": str}`, the
-  protocol-native slot for "additional context for the agent" — not a
-  synthesized chat message, and not `forwardedProps`, which is a
-  different, already-multi-purpose passthrough bag). Look for an entry
-  with `description == "souk.sub_agent_resume"`; its `value` is a JSON
-  string: `{"waitingOnThreadId": ..., "status":
-  "completed"|"cancelled"|"failed", "result": ...}`. How — or whether —
-  to fold that into your next LLM call (a tool-result-shaped message, a
-  system note, ignored entirely) is entirely your call; souk hands over
-  the raw facts and takes no position on your message format.
-  `waitingOnRunId` is deliberately a run_id, not a thread_id — the
-  callee's thread may be reused across several separate delegation calls
-  over its lifetime, so pinning the specific run removes any ambiguity
-  about which call you mean.
+```python
+pending = False
+async for update in call_agent_streaming(a2a_url, message, ...):  # a2a_client
+    if update.get("status", {}).get("state") == "input-required":
+        pending = True  # the callee is still working, or itself paused
+if pending:
+    return "still waiting on <sub-agent> — you'll get a real answer next time you check"
+```
 
-  **You usually don't need to do this yourself.** If you delegate via
-  `souk_agent_sdk.a2a_client` (see below) and the callee turns out to
-  need more time, souk detects this from the callee's real status and
-  marks *your currently-active run* as waiting on it automatically —
-  see `souk.api_a2a._finalize_delegated_call`. Your tool call just gets
-  back an honest "still pending" string instead of a real answer; you
-  don't have to emit `souk.run_paused` yourself unless you specifically
-  want your own run to stop and wait rather than finishing normally
-  with that "pending" answer in hand.
-
-This is single-hop, not transitive: if you delegate further and your
-own caller is waiting on you, your caller only gets notified once *your*
-run reaches a real terminal state — not on every intermediate pause you
-go through. See `souk/pause.py`'s module docstring for the exact
-boundary.
-
-### If you keep your own conversation storage
-
-Every other path into `run_stream` (a fresh `/agui` or `/a2a` call, or a
-caller-driven HITL resume) only ever puts *that turn's* new message(s) in
-`messages` — souk never expands it to a full history dump on its own;
-whatever's in there is exactly what the caller sent. The one exception is
-the sub-agent-wait auto-resume above: since there's no caller-supplied
-new turn for souk to relay in that case, it defaults to re-sending the
-*entire* parent thread's message history in `messages`, on the assumption
-you have nothing else to go on.
-
-If you already keep your own storage of a thread's conversation (keyed by
-`run_input["threadId"]`), that assumption is wrong for you, and you can
-turn it off: `AgentHandle(manages_own_history=True)`. souk then sends
-`messages: []` on that auto-resume instead — you still get everything you
-need to react, since the actual result lives in the `context` entry (see
-above), just not a redundant copy of history you already have. It costs
-one boolean; there's no wire-format change and nothing to opt into
-anywhere else, since nowhere else was over-sending in the first place.
+`providers/pydantic-ai-agent/pydantic_ai_agent/sub_agent_tool.py` is the
+worked example. There's no subscription to register and nothing to
+learn beyond this: whether a *later* call to the same sub-agent gets a
+real answer or another "still pending" is decided fresh each time,
+purely by whether the callee's own thread can currently accept a new
+run (see `souk.repo.get_active_run_for_thread` — the same check that
+guards every ordinary call) — not by anything you declared when you
+first called it. You (or whoever prompts your agent next — a new
+message, your own next turn) simply ask again whenever there's reason
+to; souk has no separate "notify me later" mechanism for this, on
+purpose — anything souk did wake you up for would tell you nothing you
+couldn't get by just checking, and would cost a real run (and, if
+you're LLM-backed, a real LLM call) to say it.
 
 ## Delegating to another agent (A2A)
 
@@ -300,9 +259,8 @@ sub_agent_tool.py` is a worked example wiring this up as a pydantic-ai
 tool — read it for the full pattern, including:
 
 - Passing `parent_thread_id` (your own run's `threadId`) so souk can
-  record lineage (`GET /threads/{root}/tree`) and — per the pause
-  section above — automatically mark you as waiting if the callee
-  pauses.
+  record lineage (`GET /threads/{root}/tree`) — lets whoever started the
+  original call later trace what it fanned out to.
 - Checking each update's `status.state` honestly: `"failed"` is a real
   failure, `"input-required"` means *pending, not failed and not
   answered* — collapsing that into "no response" or treating it as a

@@ -441,11 +441,9 @@ async def reopen_run(
     its *same* run_id/task_id, instead of minting a new one via
     create_run — see souk/pause.py's module docstring: a stable identity
     across however many pause/resume rounds a run goes through (HITL
-    approval, or waiting on a delegated sub-agent call) is what lets a
-    waiter's waitingOnRunId subscription stay valid without ever needing
-    to be retargeted, and lets a caller's task_id keep pointing at the
-    same task for its whole life (see api_a2a.py's tasks/get,
-    tasks/cancel) instead of needing to chase a resume chain.
+    approval) is what lets a caller's task_id keep pointing at the same
+    task for its whole life (see api_a2a.py's tasks/get, tasks/cancel)
+    instead of needing to chase a resume chain.
 
     Sets status back to 'queued' so PollForWork can hand it out again;
     deliberately does not touch started_at (this run's *first* claim is
@@ -502,26 +500,6 @@ async def mark_run_status(
     await session.commit()
 
 
-async def merge_run_metadata(session: AsyncSession, run_id: str, metadata: dict[str, Any]) -> None:
-    """Merges into a run's metadata without touching status or any
-    timestamp column — unlike mark_run_status, which always implies a
-    real state transition (and, for some statuses, stamps started_at/
-    completed_at). Used for bookkeeping that piggybacks on a run without
-    claiming it changed state: souk marking a run as waiting on a
-    specific run it just delegated to (see
-    api_a2a._finalize_delegated_call), without pretending the run itself
-    was ever paused.
-    """
-    await session.execute(
-        text(
-            "UPDATE thread_history SET metadata = metadata || CAST(:metadata AS jsonb), "
-            "last_activity_at = now() WHERE run_id = :run_id AND kind = 'run_status'"
-        ),
-        {"run_id": run_id, "metadata": json.dumps(metadata)},
-    )
-    await session.commit()
-
-
 async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
     """The thread's run that's still 'open' in some sense — not yet
     completed/failed/cancelled. Used to enforce a single active run per
@@ -560,42 +538,6 @@ async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str
     messages = await get_thread_messages(session, thread_id)
     active_run = await get_active_run_for_thread(session, thread_id)
     return {"thread_id": thread_id, "messages": messages, "active_run": active_run}
-
-
-async def find_run_waiting_on(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
-    """Finds the run (at most one, by construction) that declared it's
-    waiting specifically on `run_id` (see souk/pause.py's
-    waitingOnRunId). Called when a run reaches a terminal state, to
-    decide whether to auto-resume the run waiting on it (see
-    grpc_server._resume_parent_run_if_waiting).
-
-    Deliberately scoped to one specific run, not its whole thread: two
-    separate delegations to the same reused callee thread (see
-    ensure_thread's parent_thread_id reuse) point at two different
-    run_ids, so resolving one can never be mistaken for resolving the
-    other, no matter what order they finish in. This is also why a
-    waited-on run keeps its identity stable across however many
-    pause/resume rounds it goes through (see reopen_run) — the run_id a
-    waiter named at delegation time is guaranteed to still be the
-    *current* one when it finally resolves, no retargeting needed. This
-    replaced an earlier, thread-scoped version that needed a separate
-    "already consumed" marker, `ORDER BY id DESC`, and an explicit
-    pointer-retargeting step to paper over exactly that ambiguity — see
-    git history on this file.
-    """
-    row = (
-        await session.execute(
-            text(
-                """
-                SELECT * FROM thread_history
-                WHERE kind = 'run_status' AND metadata->>'waitingOnRunId' = :run_id
-                LIMIT 1
-                """
-            ),
-            {"run_id": run_id},
-        )
-    ).mappings().first()
-    return dict(row) if row else None
 
 
 async def touch_run_activity(session: AsyncSession, run_id: str) -> None:

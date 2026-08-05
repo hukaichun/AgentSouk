@@ -24,7 +24,6 @@ from collections.abc import AsyncIterator
 import grpc
 
 from souk import repo
-from souk.agui import build_run_agent_input
 from souk.broker import (
     END_OF_STREAM,
     Claim,
@@ -40,7 +39,7 @@ from souk.config import settings
 from souk.db import SessionLocal
 from souk.grpc_gen import souk_pb2, souk_pb2_grpc
 from souk.identity import verify_session_token
-from souk.pause import interrupt_outcome_of, is_pause_event
+from souk.pause import interrupt_outcome_of
 
 logger = logging.getLogger("souk.grpc")
 
@@ -57,15 +56,6 @@ def _authenticate(context) -> str | None:
         if key == "authorization":
             return verify_session_token(value)
     return None
-
-
-def _last_assistant_text(messages: list[dict]) -> str:
-    for message in reversed(messages):
-        if message.get("role") == "assistant":
-            content = message.get("content")
-            if isinstance(content, str):
-                return content
-    return ""
 
 
 # ---- Handlers: each owns exactly one Command type, and is the only code
@@ -117,16 +107,11 @@ async def _handle_relay(run: Run, cmd: RelayEvent) -> None:
     # live caller must not end up having seen an event that was never
     # durably recorded.
     event = json.loads(cmd.json_payload)
-    if is_pause_event(event):
-        # Remembered for _handle_finish, which decides the run's final
-        # status once the stream actually ends — a pause event isn't
-        # itself a stream terminator (see souk/pause.py).
-        run.pause_payload = event.get("value") or {}
     interrupts = interrupt_outcome_of(event)
     if interrupts is not None:
-        # AG-UI's own interrupt outcome (souk.pause's case 1) — same
-        # remembered-until-stream-ends handling as the CUSTOM pause event
-        # above, just a different provider-side trigger for it.
+        # Remembered for _handle_finish, which decides the run's final
+        # status once the stream actually ends — an interrupt outcome
+        # isn't itself a stream terminator (see souk/pause.py).
         run.pause_payload = {"interrupts": interrupts}
     run.seq += 1
     async with SessionLocal() as session:
@@ -155,16 +140,6 @@ async def _handle_finish(run: Run, cmd: FinishStream) -> None:
         await run.agent_outbound.put(
             souk_pb2.AgentEventEnvelope(run_id=run.run_id, agent_id=run.agent_id, ack=True)
         )
-    # A plain completion (not a pause, not a cancellation) may be exactly
-    # what an outer run was waiting on — see souk/pause.py's
-    # waitingOnRunId. Best-effort: this only ever matters for
-    # sub-agent-style delegation, so a failure here is logged, not
-    # allowed to break the run that just legitimately finished.
-    if not run.cancelled and run.pause_payload is None:
-        try:
-            await _resume_parent_run_if_waiting(run.run_id, run.thread_id, "completed")
-        except Exception:
-            logger.exception("failed to check/resume run waiting on run=%s", run.run_id)
 
 
 async def _handle_cancel(run: Run, cmd: RequestCancel) -> None:
@@ -191,15 +166,6 @@ async def _handle_cancel(run: Run, cmd: RequestCancel) -> None:
             souk_pb2.AgentEventEnvelope(run_id=run.run_id, agent_id=run.agent_id, cancel=True)
         )
     await run.out_queue.put(END_OF_STREAM)
-    # Mirrors _handle_finish's auto-resume: a run waiting on this one
-    # (see souk/pause.py's waitingOnRunId) must not be left stranded
-    # just because *this* delegated call was cancelled instead of
-    # completing normally — see _resume_parent_run_if_waiting's status
-    # handling.
-    try:
-        await _resume_parent_run_if_waiting(run.run_id, run.thread_id, "cancelled")
-    except Exception:
-        logger.exception("failed to check/resume run waiting on run=%s", run.run_id)
 
 
 async def _handle_fail(run: Run, cmd: Fail) -> None:
@@ -211,130 +177,6 @@ async def _handle_fail(run: Run, cmd: Fail) -> None:
         await repo.mark_run_status(session, run.run_id, "failed", metadata={"failureReason": cmd.reason})
     await run.out_queue.put(event)
     await run.out_queue.put(END_OF_STREAM)
-    # Same reasoning as _handle_cancel above: a failed delegated call must
-    # still wake up whatever's waiting on it, not strand it.
-    try:
-        await _resume_parent_run_if_waiting(run.run_id, run.thread_id, "failed", cmd.reason)
-    except Exception:
-        logger.exception("failed to check/resume run waiting on run=%s", run.run_id)
-
-
-async def _resume_parent_run_if_waiting(
-    child_run_id: str, child_thread_id: str, status: str, reason: str | None = None
-) -> None:
-    """`status` is the delegated child run's own terminal outcome
-    ('completed' / 'cancelled' / 'failed' — see the three call sites in
-    _handle_finish/_handle_cancel/_handle_fail above) — forwarded to the
-    waiting run so its own agent (and, through it, its own LLM turn) can
-    react differently to a sub-agent that actually finished versus one
-    that never did, rather than always being told a `result` that
-    silently means "nothing came back."
-
-    Looked up by `child_run_id` specifically, not `child_thread_id` —
-    see repo.find_run_waiting_on's docstring for why thread-level
-    matching was ambiguous. `child_thread_id` is only needed here to
-    fetch this thread's message history for the 'completed' case below.
-    """
-    async with SessionLocal() as session:
-        parent_run = await repo.find_run_waiting_on(session, child_run_id)
-        if parent_run is None:
-            return
-        parent_thread_id = parent_run["thread_id"]
-        parent_agent = await repo.get_agent_by_id(session, parent_run["agent_id"])
-        manages_own_history = bool(
-            (parent_agent or {}).get("metadata", {}).get("manages_own_history")
-        )
-        if status == "completed":
-            child_messages = await repo.get_thread_messages(session, child_thread_id)
-            result_text = _last_assistant_text(child_messages)
-        else:
-            result_text = reason or status
-        resume_payload = {
-            "waitingOnThreadId": child_thread_id,
-            "status": status,
-            "result": result_text,
-        }
-        resume_input = {"resume": resume_payload}
-        if parent_run["status"] == "input-required":
-            # Reopens the *same* run_id/task_id for another round — see
-            # repo.reopen_run's docstring for why a stable identity
-            # across pause/resume rounds is what makes waitingOnRunId
-            # (and a caller's task_id) not need any retargeting.
-            new_run_id = parent_run["run_id"]
-            starting_seq = await repo.get_last_event_seq(session, new_run_id)
-            await repo.reopen_run(
-                session, new_run_id, resume_input, metadata={"resumedFrom": child_thread_id}
-            )
-        else:
-            # Already 'completed' (see repo.find_run_waiting_on's
-            # docstring) — it produced a real answer of its own and was
-            # never paused, so there's no run to reopen: a genuinely new
-            # run/turn is needed to react to this. Clear this specific
-            # subscription first so the old row can't match again
-            # (defense in depth — under normal operation child_run_id's
-            # own terminal transition only ever fires once, so this is
-            # belt-and-suspenders, not load-bearing). Must not touch its
-            # status/timestamps (see merge_run_metadata's docstring).
-            await repo.merge_run_metadata(session, parent_run["run_id"], {"waitingOnRunId": None})
-            created = await repo.create_run(
-                session,
-                parent_thread_id,
-                parent_run["agent_id"],
-                parent_run["protocol"],
-                resume_input,
-                metadata={"resumedFrom": child_thread_id},
-            )
-            new_run_id = created["run_id"]
-            starting_seq = 0
-        # A provider that keeps its own storage (AgentHandle.
-        # manages_own_history — see souk-agent-sdk's README) already has
-        # everything before this point under parent_thread_id; all it
-        # needs from this auto-resume is the context entry below, so skip
-        # the full-thread refetch/redump entirely rather than paying for a
-        # query result no one's going to read. A provider that didn't opt
-        # in still gets the full replay it relies on.
-        parent_messages = (
-            [] if manages_own_history else await repo.get_thread_messages(session, parent_thread_id)
-        )
-        # AG-UI's `context` field ("additional context for the agent" —
-        # ag_ui.core.Context: {description, value}, both plain strings) is
-        # the protocol-native slot for exactly this: information for the
-        # agent to fold in however it sees fit, not a literal conversation
-        # turn. Deliberately not forwardedProps (that field is a generic,
-        # already-multi-purpose passthrough bag — KYOK's token, actor
-        # chains — and not shaped for this at all) and deliberately not a
-        # synthesized `messages` entry (that would force a specific role/
-        # framing on every provider, and risks a model mistaking a system
-        # notification for something the human actually said). souk hands
-        # over the raw facts; how — or whether — to fold this into an LLM
-        # prompt is entirely the provider's call.
-        context = [
-            {"description": "souk.sub_agent_resume", "value": json.dumps(resume_payload)}
-        ]
-        try:
-            input_json = build_run_agent_input(
-                parent_thread_id, new_run_id, parent_messages, context=context
-            )
-        except ValueError:
-            logger.exception("failed to build resume RunAgentInput for thread=%s", parent_thread_id)
-            await repo.mark_run_status(session, new_run_id, "failed", metadata={"failureReason": "resume_build_failed"})
-            return
-        await session.commit()
-    broker.enqueue_run(
-        new_run_id,
-        parent_run["agent_id"],
-        parent_thread_id,
-        input_json,
-        parent_run["protocol"],
-        HANDLERS,
-        seq=starting_seq,
-    )
-    logger.info(
-        "auto-resumed run=%s on thread=%s after child thread=%s completed",
-        new_run_id,
-        parent_thread_id,
-        child_thread_id,
-    )
 
 
 HANDLERS: HandlerMap = {
