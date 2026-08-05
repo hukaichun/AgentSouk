@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
-from souk.agui import build_run_agent_input, fill_message_ids, rewrite_message_ids
+from souk.agui import build_run_agent_input, rewrite_message_ids
 from souk.broker import broker, drain_run
 from souk.grpc_server import HANDLERS
 from souk.db import get_session
@@ -162,9 +162,8 @@ async def _run_agent(
         # Reopens the *same* run_id for another round rather than
         # minting a new one — see repo.reopen_run's docstring for why a
         # stable identity across pause/resume rounds matters (it's what
-        # lets a delegating caller's waitingOnRunId subscription, and
-        # this run's own task_id if it's an A2A one, stay valid without
-        # ever needing to be retargeted or chased through a chain).
+        # lets this run's own task_id, if it's an A2A one, stay valid
+        # without ever needing to be retargeted).
         run_id = resuming_run_id
         starting_seq = await repo.get_last_event_seq(session, run_id)
         await repo.reopen_run(session, run_id, body.model_dump(mode="json"), metadata=body.metadata)
@@ -175,8 +174,11 @@ async def _run_agent(
         run_id = created["run_id"]
         starting_seq = 0
 
-    messages = fill_message_ids(body.messages)
-    await repo.append_thread_messages(session, thread_id, run_id, messages)
+    # append_thread_messages assigns each message its real, database-
+    # generated id (discarding whatever id, if any, the caller sent) and
+    # hands back the same messages with `id` set to that — this exact
+    # return value (not body.messages) is what goes to the provider below.
+    messages = await repo.append_thread_messages(session, thread_id, run_id, body.messages)
 
     # Fast-fail (see souk.health's queued-timeout sweep for the fallback
     # covering the race where the target goes offline *after* this check):
@@ -206,6 +208,7 @@ async def _run_agent(
             run_id,
             messages,
             forwarded_props=_build_forwarded_props(run_id, agent_id, body.metadata),
+            resume=body.resume,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

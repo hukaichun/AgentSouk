@@ -188,9 +188,8 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
         # Reopens the *same* run_id for another round rather than
         # minting a new one — see repo.reopen_run's docstring for why a
         # stable identity across pause/resume rounds matters (it's what
-        # lets a caller's task_id, and anyone else's waitingOnRunId
-        # subscription on this run, stay valid without ever needing to
-        # be retargeted or chased through a chain).
+        # lets a caller's task_id stay valid without ever needing to be
+        # retargeted).
         run_id = resuming_run_id
         starting_seq = await repo.get_last_event_seq(session, run_id)
         await repo.reopen_run(session, run_id, resume_input, metadata=metadata)
@@ -201,10 +200,16 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
         run_id = created["run_id"]
         starting_seq = 0
 
-    # tasks/send(Subscribe) task ids are caller-supplied (see module docstring),
-    # so store it directly rather than souk's usual new_id("task").
+    # tasks/send(Subscribe) task ids are caller-supplied (see module docstring)
+    # — a deliberate exception to souk's usual database-generated ids (see
+    # souk/db.py's thread_history.task_id column comment) — so store it
+    # directly.
     await repo.set_task_id(session, run_id, task_id)
-    await repo.append_thread_messages(session, thread_id, run_id, messages)
+    # append_thread_messages assigns each message its real, database-
+    # generated id (discarding the placeholder a2a_message_to_agui_messages
+    # set) and hands back the same messages with `id` set to that — this
+    # exact return value is what goes to the provider below.
+    messages = await repo.append_thread_messages(session, thread_id, run_id, messages)
 
     # Fast-fail (see souk.health's queued-timeout sweep for the fallback
     # covering the race where the target goes offline *after* this check):
@@ -246,38 +251,20 @@ async def _finalize_delegated_call(session: AsyncSession, run_id: str) -> dict |
     live output, to react to what actually happened rather than what the
     last translated AG-UI event claimed — see
     translate_a2a.agui_event_to_a2a_update: a raw RUN_FINISHED always
-    maps to "completed" there, even when it was preceded by a
-    souk.pause CUSTOM event and the real persisted status is
-    'input-required'.
-
-    If the callee paused instead of truly finishing, and this call was
-    itself a sub-agent delegation (see threads.parent_thread_id, set via
-    metadata.parentThreadId — see _start_run), marks whichever run is
-    currently active on the delegating thread as waiting on this
-    *specific* run — so it gets a resume notification once this run
-    eventually reaches a true terminal state, however many further
-    pause/resume rounds it goes through in between under this same
-    run_id (see repo.reopen_run) — see repo.find_run_waiting_on /
-    grpc_server._resume_parent_run_if_waiting,
-    without requiring the delegating agent's own code to do anything
-    beyond honestly reading back an "input-required" tool result instead
-    of misreading a mistranslated "completed" (see
-    pydantic_ai_agent.sub_agent_tool). Pinned to this run_id rather than
-    the callee's thread_id because that thread may be reused across
-    other, unrelated delegation calls over its lifetime (see
-    souk/pause.py's waitingOnRunId for why that ambiguity matters).
+    maps to "completed" there, even when the real persisted status is
+    'input-required' (the callee itself paused on an AG-UI interrupt —
+    see souk/pause.py). Just reads back the real status; the delegating
+    agent decides what to do with an honest "input-required" result
+    (typically: report "still pending" and finish its own run normally
+    — see providers/pydantic-ai-agent/pydantic_ai_agent/sub_agent_tool.py)
+    — souk doesn't register any interest or subscription on its behalf.
+    Whether a later call to the same callee gets a real answer or
+    another "still pending" is decided fresh each time, purely by
+    whether the callee's thread can currently accept a new run (see
+    repo.get_active_run_for_thread) — nothing here needs to remember
+    that an earlier call happened.
     """
-    db_run = await repo.get_run(session, run_id)
-    if db_run is not None and db_run["status"] == "input-required":
-        thread = await repo.get_thread(session, db_run["thread_id"])
-        parent_thread_id = thread["parent_thread_id"] if thread else None
-        if parent_thread_id is not None:
-            caller_run = await repo.get_active_run_for_thread(session, parent_thread_id)
-            if caller_run is not None:
-                await repo.merge_run_metadata(
-                    session, caller_run["run_id"], {"waitingOnRunId": run_id}
-                )
-    return db_run
+    return await repo.get_run(session, run_id)
 
 
 async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventSourceResponse | dict:
