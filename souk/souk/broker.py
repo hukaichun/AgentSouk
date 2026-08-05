@@ -136,6 +136,14 @@ class Run:
     input_json: dict[str, Any]
     protocol: str  # "ag-ui" | "a2a"
     seq: int = 0
+    # The seq this round started at (== the `seq` ctor param — see
+    # enqueue_run) — never mutated afterward, unlike `seq` itself, which
+    # _handle_relay bumps for every event of this round. _handle_finish
+    # uses the gap between the two to know which run_events rows belong
+    # to *this* round only, so it doesn't re-reduce (and re-persist as
+    # duplicate thread_history messages) events from an earlier
+    # pause/resume round under the same run_id — see repo.reopen_run.
+    round_starting_seq: int = 0
     pause_payload: dict[str, Any] | None = None
     agent_outbound: asyncio.Queue[Any] | None = None
     # The one field anyone may set directly, synchronously, from any
@@ -287,6 +295,7 @@ class RunBroker:
             input_json=input_json,
             protocol=protocol,
             seq=seq,
+            round_starting_seq=seq,
         )
         self._runs[run_id] = run
         self._pending_by_agent[agent_id].append(run_id)

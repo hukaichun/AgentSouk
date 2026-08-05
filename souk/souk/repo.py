@@ -759,11 +759,18 @@ async def append_run_event(session: AsyncSession, run_id: str, seq: int, event_j
     await session.commit()
 
 
-async def get_run_events(session: AsyncSession, run_id: str) -> list[dict[str, Any]]:
+async def get_run_events(session: AsyncSession, run_id: str, since_seq: int = 0) -> list[dict[str, Any]]:
+    """`since_seq` (exclusive) restricts this to one pause/resume round's
+    own events — see broker.Run.round_starting_seq's docstring for why
+    that matters to grpc_server._handle_finish.
+    """
     rows = (
         await session.execute(
-            text("SELECT event_json FROM run_events WHERE run_id = :run_id ORDER BY seq"),
-            {"run_id": run_id},
+            text(
+                "SELECT event_json FROM run_events "
+                "WHERE run_id = :run_id AND seq > :since_seq ORDER BY seq"
+            ),
+            {"run_id": run_id, "since_seq": since_seq},
         )
     ).mappings().all()
     return [row["event_json"] for row in rows]
