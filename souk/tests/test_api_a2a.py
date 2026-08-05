@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
+from souk import repo
+
 
 async def _register(client, identity, sdk_client_id, name, **extra):
     body = identity.register_body(sdk_client_id, [{"name": name, **extra}])
@@ -54,6 +56,9 @@ async def test_offline_target_fails_fast_instead_of_queueing(client, new_identit
     )
     await session.commit()
 
+    thread_id = await repo.create_thread(session, agent_id)
+    await session.commit()
+
     resp = await client.post(
         f"/a2a/id/{agent_id}/rpc",
         json={
@@ -61,7 +66,7 @@ async def test_offline_target_fails_fast_instead_of_queueing(client, new_identit
             "id": "1",
             "method": "tasks/send",
             "params": {
-                "id": "task_test_offline",
+                "sessionId": thread_id,
                 "message": {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
             },
         },
@@ -74,9 +79,60 @@ async def test_offline_target_fails_fast_instead_of_queueing(client, new_identit
         await session.execute(
             text(
                 "SELECT status, metadata FROM thread_history "
-                "WHERE task_id = 'task_test_offline' AND kind = 'run_status'"
-            )
+                "WHERE run_id = :run_id AND kind = 'run_status'"
+            ),
+            {"run_id": result["id"]},
         )
     ).mappings().first()
     assert run["status"] == "failed"
     assert run["metadata"]["failureReason"] == "agent_offline"
+
+
+async def test_a2a_can_never_bypass_a_paused_run_even_with_a_resume_flag(client, new_identity, session):
+    """A2A has no resume mechanism at all — see souk/pause.py's module
+    docstring for why that's deliberate (an agent must never be the one
+    resolving another provider's interrupt). A second tasks/send on the
+    same session, even one that tries the old metadata.resume=true
+    convention, must not bypass an active, paused run — it just gets
+    told the current state back, exactly like a plain duplicate call.
+    """
+    identity = new_identity()
+    agent_id = await _register(client, identity, "sdk_1", "approver")
+
+    # Built directly via repo, not through a live tasks/send — that would
+    # block draining a run nothing ever claims/finishes (see
+    # test_offline_target_fails_fast_instead_of_queueing for the same
+    # reason the *other* test sidesteps this differently).
+    thread_id = await repo.create_thread(session, agent_id)
+    created = await repo.create_run(session, thread_id, agent_id, "a2a", {})
+    await repo.mark_run_status(
+        session, created["run_id"], "input-required", metadata={"interrupts": [{"id": "int_1"}]}
+    )
+    await session.commit()
+
+    second = await client.post(
+        f"/a2a/id/{agent_id}/rpc",
+        json={
+            "jsonrpc": "2.0",
+            "id": "2",
+            "method": "tasks/send",
+            "params": {
+                "id": "task_b",
+                "sessionId": thread_id,
+                "metadata": {"resume": True},
+                "message": {"role": "user", "parts": [{"type": "text", "text": "approved"}]},
+            },
+        },
+    )
+    assert second.status_code == 200
+    result = second.json()["result"]
+    # Still the *original* run — a new one never started.
+    assert result["id"] == created["run_id"]
+    assert result["status"]["state"] == "input-required"
+
+    still_one_run = (
+        await session.execute(
+            text("SELECT count(*) FROM thread_history WHERE kind = 'run_status'")
+        )
+    ).scalar()
+    assert still_one_run == 1

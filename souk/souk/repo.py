@@ -16,6 +16,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from souk.config import settings
 
 
+class ThreadNotFound(Exception):
+    """Raised by ensure_thread when a caller-supplied thread_id doesn't
+    exist — a caller error (referencing an id souk never issued, or one
+    it made up itself), not a request to create one under that name; see
+    create_thread's docstring for why there's no implicit-creation
+    fallback for this.
+    """
+
+
+class ThreadOwnershipMismatch(Exception):
+    """Raised by ensure_thread when a thread_id resolves to a real
+    thread, but one owned by a different agent than the caller is
+    addressing right now.
+    """
+
+
 async def upsert_provider_name(session: AsyncSession, public_key: str, display_name: str) -> None:
     """Sets/updates this public_key's storefront label — see
     souk/db.py's providers table notes. Only called when a registration
@@ -266,6 +282,46 @@ async def get_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | 
     return dict(row) if row else None
 
 
+async def create_thread(
+    session: AsyncSession,
+    agent_id: str,
+    parent_thread_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Always mints a genuinely fresh thread_id (database-generated —
+    see souk/db.py's threads.thread_id DEFAULT) and stores it. The only
+    caller of this outside `POST /threads` (api_agui.create_thread) is
+    ensure_thread's own parent_thread_id case, when no existing child
+    thread for that pairing is found yet.
+
+    There used to also be an implicit version of this reachable from
+    inside `_run_agent`/`_start_run` themselves (thread_id/sessionId
+    both omitted on a plain call) — removed on purpose: it meant one
+    endpoint's behavior silently forked into two shapes (an id you get
+    back in a header/field vs. one you already had), and every caller
+    had to handle both. Callers now always explicitly create a thread
+    first — see `POST /threads` — and every `_run_agent`/`_start_run`
+    call looks the same from then on.
+    """
+    row = (
+        await session.execute(
+            text(
+                """
+                INSERT INTO threads (agent_id, parent_thread_id, metadata, created_at, last_activity_at)
+                VALUES (:agent_id, :parent_thread_id, :metadata, now(), now())
+                RETURNING thread_id
+                """
+            ),
+            {
+                "agent_id": agent_id,
+                "parent_thread_id": parent_thread_id,
+                "metadata": json.dumps(metadata or {}),
+            },
+        )
+    ).mappings().first()
+    return row["thread_id"]
+
+
 async def ensure_thread(
     session: AsyncSession,
     agent_id: str,
@@ -273,34 +329,43 @@ async def ensure_thread(
     parent_thread_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
-    """Returns the thread_id to use — souk always assigns the id itself
-    (see souk.ids); callers never mint their own. Three cases:
+    """Returns the thread_id to use for a run. Exactly one of `thread_id`
+    or `parent_thread_id` must be given — see create_thread's docstring
+    for why there's no third, implicit-creation case anymore; a caller
+    with neither must call `POST /threads` (create_thread) first.
 
-    1. `thread_id` given and it already exists: reuse it (must belong to
-       `agent_id`). This is for genuine external callers that supply
-       their own opaque identifier (e.g. a real A2A client's sessionId) —
-       souk just tracks it, it doesn't generate it, so it's exempt from
-       the "db-generated" rule the same way A2A's caller-supplied task id
-       already is.
+    1. `thread_id` given: it must already exist and belong to `agent_id`
+       — this is a caller continuing a conversation using an id souk
+       itself issued earlier (via `POST /threads`, or from a previous
+       run's `X-Souk-Thread-Id`), never a caller minting a new one. A2A's
+       `sessionId` is not a thread_id-minting mechanism (see
+       souk_agent_sdk.a2a_client — real sub-agent delegation never sends
+       one, relying on `parent_thread_id` below instead); a `thread_id`
+       this doesn't recognize is a caller error, not a request to create
+       one under that name.
     2. `thread_id` is None but `parent_thread_id` is given (e.g. a
        sub-agent call spawned from within another thread's run): reuse
        the existing child thread for this (parent_thread_id, agent_id)
        pair if one exists, so repeated delegation calls keep talking to
-       the same sub-thread — otherwise assign a fresh souk-generated id.
-    3. Neither given: always assign a fresh souk-generated id.
+       the same sub-thread — otherwise create_thread's a fresh one. This
+       one stays implicit: it's not "the caller forgot to create a
+       thread," it's a relationship derived from the parent thread that
+       the delegating agent already knows, with nothing separate for it
+       to have explicitly created ahead of time.
     """
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
-        if existing is not None:
-            if existing["agent_id"] != agent_id:
-                raise ValueError(
-                    f"thread '{thread_id}' belongs to agent '{existing['agent_id']}', not '{agent_id}'"
-                )
-            await session.execute(
-                text("UPDATE threads SET last_activity_at = now() WHERE thread_id = :thread_id"),
-                {"thread_id": thread_id},
+        if existing is None:
+            raise ThreadNotFound(thread_id)
+        if existing["agent_id"] != agent_id:
+            raise ThreadOwnershipMismatch(
+                f"thread '{thread_id}' belongs to agent '{existing['agent_id']}', not '{agent_id}'"
             )
-            return thread_id
+        await session.execute(
+            text("UPDATE threads SET last_activity_at = now() WHERE thread_id = :thread_id"),
+            {"thread_id": thread_id},
+        )
+        return thread_id
     elif parent_thread_id is not None:
         row = (
             await session.execute(
@@ -320,27 +385,9 @@ async def ensure_thread(
                 {"thread_id": row["thread_id"]},
             )
             return row["thread_id"]
+        return await create_thread(session, agent_id, parent_thread_id, metadata)
 
-    # A fresh thread either way at this point — thread_id is omitted from
-    # the INSERT below so the database generates it (souk_new_id('thread')
-    # — see souk/db.py), not Python.
-    row = (
-        await session.execute(
-            text(
-                """
-                INSERT INTO threads (agent_id, parent_thread_id, metadata, created_at, last_activity_at)
-                VALUES (:agent_id, :parent_thread_id, :metadata, now(), now())
-                RETURNING thread_id
-                """
-            ),
-            {
-                "agent_id": agent_id,
-                "parent_thread_id": parent_thread_id,
-                "metadata": json.dumps(metadata or {}),
-            },
-        )
-    ).mappings().first()
-    return row["thread_id"]
+    raise ValueError("thread_id or parent_thread_id is required — call POST /threads first")
 
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
@@ -433,7 +480,6 @@ async def create_run(
     agent_id: str,
     protocol: str,
     input_json: dict[str, Any],
-    assign_task_id: bool = False,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     # run_id is omitted from the INSERT below so the database generates it
@@ -441,19 +487,17 @@ async def create_run(
     # DEFAULT), not Python. message_id must still be set explicitly to
     # NULL — that column also has a database default (souk_new_id('msg'),
     # for 'message'-kind rows), which a 'run_status' row must not pick up
-    # by accident. task_id has its own database-side generation only when
-    # `assign_task_id` — see souk/db.py's column comment for why that
-    # can't be a plain column DEFAULT.
+    # by accident. A2A's Task.id is just this run_id (see
+    # api_a2a._start_run) — no separate task_id to generate here.
     row = (
         await session.execute(
             text(
                 """
                 INSERT INTO thread_history
-                    (thread_id, kind, agent_id, protocol, status, input_json, message_id, task_id, metadata, last_activity_at)
+                    (thread_id, kind, agent_id, protocol, status, input_json, message_id, metadata, last_activity_at)
                 VALUES
-                    (:thread_id, 'run_status', :agent_id, :protocol, 'queued', :input_json, NULL,
-                     CASE WHEN :assign_task_id THEN souk_new_id('task') ELSE NULL END, :metadata, now())
-                RETURNING run_id, task_id
+                    (:thread_id, 'run_status', :agent_id, :protocol, 'queued', :input_json, NULL, :metadata, now())
+                RETURNING run_id
                 """
             ),
             {
@@ -461,32 +505,24 @@ async def create_run(
                 "agent_id": agent_id,
                 "protocol": protocol,
                 "input_json": json.dumps(input_json),
-                "assign_task_id": assign_task_id,
                 "metadata": json.dumps(metadata or {}),
             },
         )
     ).mappings().first()
     await session.commit()
-    return {"run_id": row["run_id"], "task_id": row["task_id"]}
-
-
-async def set_task_id(session: AsyncSession, run_id: str, task_id: str) -> None:
-    await session.execute(
-        text("UPDATE thread_history SET task_id = :task_id WHERE run_id = :run_id AND kind = 'run_status'"),
-        {"task_id": task_id, "run_id": run_id},
-    )
+    return {"run_id": row["run_id"]}
 
 
 async def reopen_run(
     session: AsyncSession, run_id: str, input_json: dict[str, Any], metadata: dict[str, Any] | None = None
 ) -> None:
     """Restarts a paused ('input-required') run for another round under
-    its *same* run_id/task_id, instead of minting a new one via
-    create_run — see souk/pause.py's module docstring: a stable identity
-    across however many pause/resume rounds a run goes through (HITL
-    approval) is what lets a caller's task_id keep pointing at the same
-    task for its whole life (see api_a2a.py's tasks/get, tasks/cancel)
-    instead of needing to chase a resume chain.
+    its *same* run_id, instead of minting a new one via create_run — see
+    souk/pause.py's module docstring: a stable identity across however
+    many pause/resume rounds a run goes through (HITL approval) is what
+    lets a caller's A2A Task.id (== this run_id, see api_a2a._start_run)
+    keep pointing at the same task for its whole life (see api_a2a.py's
+    tasks/get, tasks/cancel) instead of needing to chase a resume chain.
 
     Sets status back to 'queued' so PollForWork can hand it out again;
     deliberately does not touch started_at (this run's *first* claim is
@@ -712,16 +748,6 @@ async def get_run(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-async def get_run_by_task_id(session: AsyncSession, task_id: str) -> dict[str, Any] | None:
-    row = (
-        await session.execute(
-            text("SELECT * FROM thread_history WHERE task_id = :task_id AND kind = 'run_status'"),
-            {"task_id": task_id},
-        )
-    ).mappings().first()
-    return dict(row) if row else None
-
-
 
 async def append_run_event(session: AsyncSession, run_id: str, seq: int, event_json: dict[str, Any]) -> None:
     await session.execute(
@@ -733,11 +759,18 @@ async def append_run_event(session: AsyncSession, run_id: str, seq: int, event_j
     await session.commit()
 
 
-async def get_run_events(session: AsyncSession, run_id: str) -> list[dict[str, Any]]:
+async def get_run_events(session: AsyncSession, run_id: str, since_seq: int = 0) -> list[dict[str, Any]]:
+    """`since_seq` (exclusive) restricts this to one pause/resume round's
+    own events — see broker.Run.round_starting_seq's docstring for why
+    that matters to grpc_server._handle_finish.
+    """
     rows = (
         await session.execute(
-            text("SELECT event_json FROM run_events WHERE run_id = :run_id ORDER BY seq"),
-            {"run_id": run_id},
+            text(
+                "SELECT event_json FROM run_events "
+                "WHERE run_id = :run_id AND seq > :since_seq ORDER BY seq"
+            ),
+            {"run_id": run_id, "since_seq": since_seq},
         )
     ).mappings().all()
     return [row["event_json"] for row in rows]

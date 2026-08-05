@@ -24,6 +24,7 @@ from collections.abc import AsyncIterator
 import grpc
 
 from souk import repo
+from souk.agui_reduce import reduce_events_to_messages
 from souk.broker import (
     END_OF_STREAM,
     Claim,
@@ -135,6 +136,19 @@ async def _handle_finish(run: Run, cmd: FinishStream) -> None:
                 await repo.mark_run_status(session, run.run_id, "input-required", metadata=run.pause_payload)
             else:
                 await repo.mark_run_status(session, run.run_id, "completed")
+            # A genuine reply was produced (as opposed to failed/
+            # cancelled — see souk/agui_reduce.py's module docstring for
+            # why those don't go through this at all) — persist it as
+            # real thread_history messages so souk is an actual source
+            # of truth for the full conversation, not just the caller's
+            # half of it. Only this round's own events (see
+            # Run.round_starting_seq) — a resumed run's earlier round(s)
+            # were already persisted the first time they finished.
+            round_events = await repo.get_run_events(session, run.run_id, since_seq=run.round_starting_seq)
+            reply_messages = reduce_events_to_messages(round_events)
+            if reply_messages:
+                await repo.append_thread_messages(session, run.thread_id, run.run_id, reply_messages)
+            await session.commit()
     await run.out_queue.put(END_OF_STREAM)
     if run.agent_outbound is not None:
         await run.agent_outbound.put(

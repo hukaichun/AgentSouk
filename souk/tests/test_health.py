@@ -21,7 +21,7 @@ async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
 
-    thread_id = await repo.ensure_thread(session, agent_id, None)
+    thread_id = await repo.create_thread(session, agent_id)
     created = await repo.create_run(session, thread_id, agent_id, "a2a", {"messages": []})
     run_id = created["run_id"]
 
@@ -50,7 +50,7 @@ async def test_fail_unclaimed_runs_leaves_recent_or_online_runs_alone(session, n
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
 
-    thread_id = await repo.ensure_thread(session, agent_id, None)
+    thread_id = await repo.create_thread(session, agent_id)
     created = await repo.create_run(session, thread_id, agent_id, "a2a", {"messages": []})
 
     # Target is still online (last_seen_at untouched, just registered) —

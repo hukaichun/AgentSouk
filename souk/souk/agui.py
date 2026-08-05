@@ -1,13 +1,14 @@
 """Builds the AG-UI RunAgentInput JSON actually delivered to an agent.
 
-souk's own HTTP request body (souk.models.RunAgentInput) is intentionally
-loose and souk-flavored (snake_case, thread_id optional/souk-assigned).
-But what gets forwarded to the agent side must be a genuinely valid AG-UI
-RunAgentInput — camelCase wire format, every required field present
-(state, tools, context, forwardedProps) — since it's re-validated there
-by pydantic-ai's AGUIAdapter against the real ag-ui-protocol schema. Doing
-that validation here too means a malformed request 400s at souk with a
-clear error instead of failing silently deep inside the agent process.
+The inbound HTTP request body (api_agui.py) is already the real
+`ag_ui.core.RunAgentInput` — no separate, souk-flavored model to
+translate from (see souk/models.py's module docstring). This module's
+job is just reassembling the pieces souk itself decides (the real
+thread_id/run_id, database-generated message ids, forwardedProps merged
+with any KYOK addition) into that same real schema, re-validated here so
+a malformed result 400s at souk with a clear error instead of failing
+silently deep inside the agent process (it's re-validated *again* there,
+by pydantic-ai's AGUIAdapter, against the same ag-ui-protocol schema).
 """
 
 from __future__ import annotations

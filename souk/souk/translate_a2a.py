@@ -32,14 +32,14 @@ RUN_STATUS_TO_A2A_STATE = {
 }
 
 
-def status_update_for_run_status(task_id: str, run_status: str) -> dict[str, Any]:
+def status_update_for_run_status(task_id: str, session_id: str, run_status: str) -> dict[str, Any]:
     """Builds a TaskStatusUpdateEvent directly from a persisted run status,
     for when there's no live AG-UI event stream to translate from (e.g.
     a tasks/sendSubscribe call on a run that's already paused or finished
     — see api_a2a.rpc's tasks/sendSubscribe handler).
     """
     state = RUN_STATUS_TO_A2A_STATE.get(run_status, "unknown")
-    return _status_update(task_id, state, final=state in ("completed", "failed", "canceled"))
+    return _status_update(task_id, session_id, state, final=state in ("completed", "failed", "canceled"))
 
 
 def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -54,17 +54,17 @@ def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, 
     return [{"role": role, "content": text}]
 
 
-def agui_event_to_a2a_update(event: dict[str, Any], task_id: str) -> dict[str, Any]:
+def agui_event_to_a2a_update(event: dict[str, Any], task_id: str, session_id: str) -> dict[str, Any]:
     event_type = event.get("type")
 
     if event_type == "RUN_STARTED":
-        return _status_update(task_id, "working", final=False)
+        return _status_update(task_id, session_id, "working", final=False)
 
     if event_type == "RUN_FINISHED":
-        return _status_update(task_id, "completed", final=True)
+        return _status_update(task_id, session_id, "completed", final=True)
 
     if event_type == "RUN_ERROR":
-        return _status_update(task_id, "failed", final=True, message=event.get("message"))
+        return _status_update(task_id, session_id, "failed", final=True, message=event.get("message"))
 
     if event_type in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
         delta = event.get("delta") or event.get("content") or ""
@@ -76,30 +76,44 @@ def agui_event_to_a2a_update(event: dict[str, Any], task_id: str) -> dict[str, A
     # Fallback: surface every other AG-UI event (tool calls, state deltas,
     # CUSTOM sub-agent progress, ...) as a non-final working update instead
     # of dropping it.
-    return _status_update(task_id, "working", final=False, agui_event=event)
+    return _status_update(task_id, session_id, "working", final=False, agui_event=event)
 
 
 def _status_update(
-    task_id: str, state: str, *, final: bool, message: Any = None, agui_event: dict[str, Any] | None = None
+    task_id: str,
+    session_id: str,
+    state: str,
+    *,
+    final: bool,
+    message: Any = None,
+    agui_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status: dict[str, Any] = {"state": state}
     if message is not None:
         status["message"] = message
     if agui_event is not None:
         status["metadata"] = {"agui_event": agui_event}
-    return {"id": task_id, "status": status, "final": final}
+    return {"id": task_id, "sessionId": session_id, "status": status, "final": final}
 
 
 def build_task(
-    task_id: str, agent_name: str, run_status: str, run_events: list[dict[str, Any]]
+    task_id: str, session_id: str, agent_name: str, run_status: str, run_events: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    """`task_id` here is just souk's own run_id (see api_a2a._start_run —
+    there's no separate task_id concept); `session_id` is souk's real,
+    database-generated thread_id (see repo.ensure_thread). Both are
+    echoed back here (A2A's own `Task.id`/`Task.sessionId` fields)
+    regardless of whatever the caller originally sent — the only way a
+    caller learns the real ones to reuse on its next call.
+    """
     artifacts = [
         update["artifact"]
         for event in run_events
-        if (update := agui_event_to_a2a_update(event, task_id)).get("artifact")
+        if (update := agui_event_to_a2a_update(event, task_id, session_id)).get("artifact")
     ]
     return {
         "id": task_id,
+        "sessionId": session_id,
         "status": {"state": RUN_STATUS_TO_A2A_STATE.get(run_status, "unknown")},
         "artifacts": artifacts,
     }

@@ -1,5 +1,15 @@
+"""AG-UI gateway: `POST /threads` (the only way to obtain a thread_id —
+see create_thread below) and `POST /agui/...` (the only way to actually
+run an agent, always against a thread_id obtained that way first).
+
+The inbound `RunAgentInput` here is the real `ag_ui.core.RunAgentInput`,
+not a souk-specific reimplementation — see souk/models.py's module
+docstring for why there used to be one and isn't anymore.
+"""
+
 import json
 
+from ag_ui.core import RunAgentInput
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -12,9 +22,44 @@ from souk.broker import broker, drain_run
 from souk.grpc_server import HANDLERS
 from souk.db import get_session
 from souk.kyok import issue_kyok_token
-from souk.models import RunAgentInput
+from souk.models import CreateThreadRequest, CreateThreadResponse
+from souk.pause import is_resuming
 
 router = APIRouter()
+
+
+async def _create_thread(agent_id: str, body: CreateThreadRequest, session: AsyncSession) -> CreateThreadResponse:
+    """The only way to obtain a thread_id — there is no implicit-creation
+    fallback anywhere in `/agui` or `/a2a`; every caller (AG-UI or A2A —
+    `sessionId` is this same thread_id, see api_a2a's module docstring)
+    calls this first and uses the id it returns from then on. There used
+    to be an implicit path (thread_id omitted on the very first run call),
+    removed on purpose: it meant one endpoint's behavior silently forked
+    into two shapes depending on whether this was a caller's first call
+    or not, and every caller had to handle both. Now every `/agui`/`/a2a`
+    call looks the same, always.
+    """
+    agent = await repo.get_agent_by_id(session, agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"agent '{agent_id}' is not registered")
+    thread_id = await repo.create_thread(session, agent_id, metadata=body.metadata)
+    await session.commit()
+    return CreateThreadResponse(thread_id=thread_id)
+
+
+@router.post("/threads/id/{agent_id}")
+async def create_thread_by_id(
+    agent_id: str, body: CreateThreadRequest = CreateThreadRequest(), session: AsyncSession = Depends(get_session)
+) -> CreateThreadResponse:
+    return await _create_thread(agent_id, body, session)
+
+
+@router.post("/threads/{name}")
+async def create_thread_by_name(
+    name: str, body: CreateThreadRequest = CreateThreadRequest(), session: AsyncSession = Depends(get_session)
+) -> CreateThreadResponse:
+    agent_id = await _resolve_agent_id(session, name)
+    return await _create_thread(agent_id, body, session)
 
 
 async def _resolve_agent_id(session: AsyncSession, name: str) -> str:
@@ -88,7 +133,9 @@ async def get_thread_tree(thread_id: str, session: AsyncSession = Depends(get_se
     return {"thread_id": thread_id, "agent_id": root["agent_id"], "children": tree["children"]}
 
 
-def _build_forwarded_props(run_id: str, agent_id: str, metadata: dict) -> dict | None:
+def _build_forwarded_props(
+    run_id: str, agent_id: str, metadata: dict, caller_forwarded_props: object
+) -> object:
     """Keep Your Own Key opt-in: a caller that's running its own KYOK
     bridge (see souk.api_llm_bridge / souk-client-sdk's KyokBridge) passes
     `metadata.kyok.sessionId` — the session it's already long-polling
@@ -96,13 +143,14 @@ def _build_forwarded_props(run_id: str, agent_id: str, metadata: dict) -> dict |
     run-scoped token binding this run_id (and the agent_id it's assigned
     to — souk already knows this at mint time, so the token says so
     explicitly rather than leaving it implicit; see api_llm_bridge.
-    chat_completions for where that's checked) to that session, and hand
-    it to the provider via AG-UI's forwardedProps, the existing
-    passthrough field for exactly this kind of app-specific context (see
-    souk.agui.build_run_agent_input). A provider that doesn't look for
-    forwardedProps.kyok just never sees it and calls its own configured
-    LLM as always — KYOK is opt-in on both the caller's and the
-    provider's side independently, souk never forces either.
+    chat_completions for where that's checked), merged into whatever
+    forwardedProps the caller itself already supplied (own app-specific
+    context is real AG-UI usage too, now that the real RunAgentInput
+    schema is used directly — see this module's docstring — so KYOK must
+    not clobber it). A provider that doesn't look for forwardedProps.kyok
+    just never sees it and calls its own configured LLM as always — KYOK
+    is opt-in on both the caller's and the provider's side independently,
+    souk never forces either.
 
     Deliberately just the token, not a baseUrl too: settings.
     public_http_url is what *external* callers (browsers,
@@ -117,60 +165,74 @@ def _build_forwarded_props(run_id: str, agent_id: str, metadata: dict) -> dict |
     """
     session_id = metadata.get("kyok", {}).get("sessionId") if isinstance(metadata.get("kyok"), dict) else None
     if not session_id:
-        return None
-    return {"kyok": {"token": issue_kyok_token(run_id, session_id, agent_id)}}
+        return caller_forwarded_props
+    kyok = {"kyok": {"token": issue_kyok_token(run_id, session_id, agent_id)}}
+    if isinstance(caller_forwarded_props, dict):
+        return {**caller_forwarded_props, **kyok}
+    return kyok
 
 
 async def _run_agent(
     agent_id: str, body: RunAgentInput, session: AsyncSession
 ) -> EventSourceResponse | JSONResponse:
+    """`body` is the real `ag_ui.core.RunAgentInput` — not a souk-specific
+    reimplementation (see souk/models.py's module docstring for why there
+    used to be one and isn't anymore). `body.run_id`, whatever the caller
+    sent, is never used for anything — souk always mints its own; the
+    field is only present because the real schema requires it.
+    """
     agent = await repo.get_agent_by_id(session, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"agent '{agent_id}' is not registered")
 
-    if body.thread_id is not None:
-        thread = await repo.get_thread(session, body.thread_id)
-        if thread is None:
-            raise HTTPException(status_code=404, detail=f"thread '{body.thread_id}' not found")
-        if thread["agent_id"] != agent_id:
-            raise HTTPException(
-                status_code=409,
-                detail=f"thread '{body.thread_id}' belongs to agent '{thread['agent_id']}', not '{agent_id}'",
-            )
-        # A thread only ever has one active run at a time (see
-        # repo.get_active_run_for_thread) — starting a second one
-        # concurrently would fork its otherwise-linear history with no
-        # clean way to merge it back. Instead of erroring or silently
-        # queueing a duplicate, hand back the thread's current state
-        # (including the pending run's real status) so the caller can act
-        # on it — this doubles as the "catch me up" path for a run that
-        # has since paused.
-        active = await repo.get_active_run_for_thread(session, body.thread_id)
-        if active is not None and not (body.resume and active["status"] == "input-required"):
-            snapshot = await repo.get_thread_snapshot(session, body.thread_id)
-            return JSONResponse(
-                jsonable_encoder(snapshot),
-                headers={"X-Souk-Thread-Id": body.thread_id, "X-Souk-Run-Id": active["run_id"]},
-            )
-        resuming_run_id = active["run_id"] if active is not None else None
-    else:
-        resuming_run_id = None
+    # Not a declared field on ag_ui.core.RunAgentInput (extra="allow" —
+    # see that model), so it's absent rather than defaulted when the
+    # caller doesn't send one.
+    metadata = getattr(body, "metadata", None) or {}
+    resume = [r.model_dump(mode="json", by_alias=True) for r in body.resume] if body.resume else None
 
-    thread_id = await repo.ensure_thread(session, agent_id, body.thread_id, metadata=body.metadata)
+    thread = await repo.get_thread(session, body.thread_id)
+    if thread is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"thread '{body.thread_id}' not found — call POST /threads first",
+        )
+    if thread["agent_id"] != agent_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f"thread '{body.thread_id}' belongs to agent '{thread['agent_id']}', not '{agent_id}'",
+        )
+    # A thread only ever has one active run at a time (see
+    # repo.get_active_run_for_thread) — starting a second one
+    # concurrently would fork its otherwise-linear history with no
+    # clean way to merge it back. Instead of erroring or silently
+    # queueing a duplicate, hand back the thread's current state
+    # (including the pending run's real status) so the caller can act
+    # on it — this doubles as the "catch me up" path for a run that
+    # has since paused.
+    active = await repo.get_active_run_for_thread(session, body.thread_id)
+    if active is not None and not is_resuming(active, resume):
+        snapshot = await repo.get_thread_snapshot(session, body.thread_id)
+        return JSONResponse(
+            jsonable_encoder(snapshot),
+            headers={"X-Souk-Thread-Id": body.thread_id, "X-Souk-Run-Id": active["run_id"]},
+        )
+    resuming_run_id = active["run_id"] if active is not None else None
+
+    thread_id = await repo.ensure_thread(session, agent_id, body.thread_id, metadata=metadata)
+    input_dump = body.model_dump(mode="json", by_alias=True)
 
     if resuming_run_id is not None:
         # Reopens the *same* run_id for another round rather than
         # minting a new one — see repo.reopen_run's docstring for why a
         # stable identity across pause/resume rounds matters (it's what
-        # lets this run's own task_id, if it's an A2A one, stay valid
+        # lets this run's own A2A Task.id, if it has one, stay valid
         # without ever needing to be retargeted).
         run_id = resuming_run_id
         starting_seq = await repo.get_last_event_seq(session, run_id)
-        await repo.reopen_run(session, run_id, body.model_dump(mode="json"), metadata=body.metadata)
+        await repo.reopen_run(session, run_id, input_dump, metadata=metadata)
     else:
-        created = await repo.create_run(
-            session, thread_id, agent_id, "ag-ui", body.model_dump(mode="json"), metadata=body.metadata
-        )
+        created = await repo.create_run(session, thread_id, agent_id, "ag-ui", input_dump, metadata=metadata)
         run_id = created["run_id"]
         starting_seq = 0
 
@@ -178,7 +240,8 @@ async def _run_agent(
     # generated id (discarding whatever id, if any, the caller sent) and
     # hands back the same messages with `id` set to that — this exact
     # return value (not body.messages) is what goes to the provider below.
-    messages = await repo.append_thread_messages(session, thread_id, run_id, body.messages)
+    raw_messages = [m.model_dump(mode="json", by_alias=True) for m in body.messages]
+    messages = await repo.append_thread_messages(session, thread_id, run_id, raw_messages)
 
     # Fast-fail (see souk.health's queued-timeout sweep for the fallback
     # covering the race where the target goes offline *after* this check):
@@ -207,8 +270,11 @@ async def _run_agent(
             thread_id,
             run_id,
             messages,
-            forwarded_props=_build_forwarded_props(run_id, agent_id, body.metadata),
-            resume=body.resume,
+            state=body.state,
+            tools=[t.model_dump(mode="json", by_alias=True) for t in body.tools],
+            context=[c.model_dump(mode="json", by_alias=True) for c in body.context],
+            forwarded_props=_build_forwarded_props(run_id, agent_id, metadata, body.forwarded_props),
+            resume=resume,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
