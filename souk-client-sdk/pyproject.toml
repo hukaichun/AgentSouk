@@ -7,6 +7,10 @@ dependencies = [
     "httpx>=0.27",
     "httpx-sse>=0.4",
     "pydantic>=2.9",
+    # Only used by souk_client_sdk.kyok_bridge (Keep Your Own Key) — one
+    # unified async interface across LLM providers, with streaming chunks
+    # already OpenAI-shaped, matching souk's /kyok/v1 wire format exactly.
+    "litellm>=1.95",
 ]
 
 [build-system]

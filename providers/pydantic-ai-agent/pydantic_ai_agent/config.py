@@ -23,6 +23,16 @@ class AgentConfig(BaseModel):
     # provider is itself registered on via its already-public HTTP API —
     # see that module's docstring for why this isn't a real MCP server.
     souk_tools: bool = False
+    # Opt-in: Keep Your Own Key (see docs/keep-your-own-key.md). When a
+    # caller's run carries forwardedProps.kyok (it's running its own KYOK
+    # bridge), this agent routes that run's LLM calls through souk's
+    # /kyok/v1 relay instead of `model` above — the caller pays with
+    # their own key for that run only. A run without forwardedProps.kyok
+    # (an ordinary caller) always falls back to `model` regardless of
+    # this flag; set to False to never use KYOK even when offered, e.g.
+    # if this agent's economics depend on it always paying for its own
+    # tokens.
+    use_kyok: bool = False
 
 
 class TemplateConfig(BaseModel):

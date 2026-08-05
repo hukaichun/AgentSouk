@@ -11,6 +11,7 @@ from souk.agui import build_run_agent_input, fill_message_ids, rewrite_message_i
 from souk.broker import broker, drain_run
 from souk.grpc_server import HANDLERS
 from souk.db import get_session
+from souk.kyok import issue_kyok_token
 from souk.models import RunAgentInput
 
 router = APIRouter()
@@ -85,6 +86,39 @@ async def get_thread_tree(thread_id: str, session: AsyncSession = Depends(get_se
 
     tree = await build(thread_id)
     return {"thread_id": thread_id, "agent_id": root["agent_id"], "children": tree["children"]}
+
+
+def _build_forwarded_props(run_id: str, agent_id: str, metadata: dict) -> dict | None:
+    """Keep Your Own Key opt-in: a caller that's running its own KYOK
+    bridge (see souk.api_llm_bridge / souk-client-sdk's KyokBridge) passes
+    `metadata.kyok.sessionId` — the session it's already long-polling
+    `/kyok/poll` for — when starting the run. If present, mint a
+    run-scoped token binding this run_id (and the agent_id it's assigned
+    to — souk already knows this at mint time, so the token says so
+    explicitly rather than leaving it implicit; see api_llm_bridge.
+    chat_completions for where that's checked) to that session, and hand
+    it to the provider via AG-UI's forwardedProps, the existing
+    passthrough field for exactly this kind of app-specific context (see
+    souk.agui.build_run_agent_input). A provider that doesn't look for
+    forwardedProps.kyok just never sees it and calls its own configured
+    LLM as always — KYOK is opt-in on both the caller's and the
+    provider's side independently, souk never forces either.
+
+    Deliberately just the token, not a baseUrl too: settings.
+    public_http_url is what *external* callers (browsers,
+    souk-client-sdk from the host) use to reach souk, and is often not
+    reachable at all from inside a provider's own container/network (see
+    docker-compose.yml — providers reach souk at `http://souk:8000`, not
+    `http://localhost:8000`). A provider already knows how it reaches
+    souk (it's the same souk_http_url it registers/polls/calls A2A
+    against) — see providers/pydantic-ai-agent's resolve_kyok_model,
+    which builds `{souk_http_url}/kyok/v1` itself instead of trusting a
+    value souk would otherwise have to guess.
+    """
+    session_id = metadata.get("kyok", {}).get("sessionId") if isinstance(metadata.get("kyok"), dict) else None
+    if not session_id:
+        return None
+    return {"kyok": {"token": issue_kyok_token(run_id, session_id, agent_id)}}
 
 
 async def _run_agent(
@@ -167,7 +201,12 @@ async def _run_agent(
         )
 
     try:
-        input_json = build_run_agent_input(thread_id, run_id, messages)
+        input_json = build_run_agent_input(
+            thread_id,
+            run_id,
+            messages,
+            forwarded_props=_build_forwarded_props(run_id, agent_id, body.metadata),
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

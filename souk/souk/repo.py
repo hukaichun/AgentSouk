@@ -160,6 +160,23 @@ async def get_agent_by_id(session: AsyncSession, agent_id: str) -> dict[str, Any
     return dict(row) if row else None
 
 
+async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | None:
+    """Just the identity half of get_agent_by_id — see souk.api_llm_bridge.
+    chat_completions, which needs this to verify a KyokSigningAuth
+    signature (souk_agent_sdk.kyok_auth) against the actual key this
+    agent_id registered with, without pulling the whole agent_card/
+    metadata row it doesn't need for that. A delisted agent has no usable
+    key here either, same as get_agent_by_id.
+    """
+    row = (
+        await session.execute(
+            text("SELECT public_key FROM agents WHERE agent_id = :agent_id AND delisted_at IS NULL"),
+            {"agent_id": agent_id},
+        )
+    ).mappings().first()
+    return row["public_key"] if row else None
+
+
 async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[str, Any]]:
     """Every currently-listed agent registered under this display name —
     zero, one (the common case), or many if multiple identities picked the
