@@ -95,7 +95,16 @@ class SoukClient:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with aconnect_sse(client, "POST", url, json=body) as event_source:
-                self.last_thread_id = event_source.response.headers.get("X-Souk-Thread-Id", thread_id)
-                self.last_run_id = event_source.response.headers.get("X-Souk-Run-Id")
+                # No custom header to read here — a real run's first
+                # event is always RUN_STARTED, carrying the resolved,
+                # real threadId/runId (souk substitutes its own if
+                # `thread_id` above was unrecognized) — that's the
+                # standard AG-UI place to learn them, not a souk-invented
+                # side channel.
+                self.last_thread_id = thread_id
                 async for sse in event_source.aiter_sse():
-                    yield json.loads(sse.data)
+                    event = json.loads(sse.data)
+                    if event.get("type") == "RUN_STARTED":
+                        self.last_thread_id = event.get("threadId", thread_id)
+                        self.last_run_id = event.get("runId")
+                    yield event
