@@ -21,10 +21,17 @@ run_id (see api_a2a._start_run's docstring for why real A2A's own
 `params.id` on `tasks/send(Subscribe)` — a caller-chosen value — is
 accepted but not used for anything, a deliberate deviation from strict
 A2A interop). `params.sessionId` is thread_id, similarly always
-database-generated (see repo.ensure_thread) — `sessionId` only ever
-*reuses* one souk already issued, never mints a new one under a
-caller-chosen name. Real sub-agent delegation (souk_agent_sdk.a2a_client)
-never sends one at all, relying on `parent_thread_id` instead.
+database-generated (see repo.ensure_thread) — a caller-supplied
+`sessionId` only ever *reuses* one souk already issued, never mints a
+new one under a caller-chosen name (an unrecognized one is a 404, not
+silently created — see repo.ThreadNotFound). Omitting `sessionId`
+entirely, though, is the normal A2A first-contact case (the spec's own
+"Agents MAY generate a new contextId...") and does mint a fresh one —
+souk never requires a caller to have called `POST /threads` first (see
+souk-no-forced-protocol-deviation). Real sub-agent delegation
+(souk_agent_sdk.a2a_client) never sends `sessionId` at all, relying on
+`Message.referenceTaskIds` (real A2A) to resolve the parent thread for
+lineage instead — see _start_run's own docstring.
 """
 
 from __future__ import annotations
@@ -142,11 +149,24 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
 
     session_id = params.get("sessionId")
     metadata = params.get("metadata", {})
-    # Not part of core A2A — an extension field a caller can set (e.g. an
-    # agent delegating to a sub-agent via souk_agent_sdk.a2a_client) to
-    # link the spawned thread back to the caller's own thread. Ignored by
-    # any A2A client that doesn't know about it.
-    parent_thread_id = metadata.get("parentThreadId")
+    # Real A2A (Message.referenceTaskIds — "a list of other task IDs
+    # that this message references for additional context"), not a
+    # souk invention: a caller delegating to a sub-agent (e.g. via
+    # souk_agent_sdk.a2a_client) can reference its own current task id
+    # (run_id) here, letting souk link the spawned thread back to the
+    # caller's own thread for lineage (see repo.ensure_thread's
+    # parent_thread_id and GET /threads/{root}/tree). Only the first
+    # entry is used — souk's own use case never sends more than one.
+    # Ignored by any A2A client that doesn't set it; a value souk doesn't
+    # recognize (unknown/stale run_id) is treated the same as not having
+    # sent one at all, not an error — this is informational context, not
+    # a claim souk verifies.
+    reference_task_ids = params.get("message", {}).get("referenceTaskIds") or []
+    parent_thread_id = None
+    if reference_task_ids:
+        referenced_run = await repo.get_run(session, reference_task_ids[0])
+        if referenced_run is not None:
+            parent_thread_id = referenced_run["thread_id"]
 
     # Optional, opt-in caller identity: params.metadata.actorChain is an
     # ordered list of compact JWTs (see souk.identity.verify_actor_chain
@@ -175,18 +195,23 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
             "verifiedActorChain": {"subject": verified_subject, "actors": verified_actors},
         }
 
+    # `create_if_missing` defaults False here (unlike api_agui.py): A2A's
+    # `sessionId` is optional, so a caller that omits it entirely (the
+    # normal first-contact case — see repo.ensure_thread) still gets a
+    # fresh thread; but a caller that *does* supply one is claiming to
+    # continue something specific, and an unrecognized one is a real
+    # caller error (ThreadNotFound), not a request to create one under
+    # that name.
     try:
         thread_id = await repo.ensure_thread(
             session, agent_id, session_id, parent_thread_id, metadata=metadata
         )
     except repo.ThreadNotFound as e:
         raise HTTPException(
-            status_code=404, detail=f"thread '{e}' not found — call POST /threads first"
+            status_code=404, detail=f"thread '{e}' not found"
         ) from e
     except repo.ThreadOwnershipMismatch as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
 
     active = await repo.get_active_run_for_thread(session, thread_id)
     # A2A never carries a resume — is_resuming(active, None) is always

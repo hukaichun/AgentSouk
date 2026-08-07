@@ -32,20 +32,22 @@ async def test_create_thread_assigns_a_database_generated_thread_id(session, new
     assert thread_id.startswith("thread_")
 
 
-async def test_ensure_thread_requires_an_existing_thread_id_or_parent(session, new_identity):
-    """No implicit creation left — a caller with neither must call
-    create_thread (POST /threads) first.
+async def test_ensure_thread_mints_a_fresh_thread_when_neither_id_is_given(session, new_identity):
+    """The normal A2A first-contact case (no `sessionId` at all) — see
+    souk-no-forced-protocol-deviation: a caller was never required to
+    call `POST /threads` first.
     """
     identity = new_identity()
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "a"}])
-    try:
-        await repo.ensure_thread(session, agent_ids["a"], None)
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
+    thread_id = await repo.ensure_thread(session, agent_ids["a"], None)
+    assert thread_id.startswith("thread_")
 
 
-async def test_ensure_thread_rejects_an_unknown_thread_id(session, new_identity):
+async def test_ensure_thread_rejects_an_unknown_thread_id_by_default(session, new_identity):
+    """A caller-*supplied* thread_id/sessionId that doesn't exist is a
+    real error (default create_if_missing=False) — it's claiming to
+    continue something specific, unlike the no-id-at-all case above.
+    """
     identity = new_identity()
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "a"}])
     try:
@@ -53,6 +55,20 @@ async def test_ensure_thread_rejects_an_unknown_thread_id(session, new_identity)
         assert False, "expected ThreadNotFound"
     except repo.ThreadNotFound:
         pass
+
+
+async def test_ensure_thread_creates_under_an_unknown_id_when_told_to(session, new_identity):
+    """AG-UI's case (create_if_missing=True): an unrecognized `threadId`
+    mints a real, database-generated thread rather than 404ing — the
+    caller's own string is discarded, not reused as the primary key.
+    """
+    identity = new_identity()
+    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "a"}])
+    thread_id = await repo.ensure_thread(
+        session, agent_ids["a"], "thread_made_up", create_if_missing=True
+    )
+    assert thread_id.startswith("thread_")
+    assert thread_id != "thread_made_up"
 
 
 async def test_create_run_assigns_a_database_generated_run_id(session, new_identity):

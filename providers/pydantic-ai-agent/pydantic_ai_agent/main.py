@@ -118,7 +118,10 @@ def make_run_stream(agent: Agent, signing_key, souk_http_url: str, use_kyok: boo
             signing_key, subject={"type": "agent", "publicKey": public_key_hex(signing_key)}
         )
         deps = AgentDeps(
-            progress_queue=combined, thread_id=run_input.get("threadId"), actor_chain=actor_chain
+            progress_queue=combined,
+            thread_id=run_input.get("threadId"),
+            run_id=run_input.get("runId"),
+            actor_chain=actor_chain,
         )
 
         kyok_model = resolve_kyok_model(run_input, souk_http_url, signing_key) if use_kyok else None

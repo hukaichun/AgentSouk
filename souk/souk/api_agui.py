@@ -1,6 +1,11 @@
-"""AG-UI gateway: `POST /threads` (the only way to obtain a thread_id —
-see create_thread below) and `POST /agui/...` (the only way to actually
-run an agent, always against a thread_id obtained that way first).
+"""AG-UI gateway: `POST /agui/...` runs an agent, minting a fresh
+thread_id automatically the first time a given (or omitted) `threadId`
+isn't recognized — see _run_agent's use of `create_if_missing=True` and
+souk-no-forced-protocol-deviation (a standard AG-UI client that has
+never heard of `POST /threads` must still work). `POST /threads` (see
+create_thread below) remains available as an *optional* way to obtain a
+thread_id upfront — e.g. to show it in a UI before the first message —
+not a required prerequisite.
 
 The inbound `RunAgentInput` here is the real `ag_ui.core.RunAgentInput`,
 not a souk-specific reimplementation — see souk/models.py's module
@@ -29,15 +34,14 @@ router = APIRouter()
 
 
 async def _create_thread(agent_id: str, body: CreateThreadRequest, session: AsyncSession) -> CreateThreadResponse:
-    """The only way to obtain a thread_id — there is no implicit-creation
-    fallback anywhere in `/agui` or `/a2a`; every caller (AG-UI or A2A —
-    `sessionId` is this same thread_id, see api_a2a's module docstring)
-    calls this first and uses the id it returns from then on. There used
-    to be an implicit path (thread_id omitted on the very first run call),
-    removed on purpose: it meant one endpoint's behavior silently forked
-    into two shapes depending on whether this was a caller's first call
-    or not, and every caller had to handle both. Now every `/agui`/`/a2a`
-    call looks the same, always.
+    """An *optional* way to obtain a thread_id upfront (e.g. to show it in
+    a UI before the first message) — not required. `/agui`/`/a2a` both
+    mint one automatically on first contact if the caller doesn't have
+    one yet (see repo.ensure_thread's `create_if_missing` — AG-UI — and
+    its no-id-at-all fallback — A2A's optional `sessionId`); forcing
+    every caller through this endpoint first would mean a standard,
+    unmodified AG-UI/A2A client that's never heard of it stops working,
+    which souk-no-forced-protocol-deviation rules out.
     """
     agent = await repo.get_agent_by_id(session, agent_id)
     if agent is None:
@@ -111,9 +115,9 @@ async def get_thread_tree(thread_id: str, session: AsyncSession = Depends(get_se
     threads.parent_thread_id — see repo.get_thread_children), so whoever
     started the original call can later ask "what did my request actually
     fan out to." Only as complete as callers chose to make it: a hop only
-    appears if the caller set metadata.parentThreadId when it called
-    through souk (see api_a2a._start_run) — souk can't discover this on its
-    own for calls that didn't opt in.
+    appears if the caller set Message.referenceTaskIds (real A2A, not a
+    souk invention) when it called through souk (see api_a2a._start_run)
+    — souk can't discover this on its own for calls that didn't opt in.
     """
     root = await repo.get_thread(session, thread_id)
     if root is None:
@@ -191,17 +195,23 @@ async def _run_agent(
     metadata = getattr(body, "metadata", None) or {}
     resume = [r.model_dump(mode="json", by_alias=True) for r in body.resume] if body.resume else None
 
-    thread = await repo.get_thread(session, body.thread_id)
-    if thread is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"thread '{body.thread_id}' not found — call POST /threads first",
+    # AG-UI's `threadId` is a field the *caller* mints locally (it's
+    # required by the real schema) and there's no separate "create
+    # thread" concept in AG-UI itself — an id souk hasn't seen before is
+    # indistinguishable from "this is a brand new conversation", not a
+    # caller error. create_if_missing=True mints a real, souk-generated
+    # thread_id in that case (discarding the caller's own string, same
+    # as any other caller-supplied id) rather than 404ing — see
+    # repo.ensure_thread's docstring and souk-no-forced-protocol-deviation:
+    # a standard AG-UI client that has never heard of `POST /threads`
+    # must still work.
+    try:
+        thread_id = await repo.ensure_thread(
+            session, agent_id, body.thread_id, metadata=metadata, create_if_missing=True
         )
-    if thread["agent_id"] != agent_id:
-        raise HTTPException(
-            status_code=409,
-            detail=f"thread '{body.thread_id}' belongs to agent '{thread['agent_id']}', not '{agent_id}'",
-        )
+    except repo.ThreadOwnershipMismatch as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+
     # A thread only ever has one active run at a time (see
     # repo.get_active_run_for_thread) — starting a second one
     # concurrently would fork its otherwise-linear history with no
@@ -209,17 +219,17 @@ async def _run_agent(
     # queueing a duplicate, hand back the thread's current state
     # (including the pending run's real status) so the caller can act
     # on it — this doubles as the "catch me up" path for a run that
-    # has since paused.
-    active = await repo.get_active_run_for_thread(session, body.thread_id)
+    # has since paused. (A freshly-minted thread_id from just above
+    # naturally has no active run yet, so this is a no-op for it.)
+    active = await repo.get_active_run_for_thread(session, thread_id)
     if active is not None and not is_resuming(active, resume):
-        snapshot = await repo.get_thread_snapshot(session, body.thread_id)
-        return JSONResponse(
-            jsonable_encoder(snapshot),
-            headers={"X-Souk-Thread-Id": body.thread_id, "X-Souk-Run-Id": active["run_id"]},
-        )
+        # No X-Souk-Thread-Id header here — the resolved thread_id is
+        # already the top-level `thread_id` field in this JSON body (see
+        # repo.get_thread_snapshot), the standard in-band place for it.
+        snapshot = await repo.get_thread_snapshot(session, thread_id)
+        return JSONResponse(jsonable_encoder(snapshot))
     resuming_run_id = active["run_id"] if active is not None else None
 
-    thread_id = await repo.ensure_thread(session, agent_id, body.thread_id, metadata=metadata)
     input_dump = body.model_dump(mode="json", by_alias=True)
 
     if resuming_run_id is not None:
@@ -255,15 +265,28 @@ async def _run_agent(
         await session.commit()
 
         async def offline_stream():
+            # A real run always announces its own thread_id/run_id via
+            # RUN_STARTED first (see pydantic_ai's AGUIAdapter — it
+            # copies straight from the RunAgentInput it was given, which
+            # is already the resolved, real id) — this fast-fail path
+            # never reaches a provider to emit one, so it synthesizes
+            # the same standard, in-band announcement itself rather than
+            # relying on a custom header (see
+            # souk-no-forced-protocol-deviation and RunErrorEvent's own
+            # schema, which has no thread_id/run_id field to carry this
+            # otherwise).
+            yield {
+                "event": "message",
+                "data": json.dumps(
+                    {"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id}
+                ),
+            }
             yield {
                 "event": "message",
                 "data": json.dumps({"type": "RUN_ERROR", "message": "agent is currently offline"}),
             }
 
-        return EventSourceResponse(
-            offline_stream(),
-            headers={"X-Souk-Thread-Id": thread_id, "X-Souk-Run-Id": run_id},
-        )
+        return EventSourceResponse(offline_stream())
 
     try:
         input_json = build_run_agent_input(
@@ -305,10 +328,12 @@ async def _run_agent(
         async for item in drain_run(run):
             yield {"event": "message", "data": json.dumps(rewrite_message_ids(item, message_id_map))}
 
-    return EventSourceResponse(
-        event_stream(),
-        headers={"X-Souk-Thread-Id": thread_id, "X-Souk-Run-Id": run_id},
-    )
+    # No X-Souk-Thread-Id/X-Souk-Run-Id headers — a real run's own first
+    # event is RUN_STARTED, which every compliant AG-UI provider emits
+    # with threadId/runId copied straight from the RunAgentInput it was
+    # given (already the resolved, real ids) — that's the standard,
+    # in-band place a client learns them, not a souk-invented header.
+    return EventSourceResponse(event_stream())
 
 
 @router.post("/agui/id/{agent_id}", response_model=None)

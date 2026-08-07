@@ -1,10 +1,13 @@
-"""Covers the AG-UI HTTP surface: POST /threads (the only way to obtain a
-thread_id — see api_agui.py's module docstring) and that /agui/... runs
-require one, real ag_ui.core.RunAgentInput shape and all.
+"""Covers the AG-UI HTTP surface: the optional POST /threads endpoint,
+and that /agui/... runs mint a fresh thread automatically for an
+unrecognized threadId rather than requiring POST /threads first (see
+souk-no-forced-protocol-deviation) — real ag_ui.core.RunAgentInput shape
+and all.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
@@ -35,6 +38,19 @@ def _run_input(thread_id: str, message: str = "hi") -> dict:
     }
 
 
+def _run_started_thread_id(sse_body: str) -> str:
+    """Parses the resolved thread_id out of the stream's own RUN_STARTED
+    event — the standard, in-band place a client learns it (no custom
+    X-Souk-Thread-Id header anymore — see souk-no-forced-protocol-deviation).
+    """
+    for line in sse_body.splitlines():
+        if line.startswith("data: "):
+            event = json.loads(line[len("data: ") :])
+            if event.get("type") == "RUN_STARTED":
+                return event["threadId"]
+    raise AssertionError(f"no RUN_STARTED event found in: {sse_body!r}")
+
+
 async def test_create_thread_by_name_and_by_id_return_real_thread_ids(client, new_identity):
     identity = new_identity()
     agent_id = await _register(client, identity, "sdk_1", "greeter")
@@ -53,12 +69,27 @@ async def test_create_thread_for_an_unregistered_agent_404s(client):
     assert resp.status_code == 404
 
 
-async def test_agui_run_rejects_an_unknown_thread_id(client, new_identity):
+async def test_agui_run_mints_a_fresh_thread_for_an_unrecognized_thread_id(client, new_identity, session):
+    """AG-UI's `threadId` is caller-minted and required by the schema —
+    an id souk has never seen is a brand new conversation, not an error
+    (unlike A2A's optional `sessionId` — see test_api_a2a.py). Agent is
+    marked offline purely so the run resolves immediately instead of
+    streaming forever waiting for a provider that will never claim it —
+    unrelated to what this test actually checks (the minted thread_id).
+    """
     identity = new_identity()
-    await _register(client, identity, "sdk_1", "greeter")
+    agent_id = await _register(client, identity, "sdk_1", "greeter")
+    await session.execute(
+        text("UPDATE agents SET last_seen_at = :ts WHERE agent_id = :id"),
+        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "id": agent_id},
+    )
+    await session.commit()
 
     resp = await client.post("/agui/greeter", json=_run_input("thread_made_up"))
-    assert resp.status_code == 404
+    assert resp.status_code == 200, resp.text
+    real_thread_id = _run_started_thread_id(resp.text)
+    assert real_thread_id.startswith("thread_")
+    assert real_thread_id != "thread_made_up"
 
 
 async def test_agui_run_against_an_offline_agent_fails_fast(client, new_identity, session):
@@ -76,8 +107,7 @@ async def test_agui_run_against_an_offline_agent_fails_fast(client, new_identity
 
     resp = await client.post("/agui/translator", json=_run_input(thread_id))
     assert resp.status_code == 200
-    assert "X-Souk-Thread-Id" in resp.headers
-    assert resp.headers["X-Souk-Thread-Id"] == thread_id
     body_text = resp.text
+    assert _run_started_thread_id(body_text) == thread_id
     assert "RUN_ERROR" in body_text
     assert "offline" in body_text

@@ -289,19 +289,14 @@ async def create_thread(
     metadata: dict[str, Any] | None = None,
 ) -> str:
     """Always mints a genuinely fresh thread_id (database-generated —
-    see souk/db.py's threads.thread_id DEFAULT) and stores it. The only
-    caller of this outside `POST /threads` (api_agui.create_thread) is
-    ensure_thread's own parent_thread_id case, when no existing child
-    thread for that pairing is found yet.
-
-    There used to also be an implicit version of this reachable from
-    inside `_run_agent`/`_start_run` themselves (thread_id/sessionId
-    both omitted on a plain call) — removed on purpose: it meant one
-    endpoint's behavior silently forked into two shapes (an id you get
-    back in a header/field vs. one you already had), and every caller
-    had to handle both. Callers now always explicitly create a thread
-    first — see `POST /threads` — and every `_run_agent`/`_start_run`
-    call looks the same from then on.
+    see souk/db.py's threads.thread_id DEFAULT) and stores it. Callers:
+    the optional `POST /threads` endpoint (api_agui.create_thread), and
+    `ensure_thread` itself — both its `parent_thread_id` case (no
+    existing child thread for that pairing yet) and its no-id-at-all/
+    unrecognized-id fallback (see that function's docstring and
+    souk-no-forced-protocol-deviation: a standard AG-UI/A2A caller that
+    never called `POST /threads` must still get a real thread minted for
+    it on first contact, not a 404).
     """
     row = (
         await session.execute(
@@ -328,34 +323,49 @@ async def ensure_thread(
     thread_id: str | None,
     parent_thread_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    create_if_missing: bool = False,
 ) -> str:
-    """Returns the thread_id to use for a run. Exactly one of `thread_id`
-    or `parent_thread_id` must be given — see create_thread's docstring
-    for why there's no third, implicit-creation case anymore; a caller
-    with neither must call `POST /threads` (create_thread) first.
+    """Returns the thread_id to use for a run — always succeeds, one way
+    or another (see souk-no-forced-protocol-deviation: souk must not
+    force callers into an explicit `POST /threads` step the standard
+    protocol they're speaking doesn't require).
 
-    1. `thread_id` given: it must already exist and belong to `agent_id`
-       — this is a caller continuing a conversation using an id souk
-       itself issued earlier (via `POST /threads`, or from a previous
-       run's `X-Souk-Thread-Id`), never a caller minting a new one. A2A's
-       `sessionId` is not a thread_id-minting mechanism (see
-       souk_agent_sdk.a2a_client — real sub-agent delegation never sends
-       one, relying on `parent_thread_id` below instead); a `thread_id`
-       this doesn't recognize is a caller error, not a request to create
-       one under that name.
-    2. `thread_id` is None but `parent_thread_id` is given (e.g. a
-       sub-agent call spawned from within another thread's run): reuse
-       the existing child thread for this (parent_thread_id, agent_id)
-       pair if one exists, so repeated delegation calls keep talking to
-       the same sub-thread — otherwise create_thread's a fresh one. This
-       one stays implicit: it's not "the caller forgot to create a
-       thread," it's a relationship derived from the parent thread that
-       the delegating agent already knows, with nothing separate for it
-       to have explicitly created ahead of time.
+    1. `thread_id` given and it already exists: use it (must belong to
+       `agent_id` — ThreadOwnershipMismatch otherwise, never silently
+       reassigned).
+    2. `thread_id` given but unrecognized:
+       - `create_if_missing=True` (api_agui.py — AG-UI's `threadId` is a
+         required field the *caller* mints locally; an unrecognized one
+         is indistinguishable from "this is a brand new conversation",
+         since AG-UI has no separate "create thread" concept for a
+         caller to have used instead): silently mint a fresh, real
+         (database-generated) thread_id and use that — the caller's own
+         string is discarded, same as any other caller-supplied id (see
+         append_thread_messages) — and learns the real one back the
+         standard AG-UI way: the run's own RUN_STARTED event.
+       - `create_if_missing=False` (api_a2a.py's default — A2A's
+         `sessionId` is optional; a caller that supplies one is claiming
+         to continue something specific): ThreadNotFound — a caller
+         error, not a request to create one under that name.
+    3. `thread_id` is None but `parent_thread_id` is given (a sub-agent
+       call spawned from within another thread's run): reuse the
+       existing child thread for this (parent_thread_id, agent_id) pair
+       if one exists, so repeated delegation calls keep talking to the
+       same sub-thread — otherwise create_thread's a fresh one. Always
+       implicit: it's a relationship derived from the parent thread the
+       delegating agent already knows, not something for it to create
+       explicitly ahead of time.
+    4. Neither given (e.g. A2A's `tasks/send` with no `sessionId` at
+       all): mint a fresh thread — this is the normal, spec-sanctioned
+       first-contact case (A2A: "Agents MAY generate a new contextId
+       when processing a Message that does not include one"), not an
+       error.
     """
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
         if existing is None:
+            if create_if_missing:
+                return await create_thread(session, agent_id, metadata=metadata)
             raise ThreadNotFound(thread_id)
         if existing["agent_id"] != agent_id:
             raise ThreadOwnershipMismatch(
@@ -387,7 +397,7 @@ async def ensure_thread(
             return row["thread_id"]
         return await create_thread(session, agent_id, parent_thread_id, metadata)
 
-    raise ValueError("thread_id or parent_thread_id is required — call POST /threads first")
+    return await create_thread(session, agent_id, metadata=metadata)
 
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
@@ -395,8 +405,9 @@ async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dic
     walked recursively by the caller (api_agui.get_thread_tree) to build a
     full lineage tree. souk is the one party that actually sees every A2A
     hop, so this is data it can own outright; it only gets populated when
-    a caller sets metadata.parentThreadId though (see api_a2a._start_run),
-    so it's only as complete as callers choose to make it.
+    a caller sets Message.referenceTaskIds though (real A2A, see
+    api_a2a._start_run), so it's only as complete as callers choose to
+    make it.
     """
     rows = (
         await session.execute(

@@ -106,6 +106,14 @@ async function loadAgentInfo(soukUrl: string): Promise<AgentRosterEntry | null> 
 }
 
 function handleAguiEvent(event: any): void {
+  if (event.type === "RUN_STARTED") {
+    // The standard, in-band place to learn the resolved thread_id — souk
+    // substitutes its own real one if the id sent above wasn't
+    // recognized (see souk-no-forced-protocol-deviation); no custom
+    // response header for this anymore.
+    if (event.threadId) threadId = event.threadId;
+    return;
+  }
   if (event.type === "RUN_ERROR") {
     clearTyping();
     appendEntry("error", event.message || "The agent failed to respond.", "error");
@@ -278,12 +286,13 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
   document.getElementById("call-chain")!.classList.remove("has-chain");
   showTyping();
 
-  // souk has no implicit thread-creation path (see souk/api_agui.py's
-  // module docstring) — every run addresses a thread_id POST /threads
-  // already handed out, so a first message here means creating one
-  // first. The message itself still needs an `id` — real AG-UI's own
-  // Message schema requires one, no default — but souk discards
-  // whatever value this is and assigns its own real one regardless (see
+  // POST /threads is optional now (souk mints one automatically for an
+  // unrecognized threadId — see souk-no-forced-protocol-deviation), but
+  // the directory still calls it explicitly here so it can show the
+  // thread_id before the first message is even sent. The message itself
+  // still needs an `id` — real AG-UI's own Message schema requires one,
+  // no default — but souk discards whatever value this is and assigns
+  // its own real one regardless (see
   // repo.append_thread_messages), so any locally-unique placeholder
   // satisfies the schema without meaning anything beyond that.
   try {
@@ -311,12 +320,14 @@ async function sendMessage(soukUrl: string, text: string): Promise<void> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    threadId = resp.headers.get("X-Souk-Thread-Id") || threadId;
-
     const contentType = resp.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
       // Duplicate-call snapshot branch (an active run already exists on
       // this thread) — no new stream to read, just a state snapshot.
+      // Its own top-level `thread_id` field is the resolved one (see
+      // repo.get_thread_snapshot) — no header needed here either.
+      const snapshot = await resp.json();
+      threadId = snapshot.thread_id || threadId;
       clearTyping();
       appendEntry("system", "(already in flight — waiting for it to finish)", "system");
       return;

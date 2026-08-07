@@ -25,6 +25,11 @@ class AgentDeps:
     # directly into the caller-visible output.
     progress_queue: asyncio.Queue
     thread_id: str | None = None
+    # This run's own task id (souk's real run_id — see main.py's
+    # `run_input.get("runId")`), forwarded as a sub-agent call's
+    # `referenceTaskIds` (real A2A, not a souk invention) so souk can
+    # record lineage — see call_sub_agent below.
+    run_id: str | None = None
     # A fresh, single-hop identity chain asserting "this call comes from
     # me" (see souk_agent_sdk.identity.new_actor_chain), built once from
     # this provider's own registered key — reused for every sub-agent
@@ -43,12 +48,13 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
     async def call_sub_agent(ctx: RunContext[AgentDeps], message: str) -> str:
         # No session_id here — souk assigns every thread id itself (see
         # souk.ids / souk.repo.ensure_thread), the sub-agent tool never
-        # mints one. We only tell souk which thread this call is spawned
-        # from (metadata.parentThreadId); souk reuses the existing child
-        # thread for this (parent, sub-agent) pair if one already exists
-        # (so repeated delegations within one main conversation keep
-        # talking to the same sub-thread), or assigns a fresh one.
-        main_thread_id = ctx.deps.thread_id
+        # mints one. We only tell souk which task this call references
+        # (real A2A `referenceTaskIds`, see souk_agent_sdk.a2a_client);
+        # souk resolves that back to a thread and reuses the existing
+        # child thread for this (parent, sub-agent) pair if one already
+        # exists (so repeated delegations within one main conversation
+        # keep talking to the same sub-thread), or assigns a fresh one.
+        reference_task_ids = [ctx.deps.run_id] if ctx.deps.run_id else None
 
         final_text = ""
         failed = False
@@ -64,7 +70,7 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
         async for update in call_agent_streaming(
             sub.a2a_url,
             message,
-            parent_thread_id=main_thread_id,
+            reference_task_ids=reference_task_ids,
             actor_chain=ctx.deps.actor_chain,
         ):
             await ctx.deps.progress_queue.put(

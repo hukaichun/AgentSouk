@@ -31,7 +31,7 @@ async def call_agent_streaming(
     session_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     actor_chain: list[str] | None = None,
-    parent_thread_id: str | None = None,
+    reference_task_ids: list[str] | None = None,
     timeout: float = 120.0,
 ) -> AsyncIterator[dict[str, Any]]:
     """`actor_chain`, if given, proves this call's identity (and, for a
@@ -41,25 +41,27 @@ async def call_agent_streaming(
     to build one. Entirely optional: souk doesn't require callers to
     authenticate.
 
-    `parent_thread_id`, if given, is the caller's own thread this call is
-    being made from (see souk/db.py's threads.parent_thread_id) — souk
-    records the lineage so a later `GET /threads/{root}/tree` can show what
-    a top-level call actually fanned out to. Exposed as an explicit
-    parameter (rather than left for each caller to remember to stuff into
-    `metadata` itself) so anyone using this shared client gets correct
+    `reference_task_ids`, if given, is real A2A (`Message.referenceTaskIds`
+    — "a list of other task IDs that this message references for
+    additional context"), not a souk invention like the `parentThreadId`
+    metadata field this replaced: pass the caller's own current task id
+    (e.g. its own run_id) to let souk record the lineage (see
+    souk/db.py's threads.parent_thread_id) so a later `GET /threads/
+    {root}/tree` can show what a top-level call actually fanned out to.
+    Exposed as an explicit parameter (rather than left for each caller to
+    remember itself) so anyone using this shared client gets correct
     lineage by default.
     """
     task_id = task_id or new_task_id()
     metadata = dict(metadata) if metadata else {}
     if actor_chain is not None:
         metadata["actorChain"] = actor_chain
-    if parent_thread_id is not None:
-        metadata["parentThreadId"] = parent_thread_id
 
-    params: dict[str, Any] = {
-        "id": task_id,
-        "message": {"role": "user", "parts": [{"type": "text", "text": message_text}]},
-    }
+    message: dict[str, Any] = {"role": "user", "parts": [{"type": "text", "text": message_text}]}
+    if reference_task_ids:
+        message["referenceTaskIds"] = reference_task_ids
+
+    params: dict[str, Any] = {"id": task_id, "message": message}
     if session_id:
         params["sessionId"] = session_id
     if metadata:
