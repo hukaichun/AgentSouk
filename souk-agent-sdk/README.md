@@ -156,6 +156,21 @@ because:
   first. This is also how the bearer token used on every gRPC call gets
   refreshed before it expires — there's no separate renewal mechanism.
 
+## Thread/context ids are capability tokens, not public identifiers
+
+`threadId`/`contextId` (souk mints both, database-generated, ~96 bits of
+randomness) are the *entire* access boundary for reading a
+conversation back — `GET /threads/{thread_id}` and its `/tree` have no
+separate auth check; knowing the id is treated as proof you were a
+party to it, the same trust model A2A's own `tasks/get` already uses
+for `run_id`. This is intentional, not an oversight (souk's public demo
+frontend relies on exactly this — an anonymous browser reads back its
+own just-finished conversation's lineage by thread_id alone, with no
+credential to offer). The practical implication for you: **don't log
+these ids somewhere less trusted than the conversation itself**, and
+don't assume there's a souk-side permission check backing you up if you
+hand one to the wrong party — there isn't.
+
 ## Cancellation
 
 Souk cancels a run only on an explicit request (A2A `tasks/cancel`) —
@@ -163,6 +178,14 @@ never because an HTTP/SSE caller disconnected (see `souk/broker.py`'s
 module docstring for why: a dropped connection alone must not throw
 away in-progress work). When it does happen, souk sends a `cancel=true`
 envelope on the run's gRPC stream.
+
+**AG-UI itself has no cancel endpoint on souk today** — only A2A's
+`tasks/cancel` ever produces this signal. If every caller reaching your
+agent does so purely over AG-UI (never via A2A), your run is
+practically un-cancellable from the outside for now; nothing you do in
+`run_stream` changes that, since the signal never gets sent in the
+first place. Not something to design around per-agent — just worth
+knowing rather than assuming cancellation "just works" for every caller.
 
 The SDK's `_handle_run` races your `run_stream` against watching for
 that envelope and, if it arrives first, calls `.cancel()` on the task
@@ -249,18 +272,43 @@ purpose — anything souk did wake you up for would tell you nothing you
 couldn't get by just checking, and would cost a real run (and, if
 you're LLM-backed, a real LLM call) to say it.
 
+**Several concurrent sub-agent calls, one of them pauses while the
+others are still running — this is entirely your call to design, not
+souk's.** If your framework runs sibling tool calls in parallel (e.g.
+pydantic-ai's default `end_strategy`), one call hitting
+`input-required` doesn't itself unblock the others still in flight —
+whether you want to keep waiting on them, give up and report "some
+pending, some still running," or something else, is a decision about
+*your own* concurrency model, which souk has no visibility into and no
+opinion on. This was deliberately *not* built into souk or into this
+SDK after being prototyped and reverted — see the project history if
+you want the reasoning — precisely because the right answer depends on
+your framework's own task model, not on anything souk-generic.
+
 ## Delegating to another agent (A2A)
 
 `souk_agent_sdk.a2a_client.call_agent_streaming(a2a_url, message,
-parent_thread_id=..., actor_chain=...)` drives another agent's
-`tasks/sendSubscribe` and yields each status/artifact update as it
-streams back. `providers/pydantic-ai-agent/pydantic_ai_agent/
+reference_task_ids=..., context_id=..., actor_chain=...)` drives another
+agent's `tasks/sendSubscribe` and yields each status/artifact update as
+it streams back. `providers/pydantic-ai-agent/pydantic_ai_agent/
 sub_agent_tool.py` is a worked example wiring this up as a pydantic-ai
 tool — read it for the full pattern, including:
 
-- Passing `parent_thread_id` (your own run's `threadId`) so souk can
-  record lineage (`GET /threads/{root}/tree`) — lets whoever started the
-  original call later trace what it fanned out to.
+- Passing `reference_task_ids=[your_own_run_id]` — real A2A
+  (`Message.referenceTaskIds`), purely informational — lets souk record
+  lineage (`GET /threads/{root}/tree`) so whoever started the original
+  call can later trace what it fanned out to. This is **only**
+  bookkeeping: it does not make souk reuse or continue any particular
+  thread with the callee — see the next point.
+- **Session continuity is your own explicit choice, not automatic.**
+  Every call that doesn't carry a `contextId` gets a brand new thread
+  with the callee, every time — souk never infers "this looks like the
+  same conversation as last time" from `reference_task_ids` or anything
+  else (see `souk.repo.ensure_thread`'s docstring). Every update you get
+  back carries the real `contextId` souk (or the callee, if it's not
+  souk-fronted) assigned — capture it and pass it as `context_id` on
+  your *next* call to the same callee if you want that conversation to
+  continue rather than restart cold each time.
 - Checking each update's `status.state` honestly: `"failed"` is a real
   failure, `"input-required"` means *pending, not failed and not
   answered* — collapsing that into "no response" or treating it as a
@@ -270,7 +318,37 @@ tool — read it for the full pattern, including:
   call to a known, registered identity instead of an anonymous caller.
   Optional — an unattributed call still works.
 
-## Keep Your Own Key (KYOK) opt-in
+### Multi-agent topologies — what's actually verified, not just argued
+
+The delegation model above composes into arbitrary graphs of agents
+talking to each other through souk, since each hop is just "one more
+A2A call." Two shapes worth naming explicitly, both exercised against a
+real LLM (`providers/pydantic-ai-agent/config.test-topologies.yaml` —
+kept in the repo as a regression fixture, not a live demo):
+
+- **Fan-out / diamond** (you call two sub-agents concurrently, and both
+  of them happen to delegate to the *same* third agent): safe by
+  construction. Every call with no `context_id` gets an independent
+  thread (see above), so the shared callee ends up with two unrelated
+  threads, one per caller — no cross-talk, no state bleeding from one
+  branch into the other, even though it's the same `agent_id` on both
+  sides.
+- **Cycles** (agent A delegates to B, and B's own logic calls back into
+  A): safe from deadlock — a callback lands on a *fresh* thread (no
+  `context_id` reuse means it's a brand-new call from souk's point of
+  view, not a re-entry into your still-open run), and souk's own event
+  loop is never blocked by your `run_stream` awaiting an outbound A2A
+  call. **What souk does *not* do: stop you from looping forever.**
+  There's no depth limit, no cycle detection — if your own logic
+  unconditionally delegates back on every message, you've built an
+  infinite loop and souk will happily keep running it (each hop will
+  eventually fail on its own `httpx` timeout, but only after real work
+  and real LLM spend). Design your own base case, the same way you'd
+  design one for any other recursive call — `providers/pydantic-ai-agent`'s
+  `looper_a`/`looper_b` test agents are the worked example (a message
+  prefixed `PING` short-circuits instead of delegating again).
+
+## Keep Your Own Key (KYOK) opt-in — experimental
 
 By default your agent calls whatever LLM you configure it to call, paid
 for however you normally pay for it. KYOK lets a *caller* offer to pay for
@@ -278,6 +356,17 @@ a given run with their own key instead — see
 [docs/keep-your-own-key.md](../docs/keep-your-own-key.md) for the full
 design; this section is just the provider-side integration cost, which is
 small and entirely opt-in per agent.
+
+**Treat this as experimental**, unlike everything else in this
+document: `souk/api_llm_bridge.py`/`souk/kyok.py` have no test coverage
+at all today (contrast the broker/pause/health paths, which have been
+through several rounds of race-condition review), and the bridge's
+pending-completion registry is in-memory/single-process only, the same
+trade-off `broker.py` makes deliberately and documents extensively —
+KYOK makes the same choice without the same scrutiny yet. Fine for a
+demo or low-stakes integration; if a run genuinely dies mid-relay
+(souk restart, provider crash) there's no persisted state to recover
+from, and that path hasn't been exercised under test.
 
 If a run's `forwardedProps.kyok.token` is present, souk is offering you a
 run-scoped OpenAI-compatible endpoint (`{souk_http_url}/kyok/v1`) instead
