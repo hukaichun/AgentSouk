@@ -1,0 +1,92 @@
+souk_http_url: http://souk:8000
+souk_grpc_url: souk:50051
+provider_name: AgentSouk topology test rig
+
+agents:
+  # --- Diamond / fan-out test ---
+  # dispatcher calls echo_a and echo_b concurrently (pydantic-ai runs
+  # parallel tool calls) with the same input; each of them independently
+  # delegates to the same leaf agent. Verifies: no thread reuse/cross-talk
+  # between the two branches even though they hit the same callee, and
+  # GET /threads/{dispatcher_thread}/tree shows two separate branches each
+  # with their own independent leaf child (not one shared/merged node).
+  - name: dispatcher
+    description: Test agent that fans out to two branches concurrently.
+    model: custom-openai
+    system_prompt: >
+      You will receive a short word. Call BOTH call_echo_a and call_echo_b
+      tools, each with that exact word, in the same turn (do not call them
+      sequentially in separate turns). Then reply with a one-line summary
+      of what each branch returned.
+    mcp_servers: []
+    sub_agents:
+      - name: echo_a
+        a2a_url: http://souk:8000/a2a/echo_a/rpc
+      - name: echo_b
+        a2a_url: http://souk:8000/a2a/echo_b/rpc
+
+  - name: echo_a
+    description: Branch A — delegates to the shared leaf agent.
+    model: custom-openai
+    system_prompt: >
+      Call the call_leaf tool with the exact word you received, then reply
+      with exactly what leaf returned, prefixed with "A:".
+    mcp_servers: []
+    sub_agents:
+      - name: leaf
+        a2a_url: http://souk:8000/a2a/leaf/rpc
+
+  - name: echo_b
+    description: Branch B — delegates to the shared leaf agent.
+    model: custom-openai
+    system_prompt: >
+      Call the call_leaf tool with the exact word you received, then reply
+      with exactly what leaf returned, prefixed with "B:".
+    mcp_servers: []
+    sub_agents:
+      - name: leaf
+        a2a_url: http://souk:8000/a2a/leaf/rpc
+
+  - name: leaf
+    description: Shared leaf — just echoes back with a marker.
+    model: custom-openai
+    system_prompt: >
+      Reply with exactly "leaf-saw:" followed by whatever word you received,
+      nothing else.
+    mcp_servers: []
+    sub_agents: []
+
+  # --- Cycle test ---
+  # looper_a calls looper_b, which calls back into looper_a on a FRESH
+  # thread (no contextId reuse — see souk-agent-sdk's a2a_client, which
+  # never carries context_id unless the tool explicitly stores/passes one
+  # back). looper_a's system prompt is a base case for anything starting
+  # with "PING" so this can't recurse indefinitely. Verifies: souk handles
+  # the *same agent_id* appearing twice in one lineage tree without
+  # deadlocking or corrupting state, and /tree shows the full A -> B -> A
+  # chain as three distinct thread nodes.
+  - name: looper_a
+    description: Test agent — calls looper_b, unless the message is itself a ping-back.
+    model: custom-openai
+    system_prompt: >
+      If the message you receive starts with the word "PING", do not call
+      any tool — just reply with exactly "PONG:" followed by the rest of
+      the message. Otherwise, call the call_looper_b tool with the message
+      "PING-BACK please" and then reply with exactly what looper_b
+      returned, prefixed with "A-final:".
+    mcp_servers: []
+    sub_agents:
+      - name: looper_b
+        a2a_url: http://souk:8000/a2a/looper_b/rpc
+
+  - name: looper_b
+    description: Test agent — calls back into looper_a to close the loop.
+    model: custom-openai
+    system_prompt: >
+      Call the call_looper_a tool with the message "PING please echo",
+      then reply with exactly what looper_a returned, prefixed with
+      "B-relayed:".
+    mcp_servers: []
+    sub_agents:
+      - name: looper_a
+        a2a_url: http://souk:8000/a2a/looper_a/rpc

@@ -1,5 +1,15 @@
 # Keep Your Own Key (KYOK)
 
+**Status: experimental, on both sides.** No test coverage yet on
+souk's side (`souk/api_llm_bridge.py`/`souk/kyok.py`) or the caller's
+(`souk-client-sdk/souk_client_sdk/kyok_bridge.py` — in fact
+souk-client-sdk has no tests at all today, and no README either). The
+pending-completion registry is in-memory, single-process on souk's
+side, and the caller's bridge holds no durable state either — there is
+no recovery path if souk, the provider, or the caller's bridge dies
+mid-relay. Fine for a demo; not yet held to the same bar as the core
+AG-UI/A2A relay path.
+
 ## Problem
 
 Running an agent costs LLM tokens. The obvious way to pay for that is
