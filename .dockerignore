@@ -1,0 +1,6 @@
+# Hermes Agent's own runtime data directory (providers/openai-compat-agent/
+# hermes-data, bind-mounted into the `hermes` demo container) — never
+# needed inside any image we build, and its files end up owned by the
+# container's internal uid (10000), which can make it unreadable to the
+# Docker build context depending on host permissions.
+providers/openai-compat-agent/hermes-data

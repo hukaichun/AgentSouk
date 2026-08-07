@@ -75,6 +75,46 @@ services:
     depends_on:
       - souk
 
+  # Optional playground, off by default — see providers/openai-compat-agent/
+  # README.md. `docker compose --profile hermes-demo up` to bring both of
+  # these up alongside the services above.
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    profiles: ["hermes-demo"]
+    command: ["gateway", "run"]
+    volumes:
+      - ./providers/openai-compat-agent/hermes-data:/opt/data
+    environment:
+      AZURE_FOUNDRY_BASE_URL: "${LLM_BASE_URL}"
+      AZURE_FOUNDRY_API_KEY: "${LLM_API_KEY}"
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      API_SERVER_PORT: "8642"
+      # Must be >=16 chars — Hermes's API server platform only activates
+      # if this looks like a real secret (see gateway/config.py's
+      # _has_usable_api_server_key), regardless of API_SERVER_ENABLED.
+      API_SERVER_KEY: "${HERMES_API_SERVER_KEY}"
+      API_SERVER_MODEL_NAME: "hermes"
+
+  openai-compat-demo:
+    build:
+      context: .
+      dockerfile: providers/openai-compat-agent/Dockerfile
+    profiles: ["hermes-demo"]
+    depends_on:
+      - souk
+      - hermes
+    volumes:
+      - ./providers/openai-compat-agent/config.hermes.yaml:/app/config.yaml:ro
+      # Same reasoning as agent_demo_identity above — without this, every
+      # restart mints a fresh identity and leaves the old "hermes"
+      # agent_id registration behind as an orphan.
+      - openai_compat_demo_identity:/data
+    environment:
+      SOUK_IDENTITY_KEY_PATH: /data/souk_identity.key
+      HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY}"
+
 volumes:
   paradedb_data:
   agent_demo_identity:
+  openai_compat_demo_identity:
