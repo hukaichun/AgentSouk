@@ -28,7 +28,7 @@ async def call_agent_streaming(
     message_text: str,
     *,
     task_id: str | None = None,
-    session_id: str | None = None,
+    context_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     actor_chain: list[str] | None = None,
     reference_task_ids: list[str] | None = None,
@@ -41,6 +41,16 @@ async def call_agent_streaming(
     to build one. Entirely optional: souk doesn't require callers to
     authenticate.
 
+    `context_id`, if given, is real A2A (`Message.contextId` — the
+    caller passes back whatever `contextId` it was returned on an
+    earlier call to the same callee, per the spec's own session-
+    continuation convention) to continue talking to the same callee
+    thread. Omit it (the default) to always start a fresh one — souk
+    never reuses a thread implicitly just because `reference_task_ids`
+    matches an earlier call (see souk/repo.py's ensure_thread docstring
+    and souk-no-forced-protocol-deviation): lineage and continuity are
+    orthogonal, a caller must opt into continuity explicitly.
+
     `reference_task_ids`, if given, is real A2A (`Message.referenceTaskIds`
     — "a list of other task IDs that this message references for
     additional context"), not a souk invention like the `parentThreadId`
@@ -50,7 +60,8 @@ async def call_agent_streaming(
     {root}/tree` can show what a top-level call actually fanned out to.
     Exposed as an explicit parameter (rather than left for each caller to
     remember itself) so anyone using this shared client gets correct
-    lineage by default.
+    lineage by default. This is purely informational per the A2A spec —
+    it never implies session continuity; use `context_id` for that.
     """
     task_id = task_id or new_task_id()
     metadata = dict(metadata) if metadata else {}
@@ -62,8 +73,8 @@ async def call_agent_streaming(
         message["referenceTaskIds"] = reference_task_ids
 
     params: dict[str, Any] = {"id": task_id, "message": message}
-    if session_id:
-        params["sessionId"] = session_id
+    if context_id:
+        params["contextId"] = context_id
     if metadata:
         params["metadata"] = metadata
 

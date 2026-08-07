@@ -20,18 +20,25 @@ There is no separate task_id concept: A2A's `Task.id` (and every
 run_id (see api_a2a._start_run's docstring for why real A2A's own
 `params.id` on `tasks/send(Subscribe)` — a caller-chosen value — is
 accepted but not used for anything, a deliberate deviation from strict
-A2A interop). `params.sessionId` is thread_id, similarly always
+A2A interop). `params.contextId` (the real A2A field name — an earlier
+version of this module used the pre-rename `sessionId`, a stale draft
+name, not a souk invention either way) is thread_id, similarly always
 database-generated (see repo.ensure_thread) — a caller-supplied
-`sessionId` only ever *reuses* one souk already issued, never mints a
+`contextId` only ever *reuses* one souk already issued, never mints a
 new one under a caller-chosen name (an unrecognized one is a 404, not
-silently created — see repo.ThreadNotFound). Omitting `sessionId`
+silently created — see repo.ThreadNotFound). Omitting `contextId`
 entirely, though, is the normal A2A first-contact case (the spec's own
 "Agents MAY generate a new contextId...") and does mint a fresh one —
 souk never requires a caller to have called `POST /threads` first (see
 souk-no-forced-protocol-deviation). Real sub-agent delegation
-(souk_agent_sdk.a2a_client) never sends `sessionId` at all, relying on
-`Message.referenceTaskIds` (real A2A) to resolve the parent thread for
-lineage instead — see _start_run's own docstring.
+(souk_agent_sdk.a2a_client) records lineage via `Message.
+referenceTaskIds` (real A2A) but that never implies reusing an existing
+child thread — `referenceTaskIds` is explicitly informational-only in
+the spec, not a session-grouping primitive, so souk never uses it to
+infer continuity (see repo.ensure_thread's docstring). A caller that
+wants to continue talking to the same callee thread must pass back the
+real `contextId` it was returned on the earlier call, same as any
+other A2A session continuation.
 """
 
 from __future__ import annotations
@@ -147,7 +154,7 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
     if agent is None:
         raise HTTPException(status_code=404, detail=f"agent '{agent_id}' is not registered")
 
-    session_id = params.get("sessionId")
+    context_id = params.get("contextId")
     metadata = params.get("metadata", {})
     # Real A2A (Message.referenceTaskIds — "a list of other task IDs
     # that this message references for additional context"), not a
@@ -196,7 +203,7 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
         }
 
     # `create_if_missing` defaults False here (unlike api_agui.py): A2A's
-    # `sessionId` is optional, so a caller that omits it entirely (the
+    # `contextId` is optional, so a caller that omits it entirely (the
     # normal first-contact case — see repo.ensure_thread) still gets a
     # fresh thread; but a caller that *does* supply one is claiming to
     # continue something specific, and an unrecognized one is a real
@@ -204,7 +211,7 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
     # that name.
     try:
         thread_id = await repo.ensure_thread(
-            session, agent_id, session_id, parent_thread_id, metadata=metadata
+            session, agent_id, context_id, parent_thread_id, metadata=metadata
         )
     except repo.ThreadNotFound as e:
         raise HTTPException(

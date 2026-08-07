@@ -72,7 +72,7 @@ async def test_create_thread_for_an_unregistered_agent_404s(client):
 async def test_agui_run_mints_a_fresh_thread_for_an_unrecognized_thread_id(client, new_identity, session):
     """AG-UI's `threadId` is caller-minted and required by the schema —
     an id souk has never seen is a brand new conversation, not an error
-    (unlike A2A's optional `sessionId` — see test_api_a2a.py). Agent is
+    (unlike A2A's optional `contextId` — see test_api_a2a.py). Agent is
     marked offline purely so the run resolves immediately instead of
     streaming forever waiting for a provider that will never claim it —
     unrelated to what this test actually checks (the minted thread_id).

@@ -25,7 +25,7 @@ def test_run_finished_is_final_completed():
     update = agui_event_to_a2a_update({"type": "RUN_FINISHED"}, "task_1", "session_1")
     assert update == {
         "id": "task_1",
-        "sessionId": "session_1",
+        "contextId": "session_1",
         "status": {"state": "completed"},
         "final": True,
     }

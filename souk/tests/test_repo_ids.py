@@ -33,7 +33,7 @@ async def test_create_thread_assigns_a_database_generated_thread_id(session, new
 
 
 async def test_ensure_thread_mints_a_fresh_thread_when_neither_id_is_given(session, new_identity):
-    """The normal A2A first-contact case (no `sessionId` at all) — see
+    """The normal A2A first-contact case (no `contextId` at all) — see
     souk-no-forced-protocol-deviation: a caller was never required to
     call `POST /threads` first.
     """
@@ -44,7 +44,7 @@ async def test_ensure_thread_mints_a_fresh_thread_when_neither_id_is_given(sessi
 
 
 async def test_ensure_thread_rejects_an_unknown_thread_id_by_default(session, new_identity):
-    """A caller-*supplied* thread_id/sessionId that doesn't exist is a
+    """A caller-*supplied* thread_id/contextId that doesn't exist is a
     real error (default create_if_missing=False) — it's claiming to
     continue something specific, unlike the no-id-at-all case above.
     """

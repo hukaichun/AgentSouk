@@ -344,22 +344,25 @@ async def ensure_thread(
          append_thread_messages) — and learns the real one back the
          standard AG-UI way: the run's own RUN_STARTED event.
        - `create_if_missing=False` (api_a2a.py's default — A2A's
-         `sessionId` is optional; a caller that supplies one is claiming
+         `contextId` is optional; a caller that supplies one is claiming
          to continue something specific): ThreadNotFound — a caller
          error, not a request to create one under that name.
-    3. `thread_id` is None but `parent_thread_id` is given (a sub-agent
-       call spawned from within another thread's run): reuse the
-       existing child thread for this (parent_thread_id, agent_id) pair
-       if one exists, so repeated delegation calls keep talking to the
-       same sub-thread — otherwise create_thread's a fresh one. Always
-       implicit: it's a relationship derived from the parent thread the
-       delegating agent already knows, not something for it to create
-       explicitly ahead of time.
-    4. Neither given (e.g. A2A's `tasks/send` with no `sessionId` at
-       all): mint a fresh thread — this is the normal, spec-sanctioned
+    3. `thread_id` is None (e.g. A2A's `tasks/send` with no `contextId`
+       at all): always mint a fresh thread — the normal, spec-sanctioned
        first-contact case (A2A: "Agents MAY generate a new contextId
        when processing a Message that does not include one"), not an
-       error.
+       error. This holds even when `parent_thread_id` is given (a
+       sub-agent call carrying `Message.referenceTaskIds` — see
+       api_a2a._start_run): lineage recording and session continuity are
+       deliberately orthogonal (A2A's own `referenceTaskIds` is
+       explicitly informational-only, not a session-grouping primitive
+       — see souk-no-forced-protocol-deviation). souk still stores
+       `parent_thread_id` on the fresh thread so lineage stays complete
+       (see get_thread_children), but never reuses an existing child
+       thread just because the same parent referenced it before — a
+       caller that wants to continue talking to the same callee thread
+       must say so explicitly, the standard A2A way: pass back the real
+       `contextId` it was returned on the earlier call.
     """
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
@@ -376,28 +379,8 @@ async def ensure_thread(
             {"thread_id": thread_id},
         )
         return thread_id
-    elif parent_thread_id is not None:
-        row = (
-            await session.execute(
-                text(
-                    """
-                    SELECT thread_id FROM threads
-                    WHERE parent_thread_id = :parent_thread_id AND agent_id = :agent_id
-                    ORDER BY created_at LIMIT 1
-                    """
-                ),
-                {"parent_thread_id": parent_thread_id, "agent_id": agent_id},
-            )
-        ).mappings().first()
-        if row is not None:
-            await session.execute(
-                text("UPDATE threads SET last_activity_at = now() WHERE thread_id = :thread_id"),
-                {"thread_id": row["thread_id"]},
-            )
-            return row["thread_id"]
-        return await create_thread(session, agent_id, parent_thread_id, metadata)
 
-    return await create_thread(session, agent_id, metadata=metadata)
+    return await create_thread(session, agent_id, parent_thread_id, metadata)
 
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:

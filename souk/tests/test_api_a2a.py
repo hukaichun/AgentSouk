@@ -66,7 +66,7 @@ async def test_offline_target_fails_fast_instead_of_queueing(client, new_identit
             "id": "1",
             "method": "tasks/send",
             "params": {
-                "sessionId": thread_id,
+                "contextId": thread_id,
                 "message": {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
             },
         },
@@ -118,7 +118,7 @@ async def test_a2a_can_never_bypass_a_paused_run_even_with_a_resume_flag(client,
             "method": "tasks/send",
             "params": {
                 "id": "task_b",
-                "sessionId": thread_id,
+                "contextId": thread_id,
                 "metadata": {"resume": True},
                 "message": {"role": "user", "parts": [{"type": "text", "text": "approved"}]},
             },
