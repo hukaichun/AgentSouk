@@ -25,3 +25,9 @@ souk-directory/node_modules/
 souk-directory/dist/
 
 .pytest_cache/
+
+# Hermes Agent's own runtime data (sessions, kanban, memories, config) —
+# see providers/openai-compat-agent/README.md's hermes-demo profile.
+# Owned by the container's internal uid (10000) once it's run, not the
+# host user — never commit it.
+providers/openai-compat-agent/hermes-data/

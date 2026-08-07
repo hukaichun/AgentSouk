@@ -13,6 +13,12 @@ equally valid provider.
 - **`pydantic-ai-agent/`** — a fuller example: YAML-configured agents backed
   by [pydantic-ai](https://ai.pydantic.dev), with MCP tool support and
   sub-agent delegation over A2A.
+- **`openai-compat-agent/`** — wraps any OpenAI-compatible chat endpoint
+  (a raw LLM, or a full agent that just happens to speak that wire format,
+  e.g. [Hermes Agent](https://hermes-agent.nousresearch.com/)'s own API
+  server) as a souk provider, with zero prompting/orchestration of its
+  own. Optional, off by default — see its own README for how to bring it
+  up (`docker compose --profile hermes-demo up`).
 
 Add new provider examples as siblings of `pydantic-ai-agent/` here (e.g. a
 different LLM framework, a non-Python implementation, a HITL-approval demo)
