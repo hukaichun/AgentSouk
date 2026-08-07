@@ -38,7 +38,7 @@ async def _create_thread(agent_id: str, body: CreateThreadRequest, session: Asyn
     a UI before the first message) — not required. `/agui`/`/a2a` both
     mint one automatically on first contact if the caller doesn't have
     one yet (see repo.ensure_thread's `create_if_missing` — AG-UI — and
-    its no-id-at-all fallback — A2A's optional `sessionId`); forcing
+    its no-id-at-all fallback — A2A's optional `contextId`); forcing
     every caller through this endpoint first would mean a standard,
     unmodified AG-UI/A2A client that's never heard of it stops working,
     which souk-no-forced-protocol-deviation rules out.

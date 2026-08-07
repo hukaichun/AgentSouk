@@ -10,7 +10,7 @@ the tool-call loop.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic_ai import RunContext, Tool
 from souk_agent_sdk.a2a_client import call_agent_streaming
@@ -38,6 +38,15 @@ class AgentDeps:
     # souk/identity.py's verify_actor_chain). Optional: a sub-agent call
     # without one is still allowed, just unattributed.
     actor_chain: list[str] | None = None
+    # sub_agent name -> the real contextId (A2A) souk returned on that
+    # sub-agent's most recent call within this run. souk never reuses a
+    # callee thread implicitly (see souk/repo.py's ensure_thread
+    # docstring: lineage via referenceTaskIds and session continuity are
+    # deliberately orthogonal) — a repeated call to the same sub-agent
+    # within one main-agent run wants to keep talking to the same
+    # sub-thread, so this call site has to opt in explicitly, the
+    # standard A2A way, by passing back what it was given last time.
+    sub_agent_context_ids: dict[str, str] = field(default_factory=dict)
 
 
 def build_sub_agent_tools(sub_agents: list[SubAgentConfig]) -> list[Tool]:
@@ -46,15 +55,21 @@ def build_sub_agent_tools(sub_agents: list[SubAgentConfig]) -> list[Tool]:
 
 def _make_tool(sub: SubAgentConfig) -> Tool:
     async def call_sub_agent(ctx: RunContext[AgentDeps], message: str) -> str:
-        # No session_id here — souk assigns every thread id itself (see
-        # souk.ids / souk.repo.ensure_thread), the sub-agent tool never
-        # mints one. We only tell souk which task this call references
-        # (real A2A `referenceTaskIds`, see souk_agent_sdk.a2a_client);
-        # souk resolves that back to a thread and reuses the existing
-        # child thread for this (parent, sub-agent) pair if one already
-        # exists (so repeated delegations within one main conversation
-        # keep talking to the same sub-thread), or assigns a fresh one.
+        # souk assigns every thread id itself (see souk.ids /
+        # souk.repo.ensure_thread), the sub-agent tool never mints one.
+        # `referenceTaskIds` (real A2A, see souk_agent_sdk.a2a_client)
+        # tells souk which task this call references, purely so it can
+        # record lineage (GET /threads/{root}/tree) — it never implies
+        # reusing an earlier sub-thread with this callee (A2A's
+        # referenceTaskIds is informational-only, not a session-grouping
+        # primitive). Continuing the same sub-thread across repeated
+        # delegations within one main conversation is instead handled
+        # explicitly below via `context_id`.
         reference_task_ids = [ctx.deps.run_id] if ctx.deps.run_id else None
+        # See AgentDeps.sub_agent_context_ids: pass back whatever contextId
+        # this sub-agent last returned so souk continues the same
+        # sub-thread instead of starting a fresh one.
+        context_id = ctx.deps.sub_agent_context_ids.get(sub.name)
 
         final_text = ""
         failed = False
@@ -70,6 +85,7 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
         async for update in call_agent_streaming(
             sub.a2a_url,
             message,
+            context_id=context_id,
             reference_task_ids=reference_task_ids,
             actor_chain=ctx.deps.actor_chain,
         ):
@@ -80,6 +96,9 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
                     "value": {"sub_agent": sub.name, **update},
                 }
             )
+            returned_context_id = update.get("contextId")
+            if returned_context_id:
+                ctx.deps.sub_agent_context_ids[sub.name] = returned_context_id
             state = update.get("status", {}).get("state")
             if state == "failed":
                 failed = True
