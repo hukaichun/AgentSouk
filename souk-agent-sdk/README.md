@@ -1,435 +1,225 @@
-# souk-agent-sdk: what an agent provider needs to do
+# souk-agent-sdk 🔌⚡
 
-This is the contract a "provider" (an actual agent, running wherever you
-run it) has to satisfy to be reachable through a souk. `souk_agent_sdk` is
-a convenience Python client for this contract — it is not the contract
-itself. Anything that speaks `proto/souk.proto`'s gRPC service directly,
-in any language, is an equally valid provider; souk never special-cases
-this SDK.
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://python.org)
+[![Protocol: gRPC / AG-UI / A2A](https://img.shields.io/badge/Protocols-gRPC%20%7C%20AG--UI%20%7C%20A2A-blue.svg)](../proto/souk.proto)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
 
-If you just want a working example to copy, skip to
-[Reference implementations](#reference-implementations). This document is
-for understanding *why* each piece is required.
+> **The Official Python Agent Provider SDK for Agent Souk.**  
+> Effortlessly make any local, firewall-bound, or edge AI agent reachably exposed over **AG-UI** (human streaming) and **A2A** (agent-to-agent JSON-RPC) — **with zero inbound ports, no public IP, and no network configuration.**
 
-## The actual pitch: your agent probably already qualifies
+This document is the pitch and the quick start. For the situations that
+come up once your agent is actually running — multi-agent delegation
+topologies (verified against a real LLM), session continuity, why
+cancellation doesn't always work, and a few other things worth knowing
+before they surprise you — see
+**[docs/agent-provider-guide.md](../docs/agent-provider-guide.md)**.
 
-souk's headline feature (see the top-level README) is making agents
-reachable — over **AG-UI** and **A2A** — without exposing any inbound
-port, tunnel, or public IP: the agent connects *out* to souk, souk does
-the rest. The part that matters for you here is what "becoming reachable"
-actually costs.
+---
 
-Look again at the contract above: `run_stream(run_input)` takes a real
-AG-UI `RunAgentInput` and yields real AG-UI events. That's not a
-souk-specific shape layered on top of AG-UI — it *is* AG-UI. If you've
-already built an agent that speaks AG-UI (CopilotKit's `ag-ui-protocol`,
-your own hand-rolled event stream, whatever framework already emits
-`TEXT_MESSAGE_*`/`RUN_STARTED`/`RUN_FINISHED`), you have already written
-the one function this whole SDK exists to wrap. There is no separate
-"souk agent" you build — you take the agent you have, put its existing
-AG-UI-shaped streaming loop behind `AgentHandle(run_stream=...)`, and it's
-now a provider, reachable from anywhere, with zero inbound network
-exposure and no rewrite of your actual agent logic. Everything else this
-document describes (registration, polling, gRPC transport, cancellation,
-pause/resume, KYOK) is infrastructure *around* that one function — souk
-never asks you to change how your agent thinks or talks, only how it gets
-plugged in.
+## 💡 Key Concept: Your Agent Already Qualifies
 
-## Why use this instead of talking gRPC directly
+`souk-agent-sdk` provides an outbound-only communication harness around your existing agent code. You don't need to rewrite your agent or adopt a proprietary framework.
 
-Nothing stops you from implementing `proto/souk.proto` yourself — souk
-doesn't care. What `SoukAgentClient` buys you, in exchange for writing one
-`run_stream` function, is everything *around* that function that's easy to
-get subtly wrong if you write it by hand:
-
-- **Reconnection and token refresh are not your problem.** `run_forever()`
-  re-registers on every (re)connect and refreshes the gRPC bearer token
-  before it expires as a side effect of that — there's no separate timer
-  to manage, and no "the connection silently died three hours ago and
-  nobody's polling anymore" failure mode to debug.
-- **Cancellation actually cancels.** `_handle_run` races your `run_stream`
-  against souk's cancel signal and calls `.cancel()` on the real asyncio
-  task the moment it arrives — including into an in-flight LLM call, not
-  just at your next `yield`. Rolling this yourself means either polling
-  for cancellation manually inside every long-running step, or not really
-  supporting cancellation at all.
-- **Backpressure is a constructor argument.** `max_concurrent_runs=N` caps
-  how much work this process claims across all its agents; get this
-  wrong by hand and you either leave capacity idle or take on more
-  concurrent runs than your real LLM rate limit / GPU / whatever can
-  actually serve.
-- **Pausing and A2A delegation are a couple of function calls, not a
-  protocol you design.** A native AG-UI interrupt outcome pauses a run
-  resumably; `a2a_client.call_agent_streaming` drives a full
-  `tasks/sendSubscribe` exchange — see [Pausing a run](#pausing-a-run-hitl)
-  and [Delegating to another agent](#delegating-to-another-agent-a2a)
-  below.
-- **Identity is a keypair the SDK manages for you**, not an account you
-  provision through some other channel — `load_or_create_identity`
-  generates and persists it, and the same key is what makes A2A
-  delegation and [KYOK](#keep-your-own-key-kyok-opt-in) attribution work
-  without extra setup.
-- **Opting into [KYOK](#keep-your-own-key-kyok-opt-in) costs one
-  constructor argument on your `httpx.Client`**, reusing the identity key
-  you already have — not a second SDK or a different wire protocol.
-
-None of this is large in isolation, but it's the kind of code that's easy
-to get almost-right and hard to notice is almost-right until a run hangs,
-a cancel doesn't propagate, or a token expires mid-stream. That's the
-actual trade you're making by depending on this package instead of the
-raw proto.
-
-## The contract, minimally
-
-A provider is one or more named agents, each backed by a function:
+If your agent already emits AG-UI-compatible event streams (or can format JSON event dicts), plugging it into Souk requires **writing just one streaming generator function**:
 
 ```python
-RunStream = Callable[[dict], AsyncIterator[dict]]
+RunStream = Callable[[dict[str, Any]], AsyncIterator[dict[str, Any]]]
 ```
 
-`run_stream(run_input)` takes a real AG-UI `RunAgentInput` (a plain dict,
-camelCase wire keys — `threadId`, `runId`, `messages`, `state`, `tools`,
-`context`, `forwardedProps`) and yields AG-UI event dicts. That's the
-entire interface. Everything else — registering with souk, long-polling
-for work, opening/maintaining the gRPC stream, reconnecting after a
-network blip — is `souk_agent_sdk.SoukAgentClient`'s job, not yours.
+The SDK handles all background network complexities: **Ed25519 keypair identity, gRPC long-polling, multiplexed streaming, backpressure, reconnection, thread state, and cancellation.**
+
+```
+┌───────────────────────────────────────────────┐
+│              Souk Gateway Server              │
+└───────────────────────▲───────────────────────┘
+                        │ Outbound gRPC Stream
+┌───────────────────────┴───────────────────────┐
+│            souk_agent_sdk Client              │
+│  - Ed25519 Identity & HMAC Token Refresh      │
+│  - Long-Poll Work Discovery & gRPC Session    │
+│  - Task Concurrency Throttling & Cancel Race  │
+├───────────────────────────────────────────────┤
+│            Your Agent Logic (run_stream)      │
+│  (Pydantic-AI / LangGraph / Custom LLM Loop)  │
+└───────────────────────────────────────────────┘
+```
+
+---
+
+## ⚡ 30-Second Quick Start
+
+### 1. Installation
+
+Not published to PyPI — this lives in the AgentSouk monorepo and is meant
+to be depended on as a local path (see `providers/pydantic-ai-agent` or
+`agent-template` for real examples):
+
+```toml
+# your pyproject.toml
+[project]
+dependencies = ["souk-agent-sdk"]
+
+[tool.uv.sources]
+souk-agent-sdk = { path = "../path/to/AgentSouk/souk-agent-sdk" }
+```
+
+```bash
+uv sync
+```
+
+### 2. Minimal Reference Provider
 
 ```python
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
 from souk_agent_sdk import AgentHandle, SoukAgentClient
 
-client = SoukAgentClient(
-    souk_http_url, souk_grpc_url,
-    agents=[AgentHandle(name="my-agent", run_stream=run_stream)],
-)
-await client.run_forever()
+# 1. Define your agent stream handler (AG-UI event format)
+async def my_agent_stream(run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+    thread_id = run_input.get("threadId", "")
+    run_id = run_input.get("runId", "")
+    
+    # Emit RUN_STARTED
+    yield {"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id}
+    
+    # Emit text content chunks
+    msg_id = "msg_001"
+    yield {"type": "TEXT_MESSAGE_START", "messageId": msg_id, "role": "assistant"}
+    yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": msg_id, "delta": "Hello from my local agent!"}
+    yield {"type": "TEXT_MESSAGE_END", "messageId": msg_id}
+    
+    # Emit RUN_FINISHED
+    yield {"type": "RUN_FINISHED", "threadId": thread_id, "runId": run_id}
+
+# 2. Attach handle & start persistent outbound runner
+async def main():
+    handle = AgentHandle(
+        name="echo-agent",
+        description="A minimal reference agent running locally",
+        run_stream=my_agent_stream,
+    )
+    
+    client = SoukAgentClient(
+        souk_http_url="http://localhost:8000",
+        souk_grpc_url="localhost:50051",
+        agents=[handle],
+        max_concurrent_runs=10,  # Throttling limit
+    )
+    
+    await client.run_forever()
+
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-See `/agent-template/agent_template/main.py` for the smallest possible
-`run_stream` (echoes the last user message, no LLM) — start there to see
-the exact event sequence, or copy it as the seed for a provider written
-from scratch.
+---
 
-## Minimum viable event sequence
+## 🌟 Core SDK Capabilities
 
-Every run must yield, in order:
+| Capability | What `souk-agent-sdk` Handles Automatically |
+|---|---|
+| 🔐 **Self-Sovereign Identity** | Automatically generates & manages persistent **Ed25519 keypair** (`souk_identity.key`). Signs registration payloads to guarantee cryptographic ownership of assigned `agent_id`. |
+| 🔄 **Automatic Reconnection & Token Refresh** | Re-registers on disconnects and seamlessly refreshes HMAC session bearer tokens without dropping queued tasks or interrupting run loops. |
+| ⚡ **Smart Connection Lifecycle** | Holds no open stream when idle (only periodic lightweight long-poll `PollForWork`). Opens multiplexed gRPC `AgentSession` on-demand when work is queued. |
+| ⛔ **Task Preemption & Cancellation** | Races inbound Souk cancellation frames against `run_stream` and immediately propagates `asyncio.CancelledError` into in-flight LLM/tool calls. |
+| 🎛️ **Concurrency Throttling** | `max_concurrent_runs=N` prevents GPU/LLM rate-limit saturation by letting Souk queue surplus work server-side. |
+| ⏸️ **Human-in-the-Loop (HITL)** | Intercepts AG-UI native `interrupt` outcomes to pause runs resumbably (`status='input-required'`). |
+| 🔗 **A2A Delegation & Actor Chains** | `a2a_client.call_agent_streaming` simplifies sub-agent calls while signing multi-hop EdDSA JWT `ActorChain` provenance. |
+| 🔑 **Keep-Your-Own-Key (KYOK)** *(experimental)* | `KyokSigningAuth` simplifies signature generation for caller-funded LLM completions over `/kyok/v1`. No test coverage; in-memory only; no recovery if Souk or the provider restarts mid-relay. See [`docs/keep-your-own-key.md`](../docs/keep-your-own-key.md). |
 
-1. `{"type": "RUN_STARTED", "threadId": ..., "runId": ...}`
-2. Zero or more content events. For plain text, that's
-   `TEXT_MESSAGE_START` → one or more `TEXT_MESSAGE_CONTENT` (`delta`) →
-   `TEXT_MESSAGE_END`, each carrying the same `messageId`. Tool calls,
-   state deltas, and other AG-UI event types are also legal here; souk
-   persists and relays whatever you yield without interpreting most of
-   it.
-3. Exactly one of:
-   - `{"type": "RUN_FINISHED", ...}` — the run completed normally.
-   - `{"type": "RUN_ERROR", "message": "..."}` — the run failed; souk
-     records this and marks the run `failed`.
-   - `{"type": "RUN_FINISHED", "outcome": {"type": "interrupt", ...}}`
-     — the run paused, resumable later — see
-     [Pausing a run](#pausing-a-run-hitl) below.
+---
 
-`run_stream` returning (the generator ending) without ever yielding
-`RUN_FINISHED`/`RUN_ERROR` is not itself an error souk detects — do not
-rely on this; always emit an explicit terminal event.
+## 🏛️ Connection & Lifecycle Architecture
 
-## Registration and identity
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Your Agent (SDK)
+    participant Souk as Souk Gateway
+    participant Caller as HTTP / AG-UI / A2A Caller
 
-A provider's identity to any souk it connects to is its Ed25519 keypair
-— not an account souk issues. `SoukAgentClient(identity_key_path=...)`
-generates one on first run and persists it to disk
-(`souk_agent_sdk.identity.load_or_create_identity`). This matters
-because:
+    Note over Agent: Load/Create Ed25519 Keypair
+    Agent->>Souk: POST /agents/register (Signed with Ed25519 key)
+    Souk-->>Agent: Session Bearer Token + Assigned agent_ids
 
-- `/agents/register` requires a signature proving possession of the
-  private key — an `agent_id` is assigned once per `(public_key, name)`
-  pair and stays owned by whoever holds that key.
-- **Losing this file means losing the ability to update that
-  registration under its original `agent_id`.** A regenerated key is a
-  fresh, unrelated identity: souk lets it register under the same
-  `name` again (names aren't exclusive), but hands out a *new*
-  `agent_id`. Anything still pointed at the old `agent_id` — e.g.
-  another provider's sub-agent delegation config using
-  `/a2a/id/{agent_id}/rpc` — keeps talking to the orphaned identity, not
-  this one. Treat the key file like any other credential: back it up,
-  never commit it.
-- `run_forever()` re-registers on every (re)connect, not just the
-  first. This is also how the bearer token used on every gRPC call gets
-  refreshed before it expires — there's no separate renewal mechanism.
+    loop Idle Long-Polling Phase
+        Agent->>Souk: gRPC PollForWork(agent_ids, max_claim)
+        Note over Souk: Holds connection up to long_poll_seconds
+        Souk-->>Agent: Returns PendingRun (run_id, agent_id)
+    end
 
-## Thread/context ids are capability tokens, not public identifiers
+    Note over Agent: Active Processing Phase
+    Agent->>Souk: gRPC AgentSession (Multiplexed Bidirectional Stream)
+    Agent->>Souk: Envelope (Claim run_id)
+    Souk-->>Agent: Envelope (RunAgentInput JSON)
+    
+    loop Streaming Run Execution
+        Agent->>Souk: Envelopes (AG-UI Events: RUN_STARTED, TEXT_..., RUN_FINISHED)
+        Souk-->>Caller: SSE Stream / JSON-RPC updates
+    end
+    
+    Agent->>Souk: Envelope (end_of_stream=True)
+    Souk-->>Agent: Envelope (ack=True)
+    Note over Agent: Stream closes when idle
+```
 
-`threadId`/`contextId` (souk mints both, database-generated, ~96 bits of
-randomness) are the *entire* access boundary for reading a
-conversation back — `GET /threads/{thread_id}` and its `/tree` have no
-separate auth check; knowing the id is treated as proof you were a
-party to it, the same trust model A2A's own `tasks/get` already uses
-for `run_id`. This is intentional, not an oversight (souk's public demo
-frontend relies on exactly this — an anonymous browser reads back its
-own just-finished conversation's lineage by thread_id alone, with no
-credential to offer). The practical implication for you: **don't log
-these ids somewhere less trusted than the conversation itself**, and
-don't assume there's a souk-side permission check backing you up if you
-hand one to the wrong party — there isn't.
+---
 
-## Cancellation
+## 📜 Event Protocol Specification
 
-Souk cancels a run only on an explicit request (A2A `tasks/cancel`) —
-never because an HTTP/SSE caller disconnected (see `souk/broker.py`'s
-module docstring for why: a dropped connection alone must not throw
-away in-progress work). When it does happen, souk sends a `cancel=true`
-envelope on the run's gRPC stream.
+Every `run_stream` generator must yield events adhering to AG-UI specifications:
 
-**AG-UI itself has no cancel endpoint on souk today** — only A2A's
-`tasks/cancel` ever produces this signal. If every caller reaching your
-agent does so purely over AG-UI (never via A2A), your run is
-practically un-cancellable from the outside for now; nothing you do in
-`run_stream` changes that, since the signal never gets sent in the
-first place. Not something to design around per-agent — just worth
-knowing rather than assuming cancellation "just works" for every caller.
+### 1. Minimal Event Sequence
+1. `RUN_STARTED`: `{"type": "RUN_STARTED", "threadId": "...", "runId": "..."}`
+2. **Content Events**: Zero or more `TEXT_MESSAGE_START` ➔ `TEXT_MESSAGE_CONTENT` ➔ `TEXT_MESSAGE_END`.
+3. **Terminal Event** (Exactly one):
+   - **Success**: `{"type": "RUN_FINISHED", "threadId": "...", "runId": "..."}`
+   - **Error**: `{"type": "RUN_ERROR", "message": "Failure explanation"}`
+   - **Interrupt (HITL Pause)**: `{"type": "RUN_FINISHED", "outcome": {"type": "interrupt", "interrupts": [...]}}`
 
-The SDK's `_handle_run` races your `run_stream` against watching for
-that envelope and, if it arrives first, calls `.cancel()` on the task
-actually running your generator — delivering `CancelledError` into
-whatever it's currently awaiting (an in-flight LLM call included), not
-just at the next `yield`. `asyncio.CancelledError` is a `BaseException`,
-not an `Exception`, since Python 3.8 — an ordinary `except Exception:`
-inside `run_stream` won't swallow it. But if you (or a library you call
-into) ever catch it explicitly, or use a bare `except:`, make sure you
-re-raise: swallowing it means your run keeps burning LLM/tool calls
-nobody is waiting on anymore.
+---
 
-## Pausing a run (HITL)
+## 🤝 Advanced Delegation (Agent-to-Agent)
 
-A run doesn't have to finish or fail — it can pause, resumable later, if
-it genuinely cannot make further progress without something only a
-human/caller can supply (tool-call approval, missing information). This
-is AG-UI's own mechanism, not souk's — see `souk/pause.py` for the full
-convention souk-side.
-
-Use this when your own run needs that kind of input before it can
-continue. End your stream with a `RUN_FINISHED` whose `outcome` is
-AG-UI's native `{"type": "interrupt", "interrupts": [...]}`
-(`ag_ui.core.RunFinishedInterruptOutcome`/`Interrupt`, ag-ui-protocol
->= 0.1.19) instead of the default `{"type": "success"}`:
+An agent can delegate sub-tasks to other agents registered on Souk using `a2a_client`:
 
 ```python
-yield {
-    "type": "RUN_FINISHED",
-    "threadId": ..., "runId": ...,
-    "outcome": {
-        "type": "interrupt",
-        "interrupts": [{"id": "...", "reason": "...", "message": "..."}],
-    },
-}
+from souk_agent_sdk.a2a_client import call_agent_streaming
+from souk_agent_sdk.identity import extend_actor_chain, new_actor_chain
+
+# Delegate streaming task to sub-agent
+async for update in call_agent_streaming(
+    a2a_url="http://localhost:8000/a2a/translator/rpc",
+    message={"role": "user", "parts": [{"type": "text", "text": "Bonjour"}]},
+    reference_task_ids=[current_run_id],  # Lineage tracking
+    actor_chain=actor_chain,               # Multi-hop identity chain
+):
+    print("Sub-agent update:", update)
 ```
 
-**If you're on pydantic-ai, you likely don't need to build this by
-hand at all**: `Tool(..., requires_approval=True)` makes pydantic-ai's
-own AG-UI adapter emit and consume this outcome for you, end to end —
-see `providers/pydantic-ai-agent`'s tool definitions for where that
-flag goes. Nothing here is souk-specific; a provider built this way
-needs zero souk-aware code to support pausing.
+---
 
-A paused run **never holds the connection open**: this `RUN_FINISHED`
-ends the stream normally, same as any other completion. souk records
-`status='input-required'` instead of `'completed'`, with the
-interrupts preserved. Someone resumes it later with a normal AG-UI
-call carrying `resume: [{"interruptId": ..., "status":
-"resolved"|"cancelled", "payload": ...}]` — also AG-UI's own field
-(`ag_ui.core.ResumeEntry`), forwarded to you byte-for-byte; souk never
-interprets `payload`. **Your run keeps its same `run_id` (and A2A
-`task_id`, if any) for the new round** — `run_stream` gets invoked
-again with a fresh `RunAgentInput` on that same id, not handed off to
-a new one.
+## 🛠️ Security & Identity Rules
 
-### Waiting on a specific sub-agent call — this isn't a pause at all
+> [!IMPORTANT]
+> **Identity Key Persistence**
+> The provider's identity is defined by its **Ed25519 keypair** (`souk_identity.key`).
+> - Re-registering with the same key maintains ownership of assigned `agent_ids`.
+> - If `souk_identity.key` is lost, Souk will treat new registrations under the same display name as a *new, separate identity* and issue fresh `agent_id`s.
+> - **Always back up `souk_identity.key` in production environments!**
 
-If your run delegated to another agent and that call is still in
-progress (or itself paused), don't hold your own run open waiting for
-it, and don't declare any special pause state either — just answer
-honestly and finish normally:
+---
 
-```python
-pending = False
-async for update in call_agent_streaming(a2a_url, message, ...):  # a2a_client
-    if update.get("status", {}).get("state") == "input-required":
-        pending = True  # the callee is still working, or itself paused
-if pending:
-    return "still waiting on <sub-agent> — you'll get a real answer next time you check"
-```
+## 📁 Reference Implementations
 
-`providers/pydantic-ai-agent/pydantic_ai_agent/sub_agent_tool.py` is the
-worked example. There's no subscription to register and nothing to
-learn beyond this: whether a *later* call to the same sub-agent gets a
-real answer or another "still pending" is decided fresh each time,
-purely by whether the callee's own thread can currently accept a new
-run (see `souk.repo.get_active_run_for_thread` — the same check that
-guards every ordinary call) — not by anything you declared when you
-first called it. You (or whoever prompts your agent next — a new
-message, your own next turn) simply ask again whenever there's reason
-to; souk has no separate "notify me later" mechanism for this, on
-purpose — anything souk did wake you up for would tell you nothing you
-couldn't get by just checking, and would cost a real run (and, if
-you're LLM-backed, a real LLM call) to say it.
+- **[`/agent-template`](../agent-template)**: The minimal reference implementation (no LLM required). Start here to build a custom provider.
+- **[`providers/pydantic-ai-agent`](../providers/pydantic-ai-agent)**: Full-featured production provider using [Pydantic-AI](https://ai.pydantic.dev), MCP tools, sub-agent delegation, and KYOK support *(experimental — see above)*.
 
-**Several concurrent sub-agent calls, one of them pauses while the
-others are still running — this is entirely your call to design, not
-souk's.** If your framework runs sibling tool calls in parallel (e.g.
-pydantic-ai's default `end_strategy`), one call hitting
-`input-required` doesn't itself unblock the others still in flight —
-whether you want to keep waiting on them, give up and report "some
-pending, some still running," or something else, is a decision about
-*your own* concurrency model, which souk has no visibility into and no
-opinion on. This was deliberately *not* built into souk or into this
-SDK after being prototyped and reverted — see the project history if
-you want the reasoning — precisely because the right answer depends on
-your framework's own task model, not on anything souk-generic.
+---
 
-## Delegating to another agent (A2A)
+## 🤝 Contributing & License
 
-`souk_agent_sdk.a2a_client.call_agent_streaming(a2a_url, message,
-reference_task_ids=..., context_id=..., actor_chain=...)` drives another
-agent's `tasks/sendSubscribe` and yields each status/artifact update as
-it streams back. `providers/pydantic-ai-agent/pydantic_ai_agent/
-sub_agent_tool.py` is a worked example wiring this up as a pydantic-ai
-tool — read it for the full pattern, including:
+For development setup and contribution guidelines, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-- Passing `reference_task_ids=[your_own_run_id]` — real A2A
-  (`Message.referenceTaskIds`), purely informational — lets souk record
-  lineage (`GET /threads/{root}/tree`) so whoever started the original
-  call can later trace what it fanned out to. This is **only**
-  bookkeeping: it does not make souk reuse or continue any particular
-  thread with the callee — see the next point.
-- **Session continuity is your own explicit choice, not automatic.**
-  Every call that doesn't carry a `contextId` gets a brand new thread
-  with the callee, every time — souk never infers "this looks like the
-  same conversation as last time" from `reference_task_ids` or anything
-  else (see `souk.repo.ensure_thread`'s docstring). Every update you get
-  back carries the real `contextId` souk (or the callee, if it's not
-  souk-fronted) assigned — capture it and pass it as `context_id` on
-  your *next* call to the same callee if you want that conversation to
-  continue rather than restart cold each time.
-- Checking each update's `status.state` honestly: `"failed"` is a real
-  failure, `"input-required"` means *pending, not failed and not
-  answered* — collapsing that into "no response" or treating it as a
-  final answer are both bugs a caller further up will silently act on.
-- Forwarding an actor chain (`souk_agent_sdk.identity.new_actor_chain`/
-  `extend_actor_chain`) if you want the callee's souk to attribute the
-  call to a known, registered identity instead of an anonymous caller.
-  Optional — an unattributed call still works.
-
-### Multi-agent topologies — what's actually verified, not just argued
-
-The delegation model above composes into arbitrary graphs of agents
-talking to each other through souk, since each hop is just "one more
-A2A call." Two shapes worth naming explicitly, both exercised against a
-real LLM (`providers/pydantic-ai-agent/config.test-topologies.yaml` —
-kept in the repo as a regression fixture, not a live demo):
-
-- **Fan-out / diamond** (you call two sub-agents concurrently, and both
-  of them happen to delegate to the *same* third agent): safe by
-  construction. Every call with no `context_id` gets an independent
-  thread (see above), so the shared callee ends up with two unrelated
-  threads, one per caller — no cross-talk, no state bleeding from one
-  branch into the other, even though it's the same `agent_id` on both
-  sides.
-- **Cycles** (agent A delegates to B, and B's own logic calls back into
-  A): safe from deadlock — a callback lands on a *fresh* thread (no
-  `context_id` reuse means it's a brand-new call from souk's point of
-  view, not a re-entry into your still-open run), and souk's own event
-  loop is never blocked by your `run_stream` awaiting an outbound A2A
-  call. **What souk does *not* do: stop you from looping forever.**
-  There's no depth limit, no cycle detection — if your own logic
-  unconditionally delegates back on every message, you've built an
-  infinite loop and souk will happily keep running it (each hop will
-  eventually fail on its own `httpx` timeout, but only after real work
-  and real LLM spend). Design your own base case, the same way you'd
-  design one for any other recursive call — `providers/pydantic-ai-agent`'s
-  `looper_a`/`looper_b` test agents are the worked example (a message
-  prefixed `PING` short-circuits instead of delegating again).
-
-## Keep Your Own Key (KYOK) opt-in — experimental
-
-By default your agent calls whatever LLM you configure it to call, paid
-for however you normally pay for it. KYOK lets a *caller* offer to pay for
-a given run with their own key instead — see
-[docs/keep-your-own-key.md](../docs/keep-your-own-key.md) for the full
-design; this section is just the provider-side integration cost, which is
-small and entirely opt-in per agent.
-
-**Treat this as experimental**, unlike everything else in this
-document: `souk/api_llm_bridge.py`/`souk/kyok.py` have no test coverage
-at all today (contrast the broker/pause/health paths, which have been
-through several rounds of race-condition review), and the bridge's
-pending-completion registry is in-memory/single-process only, the same
-trade-off `broker.py` makes deliberately and documents extensively —
-KYOK makes the same choice without the same scrutiny yet. Fine for a
-demo or low-stakes integration; if a run genuinely dies mid-relay
-(souk restart, provider crash) there's no persisted state to recover
-from, and that path hasn't been exercised under test.
-
-If a run's `forwardedProps.kyok.token` is present, souk is offering you a
-run-scoped OpenAI-compatible endpoint (`{souk_http_url}/kyok/v1`) instead
-of your own LLM config — point an `OpenAIChatModel`/`OpenAIProvider` at it
-with that token as the API key, same as any other OpenAI-compatible host.
-The one thing beyond ordinary OpenAI-wire-compatibility: souk verifies
-*who* is actually calling, live, on every request — so build your
-`httpx.Client`/`AsyncClient` with `auth=KyokSigningAuth(signing_key)`,
-reusing the same Ed25519 key `load_or_create_identity` already gave you
-for registration:
-
-```python
-from souk_agent_sdk import KyokSigningAuth
-
-http_client = httpx.AsyncClient(auth=KyokSigningAuth(signing_key))
-provider = OpenAIProvider(
-    base_url=f"{souk_http_url}/kyok/v1", api_key=kyok_token, http_client=http_client,
-)
-```
-
-That's the entire integration: no new keypair, no change to how you build
-the request body, no per-provider LLM translation code (the caller's own
-bridge is what normalizes across real LLM providers, via litellm — not
-something you need to think about). `providers/pydantic-ai-agent`'s
-`resolve_kyok_model` is the full ~15-line version of this, including how
-to fall back to your own configured model when a run carries no KYOK
-offer at all.
-
-## Concurrency
-
-`SoukAgentClient(max_concurrent_runs=N)` caps how many runs this
-provider claims at once, across all its agents combined — set this to
-your real capacity so souk leaves the rest queued instead of handing you
-more than you can process. Leaving it `None` (the default) claims souk's
-entire backlog for this provider on every poll — fine for a demo, not
-for anything with real concurrency limits (a bounded LLM API rate,
-limited local GPU, etc.).
-
-## TLS
-
-Both the gRPC and HTTP sides support TLS, and **neither is on by
-default** — plaintext is fine same-host (e.g. `docker compose up`), not
-for anything reachable over a real network. Pass
-`SoukAgentClient(ca_cert_path=...)` to verify the souk you're connecting
-to against a specific CA/self-signed cert rather than the system trust
-store — this is what actually confirms you're talking to *this* souk
-and not an impostor on the network; skipping it means you can't tell
-the difference. `scripts/gen_dev_tls_cert.py` generates a self-signed
-pair for local testing; see the top-level README's Security section for
-the server-side settings this pairs with.
-
-## Reference implementations
-
-- **`/agent-template`** (repo root) — the floor: the smallest possible
-  `AgentHandle` implementation, no LLM, no framework. Copy this as the
-  starting point for a provider written from scratch, or to see the raw
-  event sequence with nothing else going on.
-- **`providers/pydantic-ai-agent/`** — the ceiling of what's demonstrated
-  here: YAML-configured agents backed by
-  [pydantic-ai](https://ai.pydantic.dev), MCP tool support, sub-agent
-  delegation over A2A, pause/resume wiring, and per-agent
-  [KYOK](#keep-your-own-key-kyok-opt-in) opt-in (`use_kyok: true` in
-  `config.yaml`). Start here if you want an LLM already wired up.
-
-See `providers/README.md` for how to add a new provider example
-alongside these.
+**License**: [Apache 2.0](../LICENSE)
