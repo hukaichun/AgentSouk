@@ -405,8 +405,9 @@ async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dic
     walked recursively by the caller (api_agui.get_thread_tree) to build a
     full lineage tree. souk is the one party that actually sees every A2A
     hop, so this is data it can own outright; it only gets populated when
-    a caller sets metadata.parentThreadId though (see api_a2a._start_run),
-    so it's only as complete as callers choose to make it.
+    a caller sets Message.referenceTaskIds though (real A2A, see
+    api_a2a._start_run), so it's only as complete as callers choose to
+    make it.
     """
     rows = (
         await session.execute(

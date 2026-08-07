@@ -30,7 +30,8 @@ entirely, though, is the normal A2A first-contact case (the spec's own
 souk never requires a caller to have called `POST /threads` first (see
 souk-no-forced-protocol-deviation). Real sub-agent delegation
 (souk_agent_sdk.a2a_client) never sends `sessionId` at all, relying on
-`parent_thread_id` instead.
+`Message.referenceTaskIds` (real A2A) to resolve the parent thread for
+lineage instead — see _start_run's own docstring.
 """
 
 from __future__ import annotations
@@ -148,11 +149,24 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
 
     session_id = params.get("sessionId")
     metadata = params.get("metadata", {})
-    # Not part of core A2A — an extension field a caller can set (e.g. an
-    # agent delegating to a sub-agent via souk_agent_sdk.a2a_client) to
-    # link the spawned thread back to the caller's own thread. Ignored by
-    # any A2A client that doesn't know about it.
-    parent_thread_id = metadata.get("parentThreadId")
+    # Real A2A (Message.referenceTaskIds — "a list of other task IDs
+    # that this message references for additional context"), not a
+    # souk invention: a caller delegating to a sub-agent (e.g. via
+    # souk_agent_sdk.a2a_client) can reference its own current task id
+    # (run_id) here, letting souk link the spawned thread back to the
+    # caller's own thread for lineage (see repo.ensure_thread's
+    # parent_thread_id and GET /threads/{root}/tree). Only the first
+    # entry is used — souk's own use case never sends more than one.
+    # Ignored by any A2A client that doesn't set it; a value souk doesn't
+    # recognize (unknown/stale run_id) is treated the same as not having
+    # sent one at all, not an error — this is informational context, not
+    # a claim souk verifies.
+    reference_task_ids = params.get("message", {}).get("referenceTaskIds") or []
+    parent_thread_id = None
+    if reference_task_ids:
+        referenced_run = await repo.get_run(session, reference_task_ids[0])
+        if referenced_run is not None:
+            parent_thread_id = referenced_run["thread_id"]
 
     # Optional, opt-in caller identity: params.metadata.actorChain is an
     # ordered list of compact JWTs (see souk.identity.verify_actor_chain

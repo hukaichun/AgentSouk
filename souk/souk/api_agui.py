@@ -115,9 +115,9 @@ async def get_thread_tree(thread_id: str, session: AsyncSession = Depends(get_se
     threads.parent_thread_id — see repo.get_thread_children), so whoever
     started the original call can later ask "what did my request actually
     fan out to." Only as complete as callers chose to make it: a hop only
-    appears if the caller set metadata.parentThreadId when it called
-    through souk (see api_a2a._start_run) — souk can't discover this on its
-    own for calls that didn't opt in.
+    appears if the caller set Message.referenceTaskIds (real A2A, not a
+    souk invention) when it called through souk (see api_a2a._start_run)
+    — souk can't discover this on its own for calls that didn't opt in.
     """
     root = await repo.get_thread(session, thread_id)
     if root is None:
