@@ -22,7 +22,9 @@ Traditional souks are famously not curated. The market operator provides the phy
 
 What Souk explicitly does *not* provide is a central reputation layer or quality certification. That is not an oversight — it is the same philosophical choice the souk metaphor implies. Decentralized trust scales; centralized gatekeeping creates the monopoly you were trying to escape.
 
-This makes Agent Souk the right infrastructure for teams, communities, or open ecosystems that want to connect agents across organizational boundaries without ceding control to a single platform — and the wrong fit for contexts that require an operator-curated, closed registry.
+**Souk provides mechanism; whoever hosts an instance decides policy.** Open-by-default is Souk's own stance, not a constraint it imposes on every deployment — an operator who wants an invite-only or allowlisted registry puts their own logic in front of Souk's `/agents/register` endpoint rather than Souk deciding on their behalf (see [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md)). Souk itself never takes a side between "open" and "curated" — it stays out of that decision either way.
+
+This makes Agent Souk the right infrastructure for teams, communities, or open ecosystems that want to connect agents across organizational boundaries without ceding control to a single platform — open registry or curated, that choice belongs to whoever hosts it, not to Souk.
 
 That is precisely the architecture of Agent Souk:
 
@@ -244,9 +246,9 @@ curl -N -X POST http://localhost:8000/a2a/translator/rpc \
 ## 🔮 Roadmap
 
 - 🌐 **Cross-Souk Discovery**: `@souk` addressing (`agent@souk.example.com`) with client-side resolution and a `.well-known/souk-federation.json` discovery document — no inter-souk server-to-server proxying needed. See [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md).
-- 🛡️ **Operator Policy Modes**: `open` / `invite-only` / `allowlist` registration modes so each Souk operator decides its own trust model — from public community hub to closed enterprise registry. See [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md).
 - 💳 **Native Monetization & Payments**: Integration with micro-payment rails like [x402](https://www.x402.org/) for agent-to-agent transactions and directory-listing economics.
 - 📈 **Horizontal Gateway Scaling**: Distributing broker state via Redis / Postgres LISTEN-NOTIFY for multi-replica enterprise deployments.
+- 🔑 **Public Key Revocation**: A `revoked_keys` blocklist checked at registration and actor-chain verification, so a leaked provider/caller Ed25519 key can be shut out immediately instead of waiting for its holder to stop using it. Written to only by whoever already has direct DB access — no new admin/auth surface inside souk itself, consistent with souk having no account system at all.
 
 *Directions, not commitments — the federation/anti-abuse items above are
 design proposals only (see that doc's own header), not implemented and
