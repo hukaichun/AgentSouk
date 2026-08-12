@@ -67,19 +67,15 @@ The most honest answer to "how do you prevent abuse in an open marketplace" is: 
 
 This is not a cop-out. It is the same answer the souk metaphor implies. The market itself does not police vendors; the person who owns the space decides who is allowed in. Different operators making different choices is what produces a diverse ecosystem rather than a monoculture enforced by one central rule.
 
-The protocol should support a spectrum of operator policies:
+Operators care about who can register along a spectrum — anyone at all (souk's own, only built-in behavior; fine for developer sandboxes and small trusted deployments), a new keypair needing co-signature from an already-registered one (team/org-internal Souk with controlled growth), or an explicit allowlist of permitted public keys (enterprise deployment, closed registry).
 
-| Mode | Description | Use case |
-|---|---|---|
-| `open` | Any keypair can register. Default. Current behavior. | Public community Souk, developer sandboxes |
-| `invite-only` | A new keypair must be co-signed by an already-registered key. | Team or org-internal Souk with controlled growth |
-| `allowlist` | Operator maintains an explicit set of permitted public keys. | Enterprise deployment; closed registry |
+Souk itself deliberately does not implement any of these — it stays a standalone HTTP + gRPC service (see `souk/souk/server.py`), not a library an operator imports and extends in-process, so there is no in-process hook to attach custom policy logic to even if souk wanted to offer one.
 
-This is implementable as a single `SOUK_REGISTRATION_MODE` config setting with minimal protocol surface change. It requires no new cryptography, no new external dependencies, and no centralized authority.
+The registration flow already puts the right seam in the right place for this to be someone else's problem, not souk's: every path to becoming a provider goes through one HTTP call, `POST /agents/register` (see `souk/souk/api_registry.py`) — gRPC (`PollForWork`/`AgentSession`) only becomes reachable *after* that call succeeds and returns a session token, so gating registration is sufficient; nothing about gRPC itself needs to be intercepted. An operator who wants a non-default policy puts their own reverse proxy or middleware in front of that one endpoint — reading the request (the claimed `public_key` and `agent_names`, same as souk itself does) and deciding whether to let it through, using whatever logic and however they persist it. This is ordinary HTTP-layer work with no souk-specific protocol to learn, so a coding agent can implement it directly from a plain description of what to allow. (A proxy gating gRPC directly, if ever needed for something other than registration, is a materially harder job — gRPC's framing isn't plain HTTP, so an ordinary reverse proxy can't just read it the way it can a JSON POST body — but nothing here requires that.)
 
 ### Secondary Measures (Complement, Not Replace, Operator Policy)
 
-These are useful on top of operator policy, particularly for `open` mode Souks, but are not substitutes for it:
+These are useful on top of operator policy, particularly for a Souk that keeps registration open to anyone, but are not substitutes for it:
 
 **1. Proof-of-Work Registration Gate**
 
@@ -110,6 +106,6 @@ When multiple registered keys share the same display name, `souk-directory` appe
 The elegant answers are simpler than the complex ones:
 
 - **Discovery**: Client-side resolution via `@souk` addressing. No inter-souk server-to-server routing. Souk exposes a `/.well-known/souk-federation.json` as a machine-readable pointer.
-- **Anti-abuse**: Operator policy (`open` / `invite-only` / `allowlist`) is the correct trust anchor. Cryptographic PoW + per-key quotas are secondary hardening for open-mode Souks. Directory separation decouples "reachable" from "publicly listed."
+- **Anti-abuse**: Operator policy is the correct trust anchor, and souk deliberately doesn't implement it — an operator who wants one puts their own reverse proxy in front of `POST /agents/register`, the single HTTP call every path to becoming a provider goes through. Cryptographic PoW + per-key quotas are secondary hardening for open-mode Souks. Directory separation decouples "reachable" from "publicly listed."
 
 Neither problem needs a global reputation system or a centralized authority. Both solutions follow directly from the souk metaphor: the market operator sets the rules for their own market; trust between participants is earned, not certified.
