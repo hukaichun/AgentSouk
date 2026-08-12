@@ -192,10 +192,14 @@ CREATE INDEX IF NOT EXISTS idx_run_events_run ON run_events (run_id, seq);
 
 
 def upgrade() -> None:
-    for statement in SCHEMA_SQL.strip().split(";\n\n"):
-        statement = statement.strip().rstrip(";")
-        if statement:
-            op.execute(statement)
+    # A single multi-statement execute, not split per-statement: this file
+    # runs once (unlike the old bootstrap_schema() it replaces, which ran
+    # on every server startup via a driver method needing one statement at
+    # a time), and psycopg accepts a whole ;-separated script in one call
+    # as long as it's a plain execute with no bind parameters — no need to
+    # parse SCHEMA_SQL apart, which would risk cutting a statement in half
+    # wherever its text happens to contain the split marker.
+    op.execute(SCHEMA_SQL)
 
 
 def downgrade() -> None:

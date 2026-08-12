@@ -22,6 +22,9 @@ services:
   # gives the running server a DML-only role instead. Local dev reuses the
   # same `souk` Postgres user for both here, for simplicity only.
   souk-migrate:
+    # Same image tag as `souk` below (which shares this same build config)
+    # so Compose builds it once, not twice, under two different names.
+    image: agentsouk-souk
     build:
       context: .
       dockerfile: souk/Dockerfile
@@ -31,8 +34,14 @@ services:
         condition: service_healthy
     environment:
       SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
+      # Passes a host-exported SOUK_DB_SCHEMA through into the container —
+      # Compose does NOT forward arbitrary host env vars on its own, only
+      # ones a service's `environment:` explicitly references like this.
+      # Defaults to `public` (souk.db_schema's own default) if unset.
+      SOUK_DB_SCHEMA: ${SOUK_DB_SCHEMA:-public}
 
   souk:
+    image: agentsouk-souk
     build:
       context: .
       dockerfile: souk/Dockerfile
@@ -50,6 +59,8 @@ services:
       # this repo's own local-dev/demo stack; a real deployment must set
       # its own via SOUK_TOKEN_SIGNING_SECRET (see README's Option B).
       SOUK_TOKEN_SIGNING_SECRET: dev-insecure-change-me
+      # Must match souk-migrate's above — see that service's comment.
+      SOUK_DB_SCHEMA: ${SOUK_DB_SCHEMA:-public}
 
   # Runs the pydantic-ai example provider (providers/pydantic-ai-agent) —
   # see providers/README.md for other provider examples, and

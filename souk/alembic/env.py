@@ -6,6 +6,7 @@ from sqlalchemy import pool
 from sqlalchemy import text
 
 from alembic import context
+from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -40,8 +41,10 @@ config.set_main_option("sqlalchemy.url", database_url)
 
 # Same reasoning as SOUK_DATABASE_URL above for reading straight from the
 # environment — but this one is fine to default, same as souk.config's own
-# db_schema field (see souk/souk/db.py).
-db_schema = os.environ.get("SOUK_DB_SCHEMA", "public")
+# db_schema field (see souk/souk/db.py). DEFAULT_DB_SCHEMA/quoted_schema
+# come from souk.db_schema, not a locally re-typed "public" literal or
+# quoting scheme — see that module for why.
+db_schema = os.environ.get("SOUK_DB_SCHEMA", DEFAULT_DB_SCHEMA)
 
 
 def run_migrations_offline() -> None:
@@ -62,9 +65,13 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table_schema=db_schema if db_schema != DEFAULT_DB_SCHEMA else None,
     )
 
     with context.begin_transaction():
+        if db_schema != DEFAULT_DB_SCHEMA:
+            context.execute(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema(db_schema)}")
+            context.execute(f"SET search_path TO {quoted_schema(db_schema)}, public")
         context.run_migrations()
 
 
@@ -82,21 +89,21 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        if db_schema != "public":
+        if db_schema != DEFAULT_DB_SCHEMA:
             # Must happen before context.configure below: alembic checks
             # for (and creates, on a fresh DB) its own version-tracking
             # table in version_table_schema as soon as migrations start,
             # so the schema needs to already exist by then. Committed
             # immediately, outside the migration's own transaction, since
             # every migration statement after this depends on it.
-            connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{db_schema}"'))
-            connection.execute(text(f'SET search_path TO "{db_schema}", public'))
+            connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema(db_schema)}"))
+            connection.execute(text(f"SET search_path TO {quoted_schema(db_schema)}, public"))
             connection.commit()
 
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            version_table_schema=db_schema if db_schema != "public" else None,
+            version_table_schema=db_schema if db_schema != DEFAULT_DB_SCHEMA else None,
         )
 
         with context.begin_transaction():

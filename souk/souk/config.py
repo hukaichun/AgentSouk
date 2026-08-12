@@ -1,5 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from souk.db_schema import DEFAULT_DB_SCHEMA
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SOUK_")
@@ -16,7 +18,7 @@ class Settings(BaseSettings):
     # the DB role. "public" — Postgres's own default — is a fine default
     # here; unlike database_url/token_signing_secret above, getting this
     # one wrong just means "wrong namespace", not a silent security hole.
-    db_schema: str = "public"
+    db_schema: str = DEFAULT_DB_SCHEMA
     http_host: str = "0.0.0.0"
     http_port: int = 8000
     grpc_host: str = "0.0.0.0"

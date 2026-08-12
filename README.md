@@ -176,9 +176,12 @@ The project is structured as modular, independent components:
 To run components individually on your host machine using [`uv`](https://github.com/astral-sh/uv):
 
 ```bash
-# 1. Build proto stubs & start Souk Gateway Server
+# 1. Build proto stubs, apply the schema, & start Souk Gateway Server
 cd souk && uv sync --group dev
 uv run bash ../scripts/gen_proto.sh souk/grpc_gen
+export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
+export SOUK_TOKEN_SIGNING_SECRET=dev-insecure-change-me  # never reuse this value outside local dev
+uv run alembic upgrade head  # one-time DDL step — see souk/alembic/
 uv run souk-server
 
 # 2. Run Example Pydantic-AI Provider
