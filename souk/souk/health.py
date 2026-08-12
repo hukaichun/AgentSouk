@@ -1,11 +1,16 @@
-"""Detects providers that claimed a run and then went silent.
+"""Detects providers that claimed a run and then went silent, plus
+(optionally) runs paused on a human who never came back.
 
-Deliberately narrow scope: a run sitting 'queued' isn't a health signal
-by itself — a provider is expected to throttle how much it claims via
-PollRequest.max_claim, so backlog is normal, self-imposed pacing, not an
-anomaly. Only a run a provider explicitly claimed (status='running') and
-then produced no further activity for too long counts as a real problem —
-see repo.fail_stalled_runs.
+Deliberately narrow scope for the provider-facing sweeps: a run sitting
+'queued' isn't a health signal by itself — a provider is expected to
+throttle how much it claims via PollRequest.max_claim, so backlog is
+normal, self-imposed pacing, not an anomaly. Only a run a provider
+explicitly claimed (status='running') and then produced no further
+activity for too long counts as a real problem — see
+repo.fail_stalled_runs. A separate, opt-in sweep (repo.fail_stale_paused_runs,
+gated on settings.paused_timeout_seconds) covers 'input-required' runs —
+waiting on a human has no generally-correct timeout, so unlike the other
+two sweeps it's disabled (None) by default.
 
 "How to report this" is intentionally left minimal for now: a structured
 log line, plus the run's own status/metadata becoming queryable (via
@@ -49,6 +54,9 @@ async def sweep_once() -> None:
     async with SessionLocal() as session:
         stalled = await repo.fail_stalled_runs(session, settings.run_stall_timeout_seconds)
         unclaimed = await repo.fail_unclaimed_runs(session, settings.queued_timeout_seconds)
+        stale_paused: list[str] = []
+        if settings.paused_timeout_seconds is not None:
+            stale_paused = await repo.fail_stale_paused_runs(session, settings.paused_timeout_seconds)
     for run_id in stalled:
         await _close_with_terminal_event(run_id, "stalled_no_activity")
     if stalled:
@@ -66,6 +74,15 @@ async def sweep_once() -> None:
             len(unclaimed),
             settings.queued_timeout_seconds,
             unclaimed,
+        )
+    for run_id in stale_paused:
+        await _close_with_terminal_event(run_id, "paused_no_resume")
+    if stale_paused:
+        logger.warning(
+            "health sweep: %d run(s) paused (input-required) past %ds with no resume, marked failed: %s",
+            len(stale_paused),
+            settings.paused_timeout_seconds,
+            stale_paused,
         )
 
 

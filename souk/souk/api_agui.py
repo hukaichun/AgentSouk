@@ -26,6 +26,7 @@ from souk.agui import build_run_agent_input, rewrite_message_ids
 from souk.broker import broker, drain_run
 from souk.grpc_server import HANDLERS
 from souk.db import get_session
+from souk.identity import InvalidActorChain, verify_actor_chain
 from souk.kyok import issue_kyok_token
 from souk.models import CreateThreadRequest, CreateThreadResponse
 from souk.pause import is_resuming
@@ -138,7 +139,13 @@ async def get_thread_tree(thread_id: str, session: AsyncSession = Depends(get_se
 
 
 def _build_forwarded_props(
-    run_id: str, agent_id: str, metadata: dict, caller_forwarded_props: object
+    run_id: str,
+    agent_id: str,
+    metadata: dict,
+    caller_forwarded_props: object,
+    verified_subject: dict | None = None,
+    verified_actors: list[dict] | None = None,
+    actor_chain: object = None,
 ) -> object:
     """Keep Your Own Key opt-in: a caller that's running its own KYOK
     bridge (see souk.api_llm_bridge / souk-client-sdk's KyokBridge) passes
@@ -168,12 +175,21 @@ def _build_forwarded_props(
     value souk would otherwise have to guess.
     """
     session_id = metadata.get("kyok", {}).get("sessionId") if isinstance(metadata.get("kyok"), dict) else None
-    if not session_id:
+    extra = {}
+    if session_id:
+        extra["kyok"] = {"token": issue_kyok_token(run_id, session_id, agent_id)}
+    if verified_subject is not None:
+        # Raw chain forwarded too (not just the resolved summary) — see
+        # api_a2a._start_run's identical `caller` field: a provider that
+        # wants to delegate further itself needs the actual prior JWTs to
+        # extend the chain (souk_agent_sdk.identity.extend_actor_chain),
+        # not just souk's human-readable summary of what it verified.
+        extra["caller"] = {"subject": verified_subject, "actors": verified_actors, "chain": actor_chain}
+    if not extra:
         return caller_forwarded_props
-    kyok = {"kyok": {"token": issue_kyok_token(run_id, session_id, agent_id)}}
     if isinstance(caller_forwarded_props, dict):
-        return {**caller_forwarded_props, **kyok}
-    return kyok
+        return {**caller_forwarded_props, **extra}
+    return extra
 
 
 async def _run_agent(
@@ -194,6 +210,31 @@ async def _run_agent(
     # caller doesn't send one.
     metadata = getattr(body, "metadata", None) or {}
     resume = [r.model_dump(mode="json", by_alias=True) for r in body.resume] if body.resume else None
+
+    # Optional, opt-in caller identity — same mechanism and field name as
+    # api_a2a._start_run's identical block: metadata.actorChain is an
+    # ordered list of compact JWTs (see souk.identity.verify_actor_chain
+    # and souk_agent_sdk.identity.new_actor_chain/extend_actor_chain).
+    # Unsigned calls are still allowed; a chain that's present but fails
+    # to verify is rejected outright rather than silently treated as
+    # anonymous, since that's more likely tampering than a caller that
+    # simply chose not to send one.
+    verified_subject = None
+    verified_actors: list[dict] = []
+    actor_chain = metadata.get("actorChain")
+    if actor_chain:
+        try:
+            result = verify_actor_chain(actor_chain)
+        except InvalidActorChain as e:
+            raise HTTPException(status_code=401, detail=f"invalid actor chain: {e}") from e
+        verified_subject = result.subject
+        for public_key in result.actor_public_keys:
+            resolved_actor_name = await repo.get_agent_name_for_public_key(session, public_key)
+            verified_actors.append({"publicKey": public_key, "agentName": resolved_actor_name})
+        metadata = {
+            **metadata,
+            "verifiedActorChain": {"subject": verified_subject, "actors": verified_actors},
+        }
 
     # AG-UI's `threadId` is a field the *caller* mints locally (it's
     # required by the real schema) and there's no separate "create
@@ -296,7 +337,9 @@ async def _run_agent(
             state=body.state,
             tools=[t.model_dump(mode="json", by_alias=True) for t in body.tools],
             context=[c.model_dump(mode="json", by_alias=True) for c in body.context],
-            forwarded_props=_build_forwarded_props(run_id, agent_id, metadata, body.forwarded_props),
+            forwarded_props=_build_forwarded_props(
+                run_id, agent_id, metadata, body.forwarded_props, verified_subject, verified_actors, actor_chain
+            ),
             resume=resume,
         )
     except ValueError as e:

@@ -63,9 +63,6 @@ def registration_signing_payload(sdk_client_id: str, agent_names: list[str], tim
     return f"{sdk_client_id}:{','.join(sorted(agent_names))}:{timestamp}".encode()
 
 
-ACTOR_CHAIN_TTL_SECONDS = 60
-
-
 @dataclass
 class ChainResult:
     subject: dict
@@ -113,6 +110,17 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
     who it claims (matching the same Ed25519-keypair-is-identity model as
     provider registration), and that the chain hasn't been tampered with.
 
+    Only the *last* hop's `exp` is enforced — it's the one that represents
+    "who is actually using this chain to make this call right now" and
+    needs freshness. Earlier hops are historical provenance, not standing
+    authorization: their signatures are still fully verified (a hop can't
+    be forged or altered), but letting their `exp` lapse must not brick
+    the whole chain — a run that's been paused on `input-required` for
+    longer than a hop's TTL (see souk.pause) still needs to be able to
+    resume and have its provider extend the chain further, and a chain
+    built once at the start of a long-running delegation shouldn't expire
+    out from under normal thinking/tool-call latency either.
+
     Raises InvalidActorChain with a human-readable reason on any failure;
     never returns a partially-verified result.
     """
@@ -137,10 +145,17 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
         except ValueError as e:
             raise InvalidActorChain(f"hop {i}: malformed actorPublicKey: {e}") from e
 
+        is_last_hop = i == len(chain) - 1
         try:
-            payload = jwt.decode(token, key=public_key, algorithms=["EdDSA"])
+            payload = jwt.decode(
+                token,
+                key=public_key,
+                algorithms=["EdDSA"],
+                options={"verify_exp": is_last_hop},
+            )
         except jwt.PyJWTError as e:
-            raise InvalidActorChain(f"hop {i}: signature/expiry check failed: {e}") from e
+            reason = "signature/expiry check failed" if is_last_hop else "signature check failed"
+            raise InvalidActorChain(f"hop {i}: {reason}: {e}") from e
 
         expected_prev_hash = _hop_hash(prev_token) if prev_token is not None else None
         if payload.get("prevHash") != expected_prev_hash:
