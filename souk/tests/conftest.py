@@ -16,10 +16,12 @@ applied once per session via Alembic (see souk/alembic/), the same
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import jwt
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -73,6 +75,24 @@ class Identity:
     def __init__(self) -> None:
         self._key = Ed25519PrivateKey.generate()
         self.public_key = self._key.public_key().public_bytes_raw().hex()
+
+    def sign_chain_hop(self, subject: dict, prev_token: str | None = None, exp_offset: int = 300) -> str:
+        """Mirrors souk_agent_sdk.identity._sign_hop exactly (see that
+        module's docstring) — reimplemented here for the same reason
+        register_body reimplements the registration signing helper: souk's
+        own test suite doesn't depend on souk_agent_sdk as a package.
+        `exp_offset` can be negative to build an already-expired hop, for
+        testing souk.identity.verify_actor_chain's per-hop exp handling.
+        """
+        now = int(time.time())
+        payload = {
+            "subject": subject,
+            "actorPublicKey": self.public_key,
+            "prevHash": hashlib.sha256(prev_token.encode()).hexdigest() if prev_token is not None else None,
+            "iat": now,
+            "exp": now + exp_offset,
+        }
+        return jwt.encode(payload, self._key, algorithm="EdDSA")
 
     def register_body(self, sdk_client_id: str, agents: list[dict]) -> dict:
         timestamp = int(time.time())

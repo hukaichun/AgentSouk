@@ -57,6 +57,15 @@ class Settings(BaseSettings):
     run_stall_timeout_seconds: int = 120
     health_sweep_interval_seconds: int = 15
 
+    # How long a run may sit 'input-required' (paused, waiting on a human
+    # to resolve an interrupt — see souk.pause) before souk gives up on it.
+    # Unlike run_stall_timeout_seconds/queued_timeout_seconds, a pause is
+    # waiting on a person, not a provider, so there's no generally-correct
+    # default duration — None (the default) means no timeout at all,
+    # matching souk's original behavior before this setting existed. Set
+    # this only if your deployment wants paused runs to eventually give up.
+    paused_timeout_seconds: int | None = None
+
     # Signs the bearer tokens issued at /agents/register and required on
     # every gRPC call (see souk.identity). No default — an insecure
     # fallback here is a real auth bypass (a predictable/well-known

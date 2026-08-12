@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
+from souk import repo
+
 
 async def _register(client, identity, sdk_client_id, name, **extra):
     body = identity.register_body(sdk_client_id, [{"name": name, **extra}])
@@ -48,6 +50,15 @@ def _run_started_thread_id(sse_body: str) -> str:
             event = json.loads(line[len("data: ") :])
             if event.get("type") == "RUN_STARTED":
                 return event["threadId"]
+    raise AssertionError(f"no RUN_STARTED event found in: {sse_body!r}")
+
+
+def _run_started_run_id(sse_body: str) -> str:
+    for line in sse_body.splitlines():
+        if line.startswith("data: "):
+            event = json.loads(line[len("data: ") :])
+            if event.get("type") == "RUN_STARTED":
+                return event["runId"]
     raise AssertionError(f"no RUN_STARTED event found in: {sse_body!r}")
 
 
@@ -111,3 +122,87 @@ async def test_agui_run_against_an_offline_agent_fails_fast(client, new_identity
     assert _run_started_thread_id(body_text) == thread_id
     assert "RUN_ERROR" in body_text
     assert "offline" in body_text
+
+
+async def _offline_run_with_metadata(client, session, name, agent_id, metadata):
+    """Agent marked offline purely for the same reason as
+    test_agui_run_against_an_offline_agent_fails_fast: the fast-fail path
+    resolves synchronously (still going through ensure_thread/create_run
+    with the real metadata first — see api_agui._run_agent), so it's
+    enough to check what got persisted without needing a live provider.
+    """
+    await session.execute(
+        text("UPDATE agents SET last_seen_at = :ts WHERE agent_id = :id"),
+        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "id": agent_id},
+    )
+    await session.commit()
+    body = _run_input("thread_made_up")
+    body["metadata"] = metadata
+    return await client.post(f"/agui/{name}", json=body)
+
+
+async def test_agui_run_with_valid_actor_chain_stores_verified_chain(client, session, new_identity):
+    caller, agent_id_registrant = new_identity(), new_identity()
+    agent_id = await _register(client, agent_id_registrant, "sdk_1", "greeter")
+    subject = {"type": "user", "id": "employee_x"}
+    chain = [caller.sign_chain_hop(subject)]
+
+    resp = await _offline_run_with_metadata(
+        client, session, "greeter", agent_id, {"actorChain": chain}
+    )
+    assert resp.status_code == 200, resp.text
+    run_id = _run_started_run_id(resp.text)
+
+    run = await repo.get_run(session, run_id)
+    assert run["metadata"]["verifiedActorChain"]["subject"] == subject
+    assert run["metadata"]["verifiedActorChain"]["actors"] == [
+        {"publicKey": caller.public_key, "agentName": None}
+    ]
+
+
+async def test_agui_run_with_invalid_actor_chain_401s(client, new_identity):
+    agent_id_registrant = new_identity()
+    await _register(client, agent_id_registrant, "sdk_1", "greeter")
+
+    body = _run_input("thread_made_up")
+    body["metadata"] = {"actorChain": ["not-a-real-jwt"]}
+
+    resp = await client.post("/agui/greeter", json=body)
+    assert resp.status_code == 401
+
+
+async def test_agui_run_without_actor_chain_is_unaffected(client, session, new_identity):
+    agent_id_registrant = new_identity()
+    agent_id = await _register(client, agent_id_registrant, "sdk_1", "greeter")
+
+    resp = await _offline_run_with_metadata(client, session, "greeter", agent_id, {})
+    assert resp.status_code == 200, resp.text
+    run_id = _run_started_run_id(resp.text)
+
+    run = await repo.get_run(session, run_id)
+    assert "verifiedActorChain" not in run["metadata"]
+
+
+def test_build_forwarded_props_includes_caller_when_chain_verified():
+    from souk.api_agui import _build_forwarded_props
+
+    subject = {"type": "user", "id": "employee_x"}
+    actors = [{"publicKey": "abc", "agentName": None}]
+    chain = ["hop0"]
+
+    result = _build_forwarded_props(
+        "run_1", "agent_1", {}, {"appSpecific": True}, subject, actors, chain
+    )
+
+    assert result == {
+        "appSpecific": True,
+        "caller": {"subject": subject, "actors": actors, "chain": chain},
+    }
+
+
+def test_build_forwarded_props_without_chain_or_kyok_passes_through_untouched():
+    from souk.api_agui import _build_forwarded_props
+
+    result = _build_forwarded_props("run_1", "agent_1", {}, {"appSpecific": True})
+
+    assert result == {"appSpecific": True}
