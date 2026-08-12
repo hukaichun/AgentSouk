@@ -22,7 +22,7 @@ dependencies = [
 # dependent's, e.g. agent-template's) Dockerfile. Not a runtime
 # dependency (only grpcio itself, above, is needed once stubs exist).
 [dependency-groups]
-dev = ["grpcio-tools>=1.66"]
+dev = ["grpcio-tools>=1.66", "pytest>=8.3"]
 
 [build-system]
 requires = ["hatchling"]

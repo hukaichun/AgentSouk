@@ -126,7 +126,7 @@ if __name__ == "__main__":
 | 🎛️ **Concurrency Throttling** | `max_concurrent_runs=N` prevents GPU/LLM rate-limit saturation by letting Souk queue surplus work server-side. |
 | ⏸️ **Human-in-the-Loop (HITL)** | Intercepts AG-UI native `interrupt` outcomes to pause runs resumbably (`status='input-required'`). |
 | 🔗 **A2A Delegation & Actor Chains** | `a2a_client.call_agent_streaming` simplifies sub-agent calls while signing multi-hop EdDSA JWT `ActorChain` provenance. |
-| 🔑 **Keep-Your-Own-Key (KYOK)** *(experimental)* | `KyokSigningAuth` simplifies signature generation for caller-funded LLM completions over `/kyok/v1`. No test coverage; in-memory only; no recovery if Souk or the provider restarts mid-relay. See [`docs/keep-your-own-key.md`](../docs/keep-your-own-key.md). |
+| 🔑 **Keep-Your-Own-Key (KYOK)** *(experimental)* | `KyokSigningAuth` simplifies signature generation for caller-funded LLM completions over `/kyok/v1`. See `tests/test_kyok_auth.py` for its coverage; still in-memory only, no recovery if Souk or the provider restarts mid-relay. See [`docs/keep-your-own-key.md`](../docs/keep-your-own-key.md). |
 
 ---
 
