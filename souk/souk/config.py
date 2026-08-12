@@ -4,7 +4,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SOUK_")
 
-    database_url: str = "postgresql+psycopg://souk:souk@localhost:5432/souk"
+    # No default — a wrong-but-valid connection string (e.g. a stray local
+    # dev default silently reused against a real deployment) is exactly
+    # the kind of misconfiguration that's dangerous *because* it doesn't
+    # fail loudly. Must always be set explicitly via SOUK_DATABASE_URL.
+    database_url: str
+    # Postgres schema souk's own tables/functions live under (see
+    # souk/alembic/env.py, which creates it and points search_path at it).
+    # Lets a deployment sharing one Postgres instance across services keep
+    # souk's objects out of `public` without hand-editing search_path on
+    # the DB role. "public" — Postgres's own default — is a fine default
+    # here; unlike database_url/token_signing_secret above, getting this
+    # one wrong just means "wrong namespace", not a silent security hole.
+    db_schema: str = "public"
     http_host: str = "0.0.0.0"
     http_port: int = 8000
     grpc_host: str = "0.0.0.0"
@@ -44,10 +56,11 @@ class Settings(BaseSettings):
     health_sweep_interval_seconds: int = 15
 
     # Signs the bearer tokens issued at /agents/register and required on
-    # every gRPC call (see souk.identity) — MUST be overridden with a real
-    # secret in any deployment reachable by anyone other than yourself;
-    # the default is only safe for a single-developer local souk.
-    token_signing_secret: str = "dev-insecure-change-me"
+    # every gRPC call (see souk.identity). No default — an insecure
+    # fallback here is a real auth bypass (a predictable/well-known
+    # signing key), not just a wrong-connection nuisance, so this must
+    # always be set explicitly via SOUK_TOKEN_SIGNING_SECRET.
+    token_signing_secret: str
 
     # TLS for the gRPC server (PollForWork/AgentSession) and the HTTP
     # server (/agents/register, /agui/*, /a2a/*). Both left unset means

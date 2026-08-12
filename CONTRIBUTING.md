@@ -41,8 +41,19 @@ docker compose up paradedb -d   # or point at any local Postgres
 cd souk
 uv sync --group dev
 uv run bash ../scripts/gen_proto.sh souk/grpc_gen
-SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk uv run pytest -v
+SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk \
+SOUK_TOKEN_SIGNING_SECRET=test-secret \
+uv run pytest -v
 ```
+
+Both env vars are required — `souk.config.Settings` has no default for either (see its comments), so importing `souk.server` without them set fails immediately rather than silently falling back to something insecure.
+
+The test suite applies `souk/alembic/` itself (see `tests/conftest.py`'s
+`_schema` fixture) — no separate migration step needed for tests. A real
+deployment runs `uv run alembic upgrade head` before starting the server
+(see `docker-compose.yml`'s `souk-migrate` service). If you change the
+schema, add a new revision under `souk/alembic/versions/` rather than
+editing the initial one — `uv run alembic revision -m "..."` from `souk/`.
 
 `souk-directory/` has no test suite (static TS/HTML, no backend logic to
 unit test) — `npm run build` failing on a type error is its CI check.

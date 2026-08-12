@@ -37,6 +37,7 @@ jobs:
         working-directory: souk
         env:
           SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
+          SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
 
   souk-agent-sdk:
     runs-on: ubuntu-latest

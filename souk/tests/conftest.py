@@ -9,31 +9,36 @@ CONTRIBUTING.md for how to point this at a local Postgres.
 Tests aren't wrapped in a rolled-back transaction: souk.repo's functions
 call session.commit() internally throughout (e.g. register_agents,
 create_run), so a single outer transaction can't cleanly contain a whole
-test. Truncating between tests instead — cheap, and matches how the
-schema is already treated (idempotent, disposable; see souk/db.py's
-bootstrap_schema).
+test. Truncating between tests instead — cheap, and the schema itself is
+applied once per session via Alembic (see souk/alembic/), the same
+`alembic upgrade head` a real deployment runs before starting souk.
 """
 
 from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from souk.db import SessionLocal, bootstrap_schema, engine
+from souk.db import SessionLocal, engine
 from souk.identity import registration_signing_payload
 from souk.server import app
 
 TRUNCATE_SQL = "TRUNCATE providers, agents, threads, thread_history, run_events RESTART IDENTITY CASCADE"
 
+ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+
 
 @pytest.fixture(scope="session", autouse=True)
-async def _schema() -> None:
-    await bootstrap_schema()
+def _schema() -> None:
+    command.upgrade(Config(str(ALEMBIC_INI)), "head")
 
 
 @pytest.fixture(autouse=True)
