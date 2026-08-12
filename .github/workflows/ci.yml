@@ -50,10 +50,12 @@ jobs:
         working-directory: souk-agent-sdk
       - run: uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
         working-directory: souk-agent-sdk
-      # No test suite here yet (see souk/tests/ for where the coverage
-      # actually is) — this is an import-sanity check that the SDK's
-      # public surface still loads cleanly.
+      # Import-sanity check that the SDK's public surface still loads
+      # cleanly, kept alongside the real test suite below rather than
+      # replaced by it — the two answer different questions.
       - run: uv run python -c "import souk_agent_sdk.client, souk_agent_sdk.a2a_client, souk_agent_sdk.identity"
+        working-directory: souk-agent-sdk
+      - run: uv run pytest -v
         working-directory: souk-agent-sdk
 
   # Exercises souk-agent-sdk as a real dependency (path source, not just
@@ -87,6 +89,18 @@ jobs:
         working-directory: providers/pydantic-ai-agent
       - run: uv run python -c "import pydantic_ai_agent.main"
         working-directory: providers/pydantic-ai-agent
+
+  souk-client-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk-client-sdk
+      - run: uv run pytest -v
+        working-directory: souk-client-sdk
 
   souk-directory:
     runs-on: ubuntu-latest

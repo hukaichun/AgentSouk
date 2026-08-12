@@ -1,0 +1,425 @@
+"""Covers KYOK (Keep Your Own Key) — souk/kyok.py's token issue/verify,
+and the souk/api_llm_bridge.py HTTP surface (`/kyok/poll`,
+`/kyok/v1/chat/completions`, `/kyok/respond/{request_id}`) plus its pure
+`_collapse_stream` helper. See docs/keep-your-own-key.md for the full
+design; this was previously entirely untested (see that doc's own
+"Status: experimental" header before this file existed).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import time
+
+import pytest
+
+from souk import repo
+from souk.api_llm_bridge import _collapse_stream
+from souk.broker import broker
+from souk.kyok import issue_kyok_token, verify_kyok_token
+
+
+def _kyok_headers(bearer: str, private_key, body: bytes) -> dict:
+    """Mirrors souk_agent_sdk.KyokSigningAuth.auth_flow exactly (see
+    docs/keep-your-own-key.md's "Binding a token to the specific run and
+    provider that hold it" section) — reimplemented here for the same
+    reason conftest.py's Identity.register_body reimplements registration
+    signing: this test suite doesn't depend on souk_agent_sdk as a package.
+    """
+    timestamp = str(int(time.time()))
+    body_hash = hashlib.sha256(body).hexdigest()
+    payload = f"{bearer}:{timestamp}:{body_hash}".encode()
+    signature = private_key.sign(payload).hex()
+    return {
+        "Authorization": f"Bearer {bearer}",
+        "X-Souk-Kyok-Timestamp": timestamp,
+        "X-Souk-Kyok-Signature": signature,
+    }
+
+
+async def _register_agent(session, new_identity, name: str = "greeter"):
+    identity = new_identity()
+    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": name}])
+    return identity, agent_ids[name]
+
+
+# --- souk/kyok.py: token issue/verify -----------------------------------
+
+
+def test_kyok_token_roundtrip():
+    token = issue_kyok_token("run_1", "sess_1", "agent_1")
+    result = verify_kyok_token(token)
+    assert result is not None
+    assert result.run_id == "run_1"
+    assert result.session_id == "sess_1"
+    assert result.agent_id == "agent_1"
+
+
+def test_expired_kyok_token_rejected(monkeypatch):
+    import souk.kyok as kyok_module
+
+    monkeypatch.setattr(kyok_module, "KYOK_TOKEN_TTL_SECONDS", -1)
+    token = kyok_module.issue_kyok_token("run_1", "sess_1", "agent_1")
+    assert verify_kyok_token(token) is None
+
+
+def test_tampered_kyok_token_signature_rejected():
+    token = issue_kyok_token("run_1", "sess_1", "agent_1")
+    body, signature = token.split(".", 1)
+    tampered = f"{body}.{'0' * len(signature)}"
+    assert verify_kyok_token(tampered) is None
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    ["not-a-token-at-all", "onlyonepart", "bm90anNvbg==.deadbeef"],
+)
+def test_malformed_kyok_token_rejected(malformed):
+    assert verify_kyok_token(malformed) is None
+
+
+# --- api_llm_bridge.py: auth/validation chain ----------------------------
+
+
+async def test_chat_completions_without_bearer_401s(client):
+    resp = await client.post("/kyok/v1/chat/completions", content=b"{}")
+    assert resp.status_code == 401
+
+
+async def test_chat_completions_with_invalid_token_401s(client):
+    resp = await client.post(
+        "/kyok/v1/chat/completions", content=b"{}", headers={"Authorization": "Bearer not-a-real-token"}
+    )
+    assert resp.status_code == 401
+
+
+async def test_chat_completions_run_not_in_broker_403s(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    token = issue_kyok_token("run_never_started", "sess_1", agent_id)
+    resp = await client.post(
+        "/kyok/v1/chat/completions", content=b"{}", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 403
+
+
+async def test_chat_completions_agent_id_mismatch_403s(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_mismatch"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, "sess_1", "some_other_agent_id")
+        resp = await client.post(
+            "/kyok/v1/chat/completions", content=b"{}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 403
+    finally:
+        broker.forget(run_id)
+
+
+async def test_chat_completions_cancelled_run_403s(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_cancelled"
+    run = broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    run.cancelled = True
+    try:
+        token = issue_kyok_token(run_id, "sess_1", agent_id)
+        resp = await client.post(
+            "/kyok/v1/chat/completions", content=b"{}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 403
+    finally:
+        broker.forget(run_id)
+
+
+async def test_chat_completions_missing_signature_headers_401s(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_no_sig"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, "sess_1", agent_id)
+        resp = await client.post(
+            "/kyok/v1/chat/completions", content=b"{}", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert resp.status_code == 401
+    finally:
+        broker.forget(run_id)
+
+
+async def test_chat_completions_stale_timestamp_401s(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_stale"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, "sess_1", agent_id)
+        body = b"{}"
+        body_hash = hashlib.sha256(body).hexdigest()
+        stale_timestamp = str(int(time.time()) - 3600)
+        payload = f"{token}:{stale_timestamp}:{body_hash}".encode()
+        signature = identity._key.sign(payload).hex()
+        resp = await client.post(
+            "/kyok/v1/chat/completions",
+            content=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Souk-Kyok-Timestamp": stale_timestamp,
+                "X-Souk-Kyok-Signature": signature,
+            },
+        )
+        assert resp.status_code == 401
+    finally:
+        broker.forget(run_id)
+
+
+async def test_chat_completions_malformed_timestamp_401s(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_malformed_ts"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, "sess_1", agent_id)
+        resp = await client.post(
+            "/kyok/v1/chat/completions",
+            content=b"{}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "X-Souk-Kyok-Timestamp": "not-a-number",
+                "X-Souk-Kyok-Signature": "deadbeef",
+            },
+        )
+        assert resp.status_code == 401
+    finally:
+        broker.forget(run_id)
+
+
+async def test_chat_completions_unregistered_agent_403s(client, session, new_identity):
+    """The token names a real, live run — but the agent behind it was
+    never actually registered (or has since been delisted), so there's
+    no public_key on file to verify the call-time signature against.
+    """
+    identity, _real_agent_id = await _register_agent(session, new_identity)
+    run_id = "run_unregistered"
+    broker.enqueue_run(run_id, "agent_does_not_exist", "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, "sess_1", "agent_does_not_exist")
+        body = b"{}"
+        headers = _kyok_headers(token, identity._key, body)
+        resp = await client.post("/kyok/v1/chat/completions", content=body, headers=headers)
+        assert resp.status_code == 403
+    finally:
+        broker.forget(run_id)
+
+
+async def test_chat_completions_bad_signature_401s(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_bad_sig"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, "sess_1", agent_id)
+        body = b"{}"
+        headers = _kyok_headers(token, identity._key, body)
+        headers["X-Souk-Kyok-Signature"] = "00" * 64
+        resp = await client.post("/kyok/v1/chat/completions", content=body, headers=headers)
+        assert resp.status_code == 401
+    finally:
+        broker.forget(run_id)
+
+
+# --- Full success round trip ---------------------------------------------
+
+
+def _chunk(content: str = "", role: str | None = None, finish_reason: str | None = None) -> dict:
+    delta: dict = {}
+    if role:
+        delta["role"] = role
+    if content:
+        delta["content"] = content
+    return {
+        "id": "chatcmpl-1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "kyok",
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+async def test_full_round_trip_non_streaming(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_success_nonstream"
+    session_id = "sess_success_nonstream"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, session_id, agent_id)
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
+        headers = {**_kyok_headers(token, identity._key, body), "content-type": "application/json"}
+
+        async def provider_call():
+            resp = await client.post("/kyok/v1/chat/completions", content=body, headers=headers)
+            assert resp.status_code == 200, resp.text
+            return resp.json()
+
+        async def bridge_relay():
+            poll_resp = await client.get("/kyok/poll", params={"sessionId": session_id, "waitSeconds": 5})
+            assert poll_resp.status_code == 200
+            requests = poll_resp.json()["requests"]
+            assert len(requests) == 1
+            request_id = requests[0]["requestId"]
+            ndjson = (
+                json.dumps(_chunk(content="hello", role="assistant")) + "\n"
+                + json.dumps(_chunk(content=" world", finish_reason="stop")) + "\n"
+            )
+            respond_resp = await client.post(f"/kyok/respond/{request_id}", content=ndjson)
+            assert respond_resp.status_code == 200
+
+        result, _ = await asyncio.gather(provider_call(), bridge_relay())
+        assert result["choices"][0]["message"]["content"] == "hello world"
+        assert result["choices"][0]["message"]["role"] == "assistant"
+        assert result["choices"][0]["finish_reason"] == "stop"
+    finally:
+        broker.forget(run_id)
+
+
+async def test_full_round_trip_streaming(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_success_stream"
+    session_id = "sess_success_stream"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, session_id, agent_id)
+        body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "stream": True}).encode()
+        headers = {**_kyok_headers(token, identity._key, body), "content-type": "application/json"}
+
+        async def provider_call():
+            async with client.stream(
+                "POST", "/kyok/v1/chat/completions", content=body, headers=headers
+            ) as resp:
+                assert resp.status_code == 200
+                return [line async for line in resp.aiter_lines() if line]
+
+        async def bridge_relay():
+            poll_resp = await client.get("/kyok/poll", params={"sessionId": session_id, "waitSeconds": 5})
+            requests = poll_resp.json()["requests"]
+            request_id = requests[0]["requestId"]
+            ndjson = json.dumps(_chunk(content="hi", role="assistant", finish_reason="stop")) + "\n"
+            await client.post(f"/kyok/respond/{request_id}", content=ndjson)
+
+        lines, _ = await asyncio.gather(provider_call(), bridge_relay())
+        assert lines[-1] == "data: [DONE]"
+        assert any("hi" in line for line in lines[:-1])
+    finally:
+        broker.forget(run_id)
+
+
+async def test_respond_error_line_surfaces_as_error_and_stream_ends(client, session, new_identity):
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_error_line"
+    session_id = "sess_error_line"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, session_id, agent_id)
+        body = json.dumps({"messages": [], "stream": True}).encode()
+        headers = {**_kyok_headers(token, identity._key, body), "content-type": "application/json"}
+
+        async def provider_call():
+            async with client.stream(
+                "POST", "/kyok/v1/chat/completions", content=body, headers=headers
+            ) as resp:
+                return [line async for line in resp.aiter_lines() if line]
+
+        async def bridge_relay():
+            poll_resp = await client.get("/kyok/poll", params={"sessionId": session_id, "waitSeconds": 5})
+            request_id = poll_resp.json()["requests"][0]["requestId"]
+            ndjson = json.dumps({"error": "upstream LLM call failed"}) + "\n"
+            await client.post(f"/kyok/respond/{request_id}", content=ndjson)
+
+        lines, _ = await asyncio.gather(provider_call(), bridge_relay())
+        assert len(lines) == 1
+        assert json.loads(lines[0].removeprefix("data: ")) == {"error": "upstream LLM call failed"}
+    finally:
+        broker.forget(run_id)
+
+
+async def test_claim_timeout_returns_502(client, session, new_identity, monkeypatch):
+    import souk.api_llm_bridge as bridge_module
+
+    monkeypatch.setattr(bridge_module, "CLAIM_TIMEOUT_SECONDS", 0.05)
+    identity, agent_id = await _register_agent(session, new_identity)
+    run_id = "run_claim_timeout"
+    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    try:
+        token = issue_kyok_token(run_id, "sess_unclaimed", agent_id)
+        body = json.dumps({"messages": []}).encode()
+        headers = {**_kyok_headers(token, identity._key, body), "content-type": "application/json"}
+        resp = await client.post("/kyok/v1/chat/completions", content=body, headers=headers)
+        assert resp.status_code == 502
+    finally:
+        broker.forget(run_id)
+
+
+async def test_respond_unknown_request_id_404s(client):
+    resp = await client.post("/kyok/respond/does-not-exist", content=b"")
+    assert resp.status_code == 404
+
+
+# --- _collapse_stream (pure function) ------------------------------------
+
+
+def test_collapse_stream_empty_input():
+    result = _collapse_stream([])
+    assert result["choices"][0]["message"] == {"role": "assistant", "content": ""}
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+
+def test_collapse_stream_single_chunk():
+    chunks = [_chunk(content="hello", role="assistant", finish_reason="stop")]
+    result = _collapse_stream(chunks)
+    assert result["choices"] == [
+        {"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}
+    ]
+
+
+def test_collapse_stream_multiple_chunks_concatenates_content():
+    chunks = [
+        _chunk(content="hel", role="assistant"),
+        _chunk(content="lo"),
+        _chunk(content="", finish_reason="stop"),
+    ]
+    result = _collapse_stream(chunks)
+    assert result["choices"][0]["message"]["content"] == "hello"
+    assert result["choices"][0]["finish_reason"] == "stop"
+
+
+def test_collapse_stream_multi_index_reassembles_per_choice():
+    chunks = [
+        {
+            "id": "c1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "kyok",
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": "a"}, "finish_reason": None},
+                {"index": 1, "delta": {"role": "assistant", "content": "b"}, "finish_reason": None},
+            ],
+        },
+        {
+            "id": "c1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "kyok",
+            "choices": [
+                {"index": 0, "delta": {}, "finish_reason": "stop"},
+                {"index": 1, "delta": {}, "finish_reason": "length"},
+            ],
+        },
+    ]
+    result = _collapse_stream(chunks)
+    assert result["choices"][0] == {
+        "index": 0,
+        "message": {"role": "assistant", "content": "a"},
+        "finish_reason": "stop",
+    }
+    assert result["choices"][1] == {
+        "index": 1,
+        "message": {"role": "assistant", "content": "b"},
+        "finish_reason": "length",
+    }

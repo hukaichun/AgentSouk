@@ -1,14 +1,20 @@
 # Keep Your Own Key (KYOK)
 
-**Status: experimental, on both sides.** No test coverage yet on
-souk's side (`souk/api_llm_bridge.py`/`souk/kyok.py`) or the caller's
-(`souk-client-sdk/souk_client_sdk/kyok_bridge.py` — in fact
-souk-client-sdk has no tests at all today, and no README either). The
+**Status: experimental.** All three pieces — souk's side
+(`souk/api_llm_bridge.py`/`souk/kyok.py`, see `souk/tests/test_kyok.py`),
+the provider-side signer (`souk-agent-sdk/souk_agent_sdk/kyok_auth.py`,
+see `souk-agent-sdk/tests/test_kyok_auth.py`), and the caller's bridge
+(`souk-client-sdk/souk_client_sdk/kyok_bridge.py`, see
+`souk-client-sdk/tests/test_kyok_bridge.py`) — now have real test
+coverage. `souk-client-sdk` still has no README (parked, not yet
+written). What's still genuinely untested is real network behavior end
+to end (these are all in-process/mocked tests, not a live three-process
+run) and the scope this stays "experimental" for regardless: the
 pending-completion registry is in-memory, single-process on souk's
 side, and the caller's bridge holds no durable state either — there is
 no recovery path if souk, the provider, or the caller's bridge dies
-mid-relay. Fine for a demo; not yet held to the same bar as the core
-AG-UI/A2A relay path.
+mid-relay. See "Scope / limitations" below — those gaps are unchanged
+by adding tests, and not what this round of work addressed.
 
 ## Problem
 

@@ -5,9 +5,9 @@ is simply not offering KYOK; `SoukClient.run()` alone is a complete,
 ordinary caller either way. See docs/keep-your-own-key.md in the souk
 repo for the full picture and wire protocol.
 
-**Experimental — no test coverage** (neither this module nor the rest of
-souk-client-sdk has any tests today), and this bridge holds no state
-that survives a crash: if this process dies mid-run, souk's
+**Experimental** — see tests/test_kyok_bridge.py for this module's
+coverage (souk-client-sdk's only tests today). This bridge still holds
+no state that survives a crash: if this process dies mid-run, souk's
 /kyok/poll side just times out waiting on a completion that's never
 coming, with no retry/resume path on either end. Matches the same
 "experimental, in-memory, single-process" status as its souk-side
