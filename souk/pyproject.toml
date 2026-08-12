@@ -17,6 +17,11 @@ dependencies = [
     "ag-ui-protocol>=0.1.19",
     "cryptography>=42.0",
     "pyjwt>=2.9",
+    # Schema migrations — run as `alembic upgrade head` (see
+    # souk/alembic/), a separate step from starting the server, not
+    # triggered by it. Lets deployments use DDL-capable credentials only
+    # for that step and a DML-only role for the running server.
+    "alembic>=1.13",
 ]
 
 [project.scripts]

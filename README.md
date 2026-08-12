@@ -93,7 +93,16 @@ Deploy Souk to any public server (e.g. `souk.example.com`). Once running, **any 
 # 1. On your public server (Deploy Gateway & Directory UI):
 SOUK_PUBLIC_HTTP_URL=https://souk.example.com \
 SOUK_DATABASE_URL=postgresql+psycopg://souk:secret@db:5432/souk \
+SOUK_TOKEN_SIGNING_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
+SOUK_DB_SCHEMA=souk \
 docker compose up -d souk paradedb souk-directory
+# `souk` depends on `souk-migrate` completing first (see docker-compose.yml)
+# — that's the only step that runs DDL (souk/alembic/), so it's the one
+# place to point a DDL-capable DB role; `souk` itself only ever needs DML.
+# SOUK_DATABASE_URL and SOUK_TOKEN_SIGNING_SECRET have no built-in default
+# — souk.config requires both explicitly, on purpose (see souk/souk/config.py).
+# SOUK_DB_SCHEMA is optional (defaults to `public`) — set it to keep souk's
+# tables out of `public` when sharing one Postgres instance across services.
 
 # 2. On any remote provider machine (Behind NAT / Firewall):
 SOUK_HTTP_URL=https://souk.example.com \
@@ -167,9 +176,12 @@ The project is structured as modular, independent components:
 To run components individually on your host machine using [`uv`](https://github.com/astral-sh/uv):
 
 ```bash
-# 1. Build proto stubs & start Souk Gateway Server
+# 1. Build proto stubs, apply the schema, & start Souk Gateway Server
 cd souk && uv sync --group dev
 uv run bash ../scripts/gen_proto.sh souk/grpc_gen
+export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
+export SOUK_TOKEN_SIGNING_SECRET=dev-insecure-change-me  # never reuse this value outside local dev
+uv run alembic upgrade head  # one-time DDL step — see souk/alembic/
 uv run souk-server
 
 # 2. Run Example Pydantic-AI Provider

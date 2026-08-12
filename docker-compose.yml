@@ -15,7 +15,33 @@ services:
       timeout: 3s
       retries: 20
 
+  # One-shot: applies souk/alembic/ (DDL) against paradedb, then exits.
+  # Split out from the `souk` service below on purpose — souk itself never
+  # runs DDL at startup (see souk/server.py's startup()), so a real
+  # deployment runs this step separately with DDL-capable credentials and
+  # gives the running server a DML-only role instead. Local dev reuses the
+  # same `souk` Postgres user for both here, for simplicity only.
+  souk-migrate:
+    # Same image tag as `souk` below (which shares this same build config)
+    # so Compose builds it once, not twice, under two different names.
+    image: agentsouk-souk
+    build:
+      context: .
+      dockerfile: souk/Dockerfile
+    command: ["uv", "run", "alembic", "upgrade", "head"]
+    depends_on:
+      paradedb:
+        condition: service_healthy
+    environment:
+      SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
+      # Passes a host-exported SOUK_DB_SCHEMA through into the container —
+      # Compose does NOT forward arbitrary host env vars on its own, only
+      # ones a service's `environment:` explicitly references like this.
+      # Defaults to `public` (souk.db_schema's own default) if unset.
+      SOUK_DB_SCHEMA: ${SOUK_DB_SCHEMA:-public}
+
   souk:
+    image: agentsouk-souk
     build:
       context: .
       dockerfile: souk/Dockerfile
@@ -23,11 +49,18 @@ services:
       - "8000:8000"
       - "50051:50051"
     depends_on:
-      paradedb:
-        condition: service_healthy
+      souk-migrate:
+        condition: service_completed_successfully
     environment:
       SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
       SOUK_PUBLIC_HTTP_URL: http://localhost:8000
+      # No default in souk.config for this one — a predictable JWT signing
+      # key is a real auth bypass. This value is only fine because it's
+      # this repo's own local-dev/demo stack; a real deployment must set
+      # its own via SOUK_TOKEN_SIGNING_SECRET (see README's Option B).
+      SOUK_TOKEN_SIGNING_SECRET: dev-insecure-change-me
+      # Must match souk-migrate's above — see that service's comment.
+      SOUK_DB_SCHEMA: ${SOUK_DB_SCHEMA:-public}
 
   # Runs the pydantic-ai example provider (providers/pydantic-ai-agent) —
   # see providers/README.md for other provider examples, and

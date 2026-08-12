@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from souk import api_a2a, api_agui, api_llm_bridge, api_registry, repo
 from souk.config import settings
-from souk.db import SessionLocal, bootstrap_schema
+from souk.db import SessionLocal
 from souk.grpc_server import create_grpc_server
 from souk.health import run_health_sweeps_forever
 
@@ -17,7 +17,10 @@ logging.basicConfig(level=logging.INFO)
 
 
 async def startup() -> None:
-    await bootstrap_schema()
+    # Schema must already exist: `alembic upgrade head` (see souk/alembic/)
+    # is a deploy-time step run with DDL-capable credentials, separate from
+    # starting the server — souk itself only ever runs DML against
+    # SOUK_DATABASE_URL, which may be a DML-only role.
     async with SessionLocal() as session:
         orphaned = await repo.fail_orphaned_runs(session)
     if orphaned:
@@ -54,12 +57,12 @@ app.include_router(api_llm_bridge.router)
 
 async def _serve() -> None:
     # Explicit call, ahead of starting the gRPC server: it must not accept
-    # PollForWork/AgentSession traffic before the schema exists. uvicorn's
-    # Server.serve() below also triggers the FastAPI app's ASGI lifespan,
-    # which calls startup() again (harmless — bootstrap_schema and
-    # fail_orphaned_runs are idempotent) but is where the health-sweep
-    # background task actually gets started; it isn't started here too,
-    # to avoid two redundant sweep loops running concurrently.
+    # PollForWork/AgentSession traffic before startup's cleanup has run.
+    # uvicorn's Server.serve() below also triggers the FastAPI app's ASGI
+    # lifespan, which calls startup() again (harmless — fail_orphaned_runs
+    # is idempotent) but is where the health-sweep background task
+    # actually gets started; it isn't started here too, to avoid two
+    # redundant sweep loops running concurrently.
     await startup()
 
     grpc_server = create_grpc_server()
