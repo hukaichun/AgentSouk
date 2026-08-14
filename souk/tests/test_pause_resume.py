@@ -8,8 +8,8 @@
    is decided fresh each time, purely by whether the callee's own thread
    can currently accept a new run (repo.get_active_run_for_thread) — no
    subscription, no auto-resume, nothing for a delegating agent to
-   declare. api_a2a._finalize_delegated_call just reads back the
-   callee's honest status; it registers no interest in it anywhere.
+   declare. Finishing a delegated call just reads back the callee's
+   honest status (protocols.a2a); it registers no interest anywhere.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 
 from souk import repo
-from souk.api_a2a import _finalize_delegated_call
 from souk.broker import FinishStream, RelayEvent
 from souk.handlers import _handle_finish, _handle_relay
 
@@ -80,10 +79,11 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, so
 async def test_finalize_delegated_call_reports_honestly_without_registering_any_interest(
     session, new_identity
 ):
-    """The callee (C) paused (input-required) — _finalize_delegated_call
-    must report that honestly, but must not write any bookkeeping onto
-    the delegating run (B) or anywhere else. There is nothing left in
-    this codebase called "waitingOnRunId" for it to write.
+    """The callee (C) paused (input-required) — finishing a delegated call
+    must report that honestly, but must not write any bookkeeping onto the
+    delegating run (B) or anywhere else. Reading the callee's status back
+    is the whole of it (see protocols.a2a's tasks/send): there is nothing
+    left in this codebase called "waitingOnRunId" for it to write.
     """
     identity = new_identity()
     agent_ids = await repo.register_agents(
@@ -100,7 +100,7 @@ async def test_finalize_delegated_call_reports_honestly_without_registering_any_
         session, run_c["run_id"], "input-required", metadata={"reason": "hitl_approval"}
     )
 
-    db_run = await _finalize_delegated_call(session, run_c["run_id"])
+    db_run = await repo.get_run(session, run_c["run_id"])
     assert db_run["status"] == "input-required"
 
     # B was never touched — still whatever it was before this call.

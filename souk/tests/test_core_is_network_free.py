@@ -40,10 +40,15 @@ SERVING_MODULES = {
 
 
 def _core_modules() -> list[Path]:
+    """Every core module, subpackages included — souk/protocols/ holds the
+    protocol adapters, which are exactly the code most tempted to reach for a
+    framework type and must not."""
     return sorted(
         path
-        for path in SOUK_PACKAGE.glob("*.py")
-        if path.name not in SERVING_MODULES and not path.name.startswith("__")
+        for path in SOUK_PACKAGE.rglob("*.py")
+        if path.name not in SERVING_MODULES
+        and not path.name.startswith("__")
+        and "grpc_gen" not in path.parts  # generated stubs, not souk's code
     )
 
 
@@ -59,7 +64,7 @@ def _imported_roots(path: Path) -> set[str]:
     return roots
 
 
-@pytest.mark.parametrize("module", _core_modules(), ids=lambda p: p.name)
+@pytest.mark.parametrize("module", _core_modules(), ids=lambda p: str(p.relative_to(SOUK_PACKAGE)))
 def test_core_module_imports_no_transport(module: Path) -> None:
     offenders = _imported_roots(module) & FORBIDDEN_ROOTS
     assert not offenders, (
