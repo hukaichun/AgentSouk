@@ -46,7 +46,7 @@ just hasn't run yet. See git history on this file for both.)
 souk runs as a single process holding both the HTTP server and the gRPC
 server on one event loop, so all of this is implemented with plain
 asyncio primitives rather than round-tripping through Postgres. Postgres
-(souk/db.py) is the durable record for anything that needs to survive a
+(souk/schema.py) is the durable record for anything that needs to survive a
 restart or be queried after the fact (roster, thread history, run
 status, run_events) — it is not on the live event-relay hot path.
 """

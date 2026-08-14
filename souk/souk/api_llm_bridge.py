@@ -38,7 +38,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk import repo
 from souk.broker import broker
-from souk.db import get_session
+from souk.core import Souk
+from souk.deps import get_session, get_souk
 from souk.identity import is_timestamp_fresh, verify_signature
 from souk.ids import new_id
 from souk.kyok import KyokToken, verify_kyok_token
@@ -54,7 +55,7 @@ _DONE = object()
 
 # How long a provider's completion request waits, queued, for the
 # caller's bridge to notice it via /kyok/poll before souk gives up —
-# same purpose as souk.config.settings.queued_timeout_seconds for
+# same purpose as CoreSettings.queued_timeout_seconds for
 # ordinary runs, kept local rather than shared since a KYOK completion is
 # expected to be claimed far faster than a run (the caller's bridge is
 # meant to be polling continuously for the run's whole duration, not
@@ -178,8 +179,12 @@ async def _verify_caller_identity(
 
 
 @router.post("/kyok/v1/chat/completions", response_model=None)
-async def chat_completions(request: Request, session: AsyncSession = Depends(get_session)) -> StreamingResponse | JSONResponse:
-    token = verify_kyok_token(_bearer_token(request))
+async def chat_completions(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    souk: Souk = Depends(get_souk),
+) -> StreamingResponse | JSONResponse:
+    token = verify_kyok_token(_bearer_token(request), souk.settings.token_signing_secret)
     if token is None:
         raise HTTPException(status_code=401, detail="invalid or expired KYOK token")
 

@@ -22,7 +22,7 @@ from souk.broker import FinishStream, RelayEvent, broker
 from souk.grpc_server import _handle_finish, _handle_relay
 
 
-async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity):
+async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_identity):
     """A provider's own RUN_FINISHED outcome (AG-UI's native interrupt
     mechanism, no souk-specific CUSTOM event involved) end-to-end through
     the real handlers _handle_relay/_handle_finish, not just
@@ -45,8 +45,8 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity
         "runId": run_id,
         "outcome": {"type": "interrupt", "interrupts": [interrupt]},
     }
-    await _handle_relay(run, RelayEvent(json_payload=json.dumps(finished_event)))
-    await _handle_finish(run, FinishStream())
+    await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(finished_event)))
+    await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
     assert reread["status"] == "input-required"
@@ -54,7 +54,7 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity
     broker.forget(run_id)
 
 
-async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, new_identity):
+async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, souk, new_identity):
     """Regression guard: a plain RUN_FINISHED (outcome absent, or
     {"type": "success"}) must still complete normally — the interrupt
     check must not fire on the common case.
@@ -69,8 +69,8 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, ne
 
     run = broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
     finished_event = {"type": "RUN_FINISHED", "threadId": thread_b, "runId": run_id}
-    await _handle_relay(run, RelayEvent(json_payload=json.dumps(finished_event)))
-    await _handle_finish(run, FinishStream())
+    await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(finished_event)))
+    await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
     assert reread["status"] == "completed"

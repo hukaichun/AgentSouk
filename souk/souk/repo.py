@@ -30,25 +30,25 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from souk.config import settings
-from souk.db import engine as _engine
 from souk.ids import new_id
 from souk.schema import agents, providers, run_events, thread_history, threads
-
-# Which ON CONFLICT dialect to build upserts with. Both the Postgres and
-# SQLite `insert()` constructs expose the same `.on_conflict_do_update()` /
-# `.excluded` API; only the factory differs. Decided once from the single
-# app engine (souk.db.engine) — the whole process talks to one backend.
-_IS_POSTGRES = _engine.sync_engine.dialect.name == "postgresql"
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _upsert(table):
-    """A dialect-appropriate INSERT construct that supports ON CONFLICT."""
-    return (pg_insert if _IS_POSTGRES else sqlite_insert)(table)
+def _upsert(session: AsyncSession, table):
+    """A dialect-appropriate INSERT construct that supports ON CONFLICT.
+
+    Both the Postgres and SQLite `insert()` constructs expose the same
+    `.on_conflict_do_update()` / `.excluded` API; only the factory differs.
+    Taken from the session's own bind rather than a module-level engine, so
+    this module has no import-time dependency on a configured engine and two
+    Souks on different backends can coexist in one process.
+    """
+    is_postgres = session.bind.dialect.name == "postgresql"
+    return (pg_insert if is_postgres else sqlite_insert)(table)
 
 
 class ThreadNotFound(Exception):
@@ -75,7 +75,7 @@ async def upsert_provider_name(session: AsyncSession, public_key: str, display_n
     happen to pass one isn't "no name", it's "didn't say").
     """
     now = _utcnow()
-    stmt = _upsert(providers).values(public_key=public_key, display_name=display_name, updated_at=now)
+    stmt = _upsert(session, providers).values(public_key=public_key, display_name=display_name, updated_at=now)
     stmt = stmt.on_conflict_do_update(
         index_elements=[providers.c.public_key],
         set_={"display_name": stmt.excluded.display_name, "updated_at": now},
@@ -132,7 +132,7 @@ async def register_agents(
         # genuinely new pair. Either way the id is known here in Python —
         # the database never generates it.
         agent_id = existing_ids.get(name) or new_id("agent")
-        stmt = _upsert(agents).values(
+        stmt = _upsert(session, agents).values(
             agent_id=agent_id,
             name=name,
             sdk_client_id=sdk_client_id,
@@ -249,13 +249,18 @@ async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[
     return [dict(row) for row in rows]
 
 
-def is_agent_online(last_seen_at: datetime) -> bool:
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.online_window_seconds)
+def is_agent_online(last_seen_at: datetime, online_window_seconds: int) -> bool:
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=online_window_seconds)
     return last_seen_at.replace(tzinfo=timezone.utc) >= cutoff
 
 
-async def list_agents(session: AsyncSession) -> list[dict[str, Any]]:
-    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.stale_hidden_window_seconds)
+async def list_agents(
+    session: AsyncSession,
+    *,
+    online_window_seconds: int,
+    stale_hidden_window_seconds: int,
+) -> list[dict[str, Any]]:
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_hidden_window_seconds)
     rows = (
         await session.execute(
             select(
@@ -282,7 +287,7 @@ async def list_agents(session: AsyncSession) -> list[dict[str, Any]]:
             "skills": row["agent_card"].get("skills", []),
             "joined_at": row["joined_at"],
             "last_seen_at": row["last_seen_at"],
-            "online": is_agent_online(row["last_seen_at"]),
+            "online": is_agent_online(row["last_seen_at"], online_window_seconds),
             "public_key": row["public_key"],
             "provider_name": row["provider_name"],
         }
@@ -738,7 +743,9 @@ async def fail_stale_paused_runs(session: AsyncSession, timeout_seconds: int) ->
     )
 
 
-async def fail_unclaimed_runs(session: AsyncSession, timeout_seconds: int) -> list[str]:
+async def fail_unclaimed_runs(
+    session: AsyncSession, timeout_seconds: int, *, online_window_seconds: int
+) -> list[str]:
     """Distinct from fail_stalled_runs: catches a run that's sat 'queued'
     (never claimed at all) past `timeout_seconds' *and* whose target agent
     is no longer online — the race case where a provider was online (or
@@ -752,7 +759,7 @@ async def fail_unclaimed_runs(session: AsyncSession, timeout_seconds: int) -> li
     why 'queued' alone isn't a health signal).
     """
     created_cutoff = _utcnow() - timedelta(seconds=timeout_seconds)
-    online_cutoff = _utcnow() - timedelta(seconds=settings.online_window_seconds)
+    online_cutoff = _utcnow() - timedelta(seconds=online_window_seconds)
     # The old raw SQL used Postgres's UPDATE ... FROM agents; the portable
     # form is to find the matching run_status rows via a join, then fail
     # them (see _fail_runs) — so the join lives in this SELECT instead.

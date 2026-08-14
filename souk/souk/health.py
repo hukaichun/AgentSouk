@@ -23,10 +23,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from typing import TYPE_CHECKING
+
 from souk import repo
 from souk.broker import Fail, broker
-from souk.config import settings
-from souk.db import SessionLocal
+
+if TYPE_CHECKING:
+    from souk.core import Souk
 
 logger = logging.getLogger("souk.health")
 
@@ -50,10 +53,15 @@ async def _close_with_terminal_event(run_id: str, failure_reason: str) -> None:
         run.in_queue.put_nowait(Fail(failure_reason))
 
 
-async def sweep_once() -> None:
-    async with SessionLocal() as session:
+async def sweep_once(souk: "Souk") -> None:
+    settings = souk.settings
+    async with souk.session() as session:
         stalled = await repo.fail_stalled_runs(session, settings.run_stall_timeout_seconds)
-        unclaimed = await repo.fail_unclaimed_runs(session, settings.queued_timeout_seconds)
+        unclaimed = await repo.fail_unclaimed_runs(
+            session,
+            settings.queued_timeout_seconds,
+            online_window_seconds=settings.online_window_seconds,
+        )
         stale_paused: list[str] = []
         if settings.paused_timeout_seconds is not None:
             stale_paused = await repo.fail_stale_paused_runs(session, settings.paused_timeout_seconds)
@@ -86,10 +94,10 @@ async def sweep_once() -> None:
         )
 
 
-async def run_health_sweeps_forever() -> None:
+async def run_health_sweeps_forever(souk: "Souk") -> None:
     while True:
-        await asyncio.sleep(settings.health_sweep_interval_seconds)
+        await asyncio.sleep(souk.settings.health_sweep_interval_seconds)
         try:
-            await sweep_once()
+            await sweep_once(souk)
         except Exception:
             logger.exception("health sweep failed")

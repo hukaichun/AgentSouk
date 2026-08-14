@@ -195,7 +195,7 @@ def test_build_forwarded_props_includes_caller_when_chain_verified():
     chain = ["hop0"]
 
     result = _build_forwarded_props(
-        "run_1", "agent_1", {}, {"appSpecific": True}, subject, actors, chain
+        "test-signing-secret", "run_1", "agent_1", {}, {"appSpecific": True}, subject, actors, chain
     )
 
     assert result == {
@@ -207,6 +207,6 @@ def test_build_forwarded_props_includes_caller_when_chain_verified():
 def test_build_forwarded_props_without_chain_or_kyok_passes_through_untouched():
     from souk.api_agui import _build_forwarded_props
 
-    result = _build_forwarded_props("run_1", "agent_1", {}, {"appSpecific": True})
+    result = _build_forwarded_props("test-signing-secret", "run_1", "agent_1", {}, {"appSpecific": True})
 
     assert result == {"appSpecific": True}

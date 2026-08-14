@@ -23,7 +23,7 @@ class AgentRegistration(BaseModel):
     description: str = ""
     agent_card_extra: dict[str, Any] = Field(default_factory=dict)
     # souk-internal, not exposed via the public A2A Agent Card — see
-    # agents.metadata in souk/db.py.
+    # agents.metadata in souk/schema.py.
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -31,7 +31,7 @@ class RegisterBatchRequest(BaseModel):
     sdk_client_id: str
     agents: list[AgentRegistration]
     # Optional storefront label for this public_key, shown when
-    # souk-directory groups agents by provider — see souk/db.py's
+    # souk-directory groups agents by provider — see souk/schema.py's
     # providers table. Purely descriptive (like AgentRegistration.
     # description below), so — like description — it's not part of what
     # registration_signing_payload covers; only which names are being
@@ -66,7 +66,7 @@ class AgentRosterEntry(BaseModel):
     online: bool
     # Whoever holds this key owns this agent — see AgentRosterEntry's
     # module docstring / repo.register_agents. provider_name is the
-    # optional storefront label for that key (souk.db's providers table),
+    # optional storefront label for that key (souk.schema's providers table),
     # None if that public_key never set one.
     public_key: str
     provider_name: str | None = None
@@ -86,7 +86,7 @@ class RegisterBatchResponse(RosterResponse):
     session_token: str
     # {name: agent_id} for this batch — lets the caller (souk_agent_sdk)
     # learn the souk-assigned ids for the agents it just registered, since
-    # `name` alone is no longer a unique routing key (see souk/db.py).
+    # `name` alone is no longer a unique routing key (see souk/schema.py).
     agent_ids: dict[str, str]
 
 

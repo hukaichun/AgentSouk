@@ -26,8 +26,8 @@ if config.config_file_name is not None:
 target_metadata = souk_metadata
 
 # Read SOUK_DATABASE_URL straight from the environment rather than
-# importing souk.config.settings: that pulls in the *whole* app config
-# (token_signing_secret etc.), which has nothing to do with running
+# constructing souk.config.CoreSettings: that would require the *whole* app
+# config (token_signing_secret etc.), which has nothing to do with running
 # migrations and would make this script fail on an unrelated missing var.
 # Falls back to the same zero-config SQLite default the app uses
 # (DEFAULT_DATABASE_URL, defined once in souk.db_schema) so `alembic upgrade
@@ -48,14 +48,14 @@ config.set_main_option("sqlalchemy.url", database_url)
 
 # Same reasoning as SOUK_DATABASE_URL above for reading straight from the
 # environment — but this one is fine to default, same as souk.config's own
-# db_schema field (see souk/souk/db.py). DEFAULT_DB_SCHEMA/quoted_schema
+# db_schema field (see souk/core.py). DEFAULT_DB_SCHEMA/quoted_schema
 # come from souk.db_schema, not a locally re-typed "public" literal or
 # quoting scheme — see that module for why.
 db_schema = os.environ.get("SOUK_DB_SCHEMA", DEFAULT_DB_SCHEMA)
 
 # Postgres schema isolation (CREATE SCHEMA / search_path) has no SQLite
 # analog — SQLite has no schema namespace at all — so SOUK_DB_SCHEMA is
-# ignored on a SQLite URL, matching souk/db.py. Only Postgres ever creates
+# ignored on a SQLite URL, matching souk/core.py. Only Postgres ever creates
 # or targets a non-default schema; everything below keys off db_schema !=
 # DEFAULT_DB_SCHEMA, so forcing it back to the default here is enough.
 if make_url(database_url).get_backend_name() != "postgresql":

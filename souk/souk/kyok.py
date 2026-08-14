@@ -34,8 +34,6 @@ import json
 import time
 from dataclasses import dataclass
 
-from souk.config import settings
-
 # Deliberately short: a KYOK token only needs to live from "souk minted
 # it into this run's forwardedProps" to "the provider's last completion
 # call for this run" — not the whole lifetime of a possibly-long-running
@@ -51,7 +49,7 @@ class KyokToken:
     agent_id: str
 
 
-def issue_kyok_token(run_id: str, session_id: str, agent_id: str) -> str:
+def issue_kyok_token(run_id: str, session_id: str, agent_id: str, signing_secret: str) -> str:
     body = base64.urlsafe_b64encode(
         json.dumps(
             {
@@ -62,11 +60,11 @@ def issue_kyok_token(run_id: str, session_id: str, agent_id: str) -> str:
             }
         ).encode()
     ).decode()
-    signature = hmac.new(settings.token_signing_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    signature = hmac.new(signing_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{signature}"
 
 
-def verify_kyok_token(token: str) -> KyokToken | None:
+def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
     """Returns the decoded (run_id, session_id, agent_id) if `token` is a
     well-formed, correctly-signed, unexpired KYOK token, else None. Called
     on every /kyok/v1/chat/completions request — see api_llm_bridge.py,
@@ -78,7 +76,7 @@ def verify_kyok_token(token: str) -> KyokToken | None:
         body, signature = token.split(".", 1)
     except ValueError:
         return None
-    expected = hmac.new(settings.token_signing_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+    expected = hmac.new(signing_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature):
         return None
     try:

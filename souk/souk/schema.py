@@ -5,7 +5,7 @@ hand-written raw-SQL DDL blob (a Postgres-only script full of JSONB,
 TIMESTAMPTZ, BIGSERIAL and a pgcrypto-backed `souk_new_id()` function):
 because the tables are declared with dialect-neutral SQLAlchemy types here,
 the same definition renders correct DDL on both SQLite (souk's zero-config
-default) and Postgres (see souk/db.py). Two things follow from that:
+default) and Postgres (see souk/core.py). Two things follow from that:
 
 - souk/repo.py queries these tables through the Core expression language,
   so results come back as the same Python types (dict for JSON, datetime

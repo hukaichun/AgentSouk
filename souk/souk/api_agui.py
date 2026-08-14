@@ -24,8 +24,9 @@ from sse_starlette.sse import EventSourceResponse
 from souk import repo
 from souk.agui import build_run_agent_input, rewrite_message_ids
 from souk.broker import broker, drain_run
-from souk.grpc_server import HANDLERS
-from souk.db import get_session
+from souk.grpc_server import make_handlers
+from souk.core import Souk
+from souk.deps import get_session, get_souk
 from souk.identity import InvalidActorChain, verify_actor_chain
 from souk.kyok import issue_kyok_token
 from souk.models import CreateThreadRequest, CreateThreadResponse
@@ -139,6 +140,7 @@ async def get_thread_tree(thread_id: str, session: AsyncSession = Depends(get_se
 
 
 def _build_forwarded_props(
+    signing_secret: str,
     run_id: str,
     agent_id: str,
     metadata: dict,
@@ -177,7 +179,7 @@ def _build_forwarded_props(
     session_id = metadata.get("kyok", {}).get("sessionId") if isinstance(metadata.get("kyok"), dict) else None
     extra = {}
     if session_id:
-        extra["kyok"] = {"token": issue_kyok_token(run_id, session_id, agent_id)}
+        extra["kyok"] = {"token": issue_kyok_token(run_id, session_id, agent_id, signing_secret)}
     if verified_subject is not None:
         # Raw chain forwarded too (not just the resolved summary) — see
         # api_a2a._start_run's identical `caller` field: a provider that
@@ -193,7 +195,7 @@ def _build_forwarded_props(
 
 
 async def _run_agent(
-    agent_id: str, body: RunAgentInput, session: AsyncSession
+    agent_id: str, body: RunAgentInput, session: AsyncSession, souk: Souk
 ) -> EventSourceResponse | JSONResponse:
     """`body` is the real `ag_ui.core.RunAgentInput` — not a souk-specific
     reimplementation (see souk/models.py's module docstring for why there
@@ -299,7 +301,7 @@ async def _run_agent(
     # if souk already knows the target is offline right now, don't queue at
     # all — emit a single terminal event and close instead of opening a
     # stream that would otherwise sit idle until queued_timeout_seconds.
-    if not repo.is_agent_online(agent["last_seen_at"]):
+    if not repo.is_agent_online(agent["last_seen_at"], souk.settings.online_window_seconds):
         await repo.mark_run_status(
             session, run_id, "failed", metadata={"failureReason": "agent_offline"}
         )
@@ -338,7 +340,7 @@ async def _run_agent(
             tools=[t.model_dump(mode="json", by_alias=True) for t in body.tools],
             context=[c.model_dump(mode="json", by_alias=True) for c in body.context],
             forwarded_props=_build_forwarded_props(
-                run_id, agent_id, metadata, body.forwarded_props, verified_subject, verified_actors, actor_chain
+                souk.settings.token_signing_secret, run_id, agent_id, metadata, body.forwarded_props, verified_subject, verified_actors, actor_chain
             ),
             resume=resume,
         )
@@ -347,7 +349,9 @@ async def _run_agent(
 
     await session.commit()
 
-    run = broker.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui", HANDLERS, seq=starting_seq)
+    run = broker.enqueue_run(
+        run_id, agent_id, thread_id, input_json, "ag-ui", make_handlers(souk), seq=starting_seq
+    )
 
     async def event_stream():
         # Maps the agent's own provider-generated messageId (e.g.
@@ -381,14 +385,20 @@ async def _run_agent(
 
 @router.post("/agui/id/{agent_id}", response_model=None)
 async def run_agent_by_id(
-    agent_id: str, body: RunAgentInput, session: AsyncSession = Depends(get_session)
+    agent_id: str,
+    body: RunAgentInput,
+    session: AsyncSession = Depends(get_session),
+    souk: Souk = Depends(get_souk),
 ) -> EventSourceResponse | JSONResponse:
-    return await _run_agent(agent_id, body, session)
+    return await _run_agent(agent_id, body, session, souk)
 
 
 @router.post("/agui/{name}", response_model=None)
 async def run_agent_by_name(
-    name: str, body: RunAgentInput, session: AsyncSession = Depends(get_session)
+    name: str,
+    body: RunAgentInput,
+    session: AsyncSession = Depends(get_session),
+    souk: Souk = Depends(get_souk),
 ) -> EventSourceResponse | JSONResponse:
     agent_id = await _resolve_agent_id(session, name)
-    return await _run_agent(agent_id, body, session)
+    return await _run_agent(agent_id, body, session, souk)

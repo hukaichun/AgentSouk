@@ -6,7 +6,7 @@ assumption, since one souk fronts many agents at one origin.
 
 Two ways to address an agent:
 - `/a2a/id/{agent_id}/...` — the canonical, always-unambiguous route keyed
-  by souk's own assigned id (see souk/db.py's `agents.agent_id`).
+  by souk's own assigned id (see souk/schema.py's `agents.agent_id`).
 - `/a2a/{name}/...` — the legacy, human-readable route, kept working for
   convenience: resolves transparently as long as exactly one currently-
   listed agent has that display name. `name` is not unique (multiple
@@ -52,9 +52,10 @@ from sse_starlette.sse import EventSourceResponse
 from souk import repo
 from souk.agui import build_run_agent_input
 from souk.broker import broker, drain_run, request_cancel
-from souk.config import settings
-from souk.db import get_session
-from souk.grpc_server import HANDLERS
+from souk.config import ServingSettings
+from souk.core import Souk
+from souk.deps import get_serving_settings, get_session, get_souk
+from souk.grpc_server import make_handlers
 from souk.identity import InvalidActorChain, verify_actor_chain
 from souk.pause import is_resuming
 from souk.translate_a2a import (
@@ -102,8 +103,8 @@ async def _display_name(session: AsyncSession, agent_id: str) -> str:
     return agent["name"] if agent else agent_id
 
 
-def _build_agent_card(agent_id: str, agent: dict) -> dict:
-    base = f"{settings.public_http_url}/a2a/id/{agent_id}"
+def _build_agent_card(agent_id: str, agent: dict, public_http_url: str) -> dict:
+    base = f"{public_http_url}/a2a/id/{agent_id}"
     card = dict(agent["agent_card"])
     return {
         "name": card.get("name", agent["name"]),
@@ -116,21 +117,31 @@ def _build_agent_card(agent_id: str, agent: dict) -> dict:
 
 
 @router.get("/a2a/id/{agent_id}/.well-known/agent.json")
-async def agent_card_by_id(agent_id: str, session: AsyncSession = Depends(get_session)) -> dict:
+async def agent_card_by_id(
+    agent_id: str,
+    session: AsyncSession = Depends(get_session),
+    serving: ServingSettings = Depends(get_serving_settings),
+) -> dict:
     agent = await repo.get_agent_by_id(session, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail=f"agent '{agent_id}' is not registered")
-    return _build_agent_card(agent_id, agent)
+    return _build_agent_card(agent_id, agent, serving.public_http_url)
 
 
 @router.get("/a2a/{name}/.well-known/agent.json")
-async def agent_card_by_name(name: str, session: AsyncSession = Depends(get_session)) -> dict:
+async def agent_card_by_name(
+    name: str,
+    session: AsyncSession = Depends(get_session),
+    serving: ServingSettings = Depends(get_serving_settings),
+) -> dict:
     agent_id = await _resolve_agent_id(session, name)
     agent = await repo.get_agent_by_id(session, agent_id)
-    return _build_agent_card(agent_id, agent)
+    return _build_agent_card(agent_id, agent, serving.public_http_url)
 
 
-async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tuple[str, str, bool]:
+async def _start_run(
+    session: AsyncSession, agent_id: str, params: dict, souk: Souk
+) -> tuple[str, str, bool]:
     """Queues a run from A2A tasks/send(Subscribe) params. Returns
     (run_id, thread_id, is_new).
 
@@ -258,7 +269,7 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
     # if souk already knows the target is offline right now, don't queue
     # at all — mark the run failed immediately so the caller doesn't wait
     # out queued_timeout_seconds for something that was never going anywhere.
-    if not repo.is_agent_online(agent["last_seen_at"]):
+    if not repo.is_agent_online(agent["last_seen_at"], souk.settings.online_window_seconds):
         await repo.mark_run_status(
             session, run_id, "failed", metadata={"failureReason": "agent_offline"}
         )
@@ -284,7 +295,9 @@ async def _start_run(session: AsyncSession, agent_id: str, params: dict) -> tupl
 
     await session.commit()
 
-    broker.enqueue_run(run_id, agent_id, thread_id, agui_input_json, "a2a", HANDLERS, seq=starting_seq)
+    broker.enqueue_run(
+        run_id, agent_id, thread_id, agui_input_json, "a2a", make_handlers(souk), seq=starting_seq
+    )
     return run_id, thread_id, True
 
 
@@ -309,14 +322,16 @@ async def _finalize_delegated_call(session: AsyncSession, run_id: str) -> dict |
     return await repo.get_run(session, run_id)
 
 
-async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventSourceResponse | dict:
+async def _rpc(
+    agent_id: str, request: Request, session: AsyncSession, souk: Souk
+) -> EventSourceResponse | dict:
     body = await request.json()
     method = body.get("method")
     params = body.get("params", {})
     rpc_id = body.get("id")
 
     if method == "tasks/send":
-        run_id, thread_id, is_new = await _start_run(session, agent_id, params)
+        run_id, thread_id, is_new = await _start_run(session, agent_id, params, souk)
         run = broker.get(run_id) if is_new else None
         if run is not None:
             # No cleanup on early exit, deliberately: a caller
@@ -338,7 +353,7 @@ async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventS
         return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
     if method == "tasks/sendSubscribe":
-        run_id, thread_id, is_new = await _start_run(session, agent_id, params)
+        run_id, thread_id, is_new = await _start_run(session, agent_id, params, souk)
         run = broker.get(run_id) if is_new else None
 
         async def event_stream():
@@ -424,11 +439,21 @@ async def _rpc(agent_id: str, request: Request, session: AsyncSession) -> EventS
 
 
 @router.post("/a2a/id/{agent_id}/rpc")
-async def rpc_by_id(agent_id: str, request: Request, session: AsyncSession = Depends(get_session)):
-    return await _rpc(agent_id, request, session)
+async def rpc_by_id(
+    agent_id: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    souk: Souk = Depends(get_souk),
+):
+    return await _rpc(agent_id, request, session, souk)
 
 
 @router.post("/a2a/{name}/rpc")
-async def rpc_by_name(name: str, request: Request, session: AsyncSession = Depends(get_session)):
+async def rpc_by_name(
+    name: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    souk: Souk = Depends(get_souk),
+):
     agent_id = await _resolve_agent_id(session, name)
-    return await _rpc(agent_id, request, session)
+    return await _rpc(agent_id, request, session, souk)

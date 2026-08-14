@@ -20,6 +20,8 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
+from functools import partial
+from typing import TYPE_CHECKING
 
 import grpc
 
@@ -36,16 +38,18 @@ from souk.broker import (
     Run,
     broker,
 )
-from souk.config import settings
-from souk.db import SessionLocal
+from souk.config import ServingSettings
 from souk.grpc_gen import souk_pb2, souk_pb2_grpc
 from souk.identity import verify_session_token
 from souk.pause import interrupt_outcome_of
 
+if TYPE_CHECKING:
+    from souk.core import Souk
+
 logger = logging.getLogger("souk.grpc")
 
 
-def _authenticate(context) -> str | None:
+def _authenticate(context, signing_secret: str) -> str | None:
     """Every gRPC call must present the bearer token issued at
     /agents/register (see souk/identity.py) — returns its sdk_client_id,
     or None if missing/invalid/expired. Defense in depth: PollForWork
@@ -55,7 +59,7 @@ def _authenticate(context) -> str | None:
     """
     for key, value in context.invocation_metadata() or ():
         if key == "authorization":
-            return verify_session_token(value)
+            return verify_session_token(value, signing_secret)
     return None
 
 
@@ -65,7 +69,7 @@ def _authenticate(context) -> str | None:
 # whole point.
 
 
-async def _handle_claim(run: Run, cmd: Claim) -> None:
+async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
     run.agent_outbound = cmd.outbound
     # If already cancelled here, RequestCancel's own DB write is still
     # queued *behind* this Claim (see Run.cancelled's docstring — the
@@ -74,7 +78,7 @@ async def _handle_claim(run: Run, cmd: Claim) -> None:
     # also writing "running" here; let that queued command own the DB
     # write, as it would for any other cancel.
     if not run.cancelled:
-        async with SessionLocal() as session:
+        async with souk.session() as session:
             await repo.mark_run_status(session, run.run_id, "running")
     # Always deliver the real input regardless: the agent's _handle_run
     # parses whatever comes back from its claim as RunAgentInput JSON
@@ -103,7 +107,7 @@ async def _handle_claim(run: Run, cmd: Claim) -> None:
         )
 
 
-async def _handle_relay(run: Run, cmd: RelayEvent) -> None:
+async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
     # Persist *before* relaying: if souk crashes between the two, the
     # live caller must not end up having seen an event that was never
     # durably recorded.
@@ -115,7 +119,7 @@ async def _handle_relay(run: Run, cmd: RelayEvent) -> None:
         # isn't itself a stream terminator (see souk/pause.py).
         run.pause_payload = {"interrupts": interrupts}
     run.seq += 1
-    async with SessionLocal() as session:
+    async with souk.session() as session:
         await repo.append_run_event(session, run.run_id, run.seq, event)
         # Marks the run as still making progress — see
         # repo.fail_stalled_runs, which would otherwise eventually treat
@@ -125,13 +129,13 @@ async def _handle_relay(run: Run, cmd: RelayEvent) -> None:
     await run.out_queue.put(event)
 
 
-async def _handle_finish(run: Run, cmd: FinishStream) -> None:
+async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
     # A run already cancelled (see _handle_cancel) reaching FinishStream
     # is the agent unwinding after being told to stop, not a real
     # completion — the DB status must stay "cancelled", not get
     # overwritten.
     if not run.cancelled:
-        async with SessionLocal() as session:
+        async with souk.session() as session:
             if run.pause_payload is not None:
                 await repo.mark_run_status(session, run.run_id, "input-required", metadata=run.pause_payload)
             else:
@@ -156,7 +160,7 @@ async def _handle_finish(run: Run, cmd: FinishStream) -> None:
         )
 
 
-async def _handle_cancel(run: Run, cmd: RequestCancel) -> None:
+async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
     """The async half of a cancellation — see broker.request_cancel,
     which is what actually queues this and has already set
     `run.cancelled = True` synchronously before this ever runs (do not
@@ -173,7 +177,7 @@ async def _handle_cancel(run: Run, cmd: RequestCancel) -> None:
     signal — broker._pipeline treats that combination as terminal and
     forgets the run right after this returns.
     """
-    async with SessionLocal() as session:
+    async with souk.session() as session:
         await repo.mark_run_status(session, run.run_id, "cancelled")
     if run.agent_outbound is not None:
         await run.agent_outbound.put(
@@ -182,34 +186,46 @@ async def _handle_cancel(run: Run, cmd: RequestCancel) -> None:
     await run.out_queue.put(END_OF_STREAM)
 
 
-async def _handle_fail(run: Run, cmd: Fail) -> None:
+async def _handle_fail(souk: "Souk", run: Run, cmd: Fail) -> None:
     """The health sweep gave up on this run — see souk/health.py."""
     event = {"type": "RUN_ERROR", "message": cmd.reason}
     run.seq += 1
-    async with SessionLocal() as session:
+    async with souk.session() as session:
         await repo.append_run_event(session, run.run_id, run.seq, event)
         await repo.mark_run_status(session, run.run_id, "failed", metadata={"failureReason": cmd.reason})
     await run.out_queue.put(event)
     await run.out_queue.put(END_OF_STREAM)
 
 
-HANDLERS: HandlerMap = {
-    Claim: _handle_claim,
-    RelayEvent: _handle_relay,
-    FinishStream: _handle_finish,
-    RequestCancel: _handle_cancel,
-    Fail: _handle_fail,
-}
+def make_handlers(souk: "Souk") -> HandlerMap:
+    """The dispatch table every run's pipeline task uses, bound to one
+    souk instance. A factory rather than a module-level dict because the
+    handlers need a database to write to, and that now comes from an
+    explicitly-constructed Souk rather than an import-time global — see
+    souk/core.py. Cheap enough to call per run (five partials); the whole
+    table moves into core in a later step (docs/library-architecture.md).
+    """
+    return {
+        Claim: partial(_handle_claim, souk),
+        RelayEvent: partial(_handle_relay, souk),
+        FinishStream: partial(_handle_finish, souk),
+        RequestCancel: partial(_handle_cancel, souk),
+        Fail: partial(_handle_fail, souk),
+    }
 
 
 class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
+    def __init__(self, souk: "Souk") -> None:
+        self._souk = souk
+
     async def PollForWork(self, request, context):
-        sdk_client_id = _authenticate(context)
+        souk = self._souk
+        sdk_client_id = _authenticate(context, souk.settings.token_signing_secret)
         if sdk_client_id is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
 
         requested_ids = list(request.agent_ids)
-        async with SessionLocal() as session:
+        async with souk.session() as session:
             owned_ids = await repo.get_agent_ids_for_sdk_client(session, sdk_client_id)
         agent_ids = [agent_id for agent_id in requested_ids if agent_id in owned_ids]
         if len(agent_ids) != len(requested_ids):
@@ -236,7 +252,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
                 broker.unsubscribe_wake(agent_ids, event)
             runs = broker.poll(agent_ids, max_claim=max_claim)
 
-        async with SessionLocal() as session:
+        async with souk.session() as session:
             for agent_id in agent_ids:
                 await repo.touch_agent(session, agent_id)
 
@@ -249,7 +265,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
     async def AgentSession(
         self, request_iterator: AsyncIterator[souk_pb2.AgentEventEnvelope], context
     ):
-        if _authenticate(context) is None:
+        if _authenticate(context, self._souk.settings.token_signing_secret) is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
 
         outbound: asyncio.Queue = asyncio.Queue()
@@ -283,9 +299,9 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
             reader.cancel()
 
 
-def create_grpc_server() -> grpc.aio.Server:
+def create_grpc_server(souk: "Souk", settings: ServingSettings) -> grpc.aio.Server:
     server = grpc.aio.server()
-    souk_pb2_grpc.add_SoukAgentGatewayServicer_to_server(SoukAgentGatewayServicer(), server)
+    souk_pb2_grpc.add_SoukAgentGatewayServicer_to_server(SoukAgentGatewayServicer(souk), server)
     address = f"{settings.grpc_host}:{settings.grpc_port}"
     if settings.grpc_tls_cert_path and settings.grpc_tls_key_path:
         cert = open(settings.grpc_tls_cert_path, "rb").read()

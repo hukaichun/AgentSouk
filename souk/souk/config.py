@@ -1,10 +1,31 @@
+"""souk's configuration, split along the same line as the packages.
+
+`CoreSettings` holds what a network-free souk needs: the database, the
+domain's own timing policy, and the key it signs its tokens with.
+`ServingSettings` holds everything that only means something once there is a
+socket — hosts, ports, TLS, CORS. See docs/library-architecture.md.
+
+Neither is instantiated at import time. A `Souk` is constructed with a
+`CoreSettings` (see souk/core.py), so nothing here runs as a side effect of
+importing souk, and several souks with different configuration can coexist in
+one process. Both classes are still `pydantic-settings` models reading the
+same `SOUK_*` environment variables, so passing settings explicitly *adds* a
+way to configure souk rather than replacing the existing one: any field not
+passed is still resolved from the environment — just at construction time
+rather than at import time.
+"""
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from souk.db_schema import DEFAULT_DATABASE_URL, DEFAULT_DB_SCHEMA
 
 
-class Settings(BaseSettings):
+class CoreSettings(BaseSettings):
+    """Everything souk needs to run as a library, with no network at all."""
+
     model_config = SettingsConfigDict(env_prefix="SOUK_")
+
+    # ---- Database
 
     # Defaults to a local SQLite file so a fresh checkout, an embedding
     # library caller, or a test run works with zero configuration — no
@@ -22,17 +43,17 @@ class Settings(BaseSettings):
     # sharing one Postgres instance across services keep souk's objects out
     # of `public` without hand-editing search_path on the DB role. Postgres
     # only — SQLite has no schema namespace, so this setting is ignored on a
-    # SQLite database_url (see souk/db.py). "public" — Postgres's own
+    # SQLite database_url (see souk/core.py). "public" — Postgres's own
     # default — is a fine default here; getting it wrong just means "wrong
     # namespace", not a silent security hole.
     db_schema: str = DEFAULT_DB_SCHEMA
-    http_host: str = "0.0.0.0"
-    http_port: int = 8000
-    grpc_host: str = "0.0.0.0"
-    grpc_port: int = 50051
+
+    # ---- Timing policy: how souk judges an agent's or a run's state. None
+    # of these describe a network; they are domain rules.
+
     online_window_seconds: int = 60
     # A much longer cutoff than online_window_seconds: an agent whose
-    # last_seen_at is older than this is excluded from GET /agents
+    # last_seen_at is older than this is excluded from the roster
     # entirely (not just marked offline) — read-time filter only, no job,
     # no mutation; reappears automatically the moment it registers again.
     stale_hidden_window_seconds: int = 60 * 60 * 24 * 7
@@ -43,16 +64,6 @@ class Settings(BaseSettings):
     # waiting to be claimed should time out faster than "claimed and
     # stalled".
     queued_timeout_seconds: int = 45
-
-    # Origins allowed to call souk's HTTP surface cross-origin (e.g. a
-    # souk-directory instance served from a different origin). "*" is fine
-    # for local development; tighten this for any real deployment, same as
-    # token_signing_secret's default is only safe for a single-developer
-    # local souk.
-    cors_allow_origins: list[str] = ["*"]
-    # Base URL callers use to reach this souk's HTTP surface, used to build
-    # per-agent Agent Card URLs. Override in deployments behind a proxy/LB.
-    public_http_url: str = "http://localhost:8000"
 
     # A run past this many seconds without any activity (claimed, or an
     # event relayed) while still 'running' is presumed stalled — the
@@ -73,12 +84,46 @@ class Settings(BaseSettings):
     # this only if your deployment wants paused runs to eventually give up.
     paused_timeout_seconds: int | None = None
 
-    # Signs the bearer tokens issued at /agents/register and required on
-    # every gRPC call (see souk.identity). No default — an insecure
-    # fallback here is a real auth bypass (a predictable/well-known
-    # signing key), not just a wrong-connection nuisance, so this must
-    # always be set explicitly via SOUK_TOKEN_SIGNING_SECRET.
+    # ---- Identity
+
+    # Signs the bearer tokens issued at registration and required on every
+    # gRPC call (see souk.identity), and the run-scoped KYOK tokens (see
+    # souk.kyok). Core rather than serving: issuing a token is part of
+    # registering an agent, a domain act, not part of serving a port. No
+    # default — an insecure fallback here is a real auth bypass (a
+    # predictable/well-known signing key), not just a wrong-connection
+    # nuisance, so this must always be set explicitly, via the
+    # SOUK_TOKEN_SIGNING_SECRET environment variable or the constructor.
     token_signing_secret: str
+
+
+class ServingSettings(BaseSettings):
+    """Everything that only exists because souk is being exposed on a
+    network. Consumed by whoever actually binds the sockets — today
+    souk.server, and after the split, the souk-server subproject. Core never
+    reads any of this.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SOUK_")
+
+    http_host: str = "0.0.0.0"
+    http_port: int = 8000
+    grpc_host: str = "0.0.0.0"
+    grpc_port: int = 50051
+
+    # Origins allowed to call souk's HTTP surface cross-origin (e.g. a
+    # souk-directory instance served from a different origin). "*" is fine
+    # for local development; tighten this for any real deployment, same as
+    # token_signing_secret's default is only safe for a single-developer
+    # local souk.
+    cors_allow_origins: list[str] = ["*"]
+
+    # Base URL callers use to reach this souk's HTTP surface, used to build
+    # per-agent Agent Card URLs. Override in deployments behind a proxy/LB.
+    # Deliberately not a core setting even though it ends up in protocol
+    # content: core should not know what it is called on a network, so
+    # whoever serves souk passes this to the protocol layer.
+    public_http_url: str = "http://localhost:8000"
 
     # TLS for the gRPC server (PollForWork/AgentSession) and the HTTP
     # server (/agents/register, /agui/*, /a2a/*). Both left unset means
@@ -95,6 +140,3 @@ class Settings(BaseSettings):
     grpc_tls_key_path: str | None = None
     http_tls_cert_path: str | None = None
     http_tls_key_path: str | None = None
-
-
-settings = Settings()
