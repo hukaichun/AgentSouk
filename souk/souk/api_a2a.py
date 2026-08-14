@@ -55,7 +55,7 @@ from souk.broker import drain_run, request_cancel
 from souk.config import ServingSettings
 from souk.core import Souk
 from souk.deps import get_serving_settings, get_session, get_souk
-from souk.grpc_server import make_handlers
+from souk.handlers import make_handlers
 from souk.identity import InvalidActorChain, verify_actor_chain
 from souk.pause import is_resuming
 from souk.translate_a2a import (

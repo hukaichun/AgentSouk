@@ -74,25 +74,30 @@ END_OF_STREAM = object()
 
 # ---- Commands: pure data, pushed onto a run's in_queue. What each one
 # means and who's allowed to handle it lives in whoever supplies the
-# HandlerMap (see grpc_server.HANDLERS) — broker.py only needs to know
-# these exist, not what they do.
+# HandlerMap (see souk.handlers) — broker.py only needs to know these
+# exist, not what they do.
 
 
 @dataclass
 class Claim:
     """An agent has claimed this run and is ready to receive its input —
-    carries the specific AgentSession connection's outbound queue that
-    owns it from here on (see grpc_server._handle_claim).
+    carries the AgentProvider (see souk/providers.py) that owns it from
+    here on. Deliberately a provider rather than a transport-specific
+    channel: a run is claimed the same way whether the agent is a local
+    Python object or a remote one reached over a wire.
     """
 
-    outbound: asyncio.Queue[Any]
+    provider: Any
 
 
 @dataclass
 class RelayEvent:
-    """The agent relayed one AG-UI event JSON for this run."""
+    """One AG-UI event the agent produced for this run — as its own
+    payload, not a wire frame; whatever transport carried it has already
+    been peeled off by the time this exists (see souk.handlers._pump).
+    """
 
-    json_payload: str
+    event: Any
 
 
 @dataclass
@@ -151,7 +156,15 @@ class Run:
     # pause/resume round under the same run_id — see repo.reopen_run.
     round_starting_seq: int = 0
     pause_payload: dict[str, Any] | None = None
-    agent_outbound: asyncio.Queue[Any] | None = None
+    # The claimed run's agent, set by the Claim handler. None until an
+    # agent takes the run — which several places test for, since "never
+    # claimed" and "claimed then cancelled" need different handling.
+    provider: Any | None = None
+    # The task draining `provider`'s event stream into this run's in_queue
+    # (see souk.handlers._pump). Cancelling it is how a cancel reaches the
+    # agent: the pump closes the stream on its way out, which is the
+    # provider's signal to stop.
+    pump_task: asyncio.Task | None = None
     # The one field anyone may set directly, synchronously, from any
     # thread of control — see request_cancel() below. Everything that
     # reacts to a run being cancelled reads this rather than waiting on
@@ -228,7 +241,7 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
       grpc_server._handle_fail); no FinishStream is ever coming for one
       of these either.
     - RequestCancel, but only if the run was never claimed
-      (`agent_outbound is None`) — an explicit tasks/cancel (the only
+      (`provider is None`) — an explicit tasks/cancel (the only
       thing that ever pushes this; see broker.request_cancel) arriving
       before any agent claimed the run means no FinishStream will ever
       come for it. If it *was* already claimed, this does not terminate
@@ -249,7 +262,7 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
             logger.exception("run %s: error handling %s", run.run_id, type(cmd).__name__)
         if isinstance(cmd, (FinishStream, Fail)):
             break
-        if isinstance(cmd, RequestCancel) and run.agent_outbound is None:
+        if isinstance(cmd, RequestCancel) and run.provider is None:
             break
     owner.forget(run.run_id)
 

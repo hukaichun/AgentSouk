@@ -13,7 +13,7 @@ import json
 
 from souk import repo
 from souk.broker import FinishStream, RelayEvent
-from souk.grpc_server import _handle_finish, _handle_relay
+from souk.handlers import _handle_finish, _handle_relay
 
 
 async def test_a_tool_call_reply_is_persisted_as_real_thread_history_messages(session, souk, new_identity):
@@ -48,7 +48,7 @@ async def test_a_tool_call_reply_is_persisted_as_real_thread_history_messages(se
         {"type": "RUN_FINISHED", "threadId": thread_b, "runId": run_id, "outcome": {"type": "success"}},
     ]
     for event in events:
-        await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(event)))
+        await _handle_relay(souk, run, RelayEvent(event))
     await _handle_finish(souk, run, FinishStream())
 
     stored = await repo.get_thread_messages(session, thread_b)
@@ -80,7 +80,7 @@ async def test_a_plain_text_only_reply_is_still_persisted(session, souk, new_ide
         {"type": "RUN_FINISHED", "threadId": thread_b, "runId": run_id, "outcome": {"type": "success"}},
     ]
     for event in events:
-        await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(event)))
+        await _handle_relay(souk, run, RelayEvent(event))
     await _handle_finish(souk, run, FinishStream())
 
     stored = await repo.get_thread_messages(session, thread_b)
@@ -97,7 +97,7 @@ async def test_a_failed_run_persists_nothing_to_thread_history(session, souk, ne
     this pins: not every terminal status should produce a message.
     """
     from souk.broker import Fail
-    from souk.grpc_server import _handle_fail
+    from souk.handlers import _handle_fail
 
     identity = new_identity()
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "b"}])
@@ -109,7 +109,7 @@ async def test_a_failed_run_persists_nothing_to_thread_history(session, souk, ne
 
     run = souk.broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
     partial = {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
-    await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(partial)))
+    await _handle_relay(souk, run, RelayEvent(partial))
     await _handle_fail(souk, run, Fail(reason="stalled"))
 
     stored = await repo.get_thread_messages(session, thread_b)

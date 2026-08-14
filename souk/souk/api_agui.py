@@ -24,7 +24,7 @@ from sse_starlette.sse import EventSourceResponse
 from souk import repo
 from souk.agui import build_run_agent_input, rewrite_message_ids
 from souk.broker import drain_run
-from souk.grpc_server import make_handlers
+from souk.handlers import make_handlers
 from souk.core import Souk
 from souk.deps import get_session, get_souk
 from souk.identity import InvalidActorChain, verify_actor_chain

@@ -19,7 +19,7 @@ import json
 from souk import repo
 from souk.api_a2a import _finalize_delegated_call
 from souk.broker import FinishStream, RelayEvent
-from souk.grpc_server import _handle_finish, _handle_relay
+from souk.handlers import _handle_finish, _handle_relay
 
 
 async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_identity):
@@ -45,7 +45,7 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_id
         "runId": run_id,
         "outcome": {"type": "interrupt", "interrupts": [interrupt]},
     }
-    await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(finished_event)))
+    await _handle_relay(souk, run, RelayEvent(finished_event))
     await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
@@ -69,7 +69,7 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, so
 
     run = souk.broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
     finished_event = {"type": "RUN_FINISHED", "threadId": thread_b, "runId": run_id}
-    await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(finished_event)))
+    await _handle_relay(souk, run, RelayEvent(finished_event))
     await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
