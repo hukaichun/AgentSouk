@@ -119,9 +119,10 @@ async def test_pipeline_terminates_immediately_on_cancel_before_any_claim():
 async def test_pipeline_stays_alive_after_cancel_once_claimed_waiting_for_finish():
     """Mirrors the real fix this whole pipeline exists for: once claimed,
     a cancel must not end the pipeline by itself — it has to wait for the
-    agent's own FinishStream (its unwind-after-cancel acknowledgment), or
-    a straggler end_of_stream from the agent would arrive at an
-    already-forgotten run and never get an ack back to it.
+    agent's own FinishStream (its unwind-after-cancel signal). Ending
+    early would forget the run while the agent is still unwinding, so its
+    straggler events and end_of_stream would arrive at an unknown run_id
+    and be logged as errors rather than absorbed.
     """
     broker = RunBroker()
     seen: list[str] = []

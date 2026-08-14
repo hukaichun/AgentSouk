@@ -270,7 +270,7 @@ class SoukAgentClient:
             writer.cancel()
             reader.cancel()
             # This stream is going away — any run still waiting on it can
-            # never receive its input or an ack again. Cancel them rather
+            # never receive its input again. Cancel them rather
             # than let them hang forever; _handle_run's cleanup is
             # bounded (see its finally block) regardless of why it woke up.
             for task in list(self._in_flight):
@@ -292,7 +292,7 @@ class SoukAgentClient:
 
     async def _read_loop(self) -> None:
         # Demultiplexes inbound envelopes (RunAgentInput deliveries and
-        # acks) by run_id into each in-flight run's inbox.
+        # cancels) by run_id into each in-flight run's inbox.
         async for envelope in self._session_call:
             inbox = self._inboxes.get(envelope.run_id)
             if inbox is not None:
@@ -323,10 +323,10 @@ class SoukAgentClient:
                     )
 
             async def watch_cancel() -> None:
-                # souk's cancel envelope is the only thing that should show
-                # up here while a run is in flight — the ack this run is
-                # itself waiting for (below) arrives after end_of_stream,
-                # by which point this watcher has already been cancelled.
+                # souk's cancel envelope is the only thing that ever shows
+                # up here: the run's input already arrived before this
+                # watcher started, and souk sends nothing after a run's
+                # end_of_stream (see proto/souk.proto's reserved field 5).
                 while True:
                     envelope = await inbox.get()
                     if envelope.cancel:
@@ -355,31 +355,22 @@ class SoukAgentClient:
         except Exception:
             logger.exception("run %s for agent_id '%s' failed", run_id, agent_id)
         finally:
-            # Best-effort: if this run was cancelled because the
-            # connection died, outbound is a queue nobody's writer will
-            # ever drain again and inbox will never receive an ack —
-            # never let cleanup hang indefinitely on either.
-            #
-            # The inbox must stay registered in self._inboxes until the
-            # ack wait below is actually over — _read_loop demultiplexes
-            # purely by looking up self._inboxes[run_id], so popping it
-            # first (as this used to do) meant souk's ack always arrived
-            # to find no inbox left, got dropped as "frame for
-            # unknown/finished run_id", and every single run paid a
-            # guaranteed 5s stall plus a misleading "connection likely
-            # lost" warning even on a perfectly healthy connection.
+            # end_of_stream is the last word on this run — souk sends
+            # nothing back for it (see proto/souk.proto's reserved field 5).
+            # This used to be followed by a 5s wait for an `ack` envelope
+            # confirming souk had persisted everything; it was removed
+            # because there was no action to take on it either way. This
+            # code has already produced and discarded the run's events, so a
+            # failed persist could only be logged, never retried — while the
+            # wait cost a round trip on every run, and a full 5s stall plus
+            # a misleading "connection likely lost" warning whenever the
+            # frame went astray (which it reliably did, until the inbox
+            # teardown below was moved after the wait).
             try:
                 await outbound.put(
                     souk_pb2.AgentEventEnvelope(
                         run_id=run_id, agent_id=agent_id, end_of_stream=True
                     )
-                )
-                ack = await asyncio.wait_for(inbox.get(), timeout=5.0)
-                if not ack.ack:
-                    logger.warning("run %s: expected ack frame, got something else", run_id)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "run %s: no ack from souk within timeout (connection likely lost)", run_id
                 )
             finally:
                 self._inboxes.pop(run_id, None)

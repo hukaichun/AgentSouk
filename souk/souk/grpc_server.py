@@ -8,10 +8,9 @@ AgentSession is one persistent, multiplexed stream per SDK client
 connection — every run that client's agents pick up (via PollForWork) is
 claimed, delivered, and drained through this single connection, not by
 opening a new stream per run (see proto/souk.proto for the exact framing).
-souk demultiplexes inbound envelopes by run_id and sends an explicit
-`ack=true` envelope once it has fully persisted and relayed every event
-for a run_id, so the SDK has confirmation the call was fully consumed —
-not just sent — before it moves on.
+souk demultiplexes inbound envelopes by run_id. A finished run gets nothing
+back: the SDK's `end_of_stream` frame is the last word on it (see
+_handle_finish for why there is no completion acknowledgement).
 """
 
 from __future__ import annotations
@@ -153,11 +152,14 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
             if reply_messages:
                 await repo.append_thread_messages(session, run.thread_id, run.run_id, reply_messages)
             await session.commit()
+    # Nothing goes back to the agent here. souk used to send an `ack=true`
+    # envelope at this point, once everything was persisted; it was removed
+    # because the agent could only ever log it — it has already produced and
+    # discarded its events, so there is no recovery action available to it if
+    # souk failed to persist. Whether a run is durable is a question its
+    # *caller* asks, via the run's own status. See proto/souk.proto's
+    # reserved field 5.
     await run.out_queue.put(END_OF_STREAM)
-    if run.agent_outbound is not None:
-        await run.agent_outbound.put(
-            souk_pb2.AgentEventEnvelope(run_id=run.run_id, agent_id=run.agent_id, ack=True)
-        )
 
 
 async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
