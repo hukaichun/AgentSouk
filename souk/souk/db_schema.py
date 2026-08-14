@@ -11,6 +11,15 @@ default/quoting logic only needs to be correct in one place.
 
 DEFAULT_DB_SCHEMA = "public"
 
+# souk's zero-config default backend: a local SQLite file. Defined here,
+# once, because both the running app (souk.config.Settings.database_url) and
+# migrations (souk/alembic/env.py) need the same default and env.py
+# deliberately can't import souk.config. `+aiosqlite` is the async driver
+# the app engine uses; env.py swaps it for the sync sqlite driver since
+# Alembic runs migrations synchronously. See souk/config.py for why SQLite
+# is the default and when to point SOUK_DATABASE_URL at Postgres instead.
+DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///./souk.db"
+
 
 def quoted_schema(db_schema: str) -> str:
     """Double-quote a schema name so Postgres preserves its exact case.

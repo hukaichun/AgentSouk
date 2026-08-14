@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import text
+from sqlalchemy import update
 
 from souk import repo
+from souk.schema import agents
 
 
 async def _register(client, identity, sdk_client_id, name, **extra):
@@ -91,8 +92,9 @@ async def test_agui_run_mints_a_fresh_thread_for_an_unrecognized_thread_id(clien
     identity = new_identity()
     agent_id = await _register(client, identity, "sdk_1", "greeter")
     await session.execute(
-        text("UPDATE agents SET last_seen_at = :ts WHERE agent_id = :id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "id": agent_id},
+        update(agents)
+        .where(agents.c.agent_id == agent_id)
+        .values(last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()
 
@@ -108,8 +110,9 @@ async def test_agui_run_against_an_offline_agent_fails_fast(client, new_identity
     agent_id = await _register(client, identity, "sdk_1", "translator")
 
     await session.execute(
-        text("UPDATE agents SET last_seen_at = :ts WHERE agent_id = :id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "id": agent_id},
+        update(agents)
+        .where(agents.c.agent_id == agent_id)
+        .values(last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()
 
@@ -132,8 +135,9 @@ async def _offline_run_with_metadata(client, session, name, agent_id, metadata):
     enough to check what got persisted without needing a live provider.
     """
     await session.execute(
-        text("UPDATE agents SET last_seen_at = :ts WHERE agent_id = :id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "id": agent_id},
+        update(agents)
+        .where(agents.c.agent_id == agent_id)
+        .values(last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()
     body = _run_input("thread_made_up")

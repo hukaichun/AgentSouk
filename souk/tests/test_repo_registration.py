@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import text
+from sqlalchemy import select, update
 
 from souk import repo
+from souk.schema import agents
 
 
 async def test_registration_assigns_and_reuses_agent_id(session, new_identity):
@@ -53,7 +54,7 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
 
     row = (
         await session.execute(
-            text("SELECT delisted_at FROM agents WHERE agent_id = :id"), {"id": translator_id}
+            select(agents.c.delisted_at).where(agents.c.agent_id == translator_id)
         )
     ).mappings().first()
     assert row["delisted_at"] is not None
@@ -65,7 +66,7 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
     await repo.register_agents(session, "sdk_1", identity.public_key, both)
     row = (
         await session.execute(
-            text("SELECT delisted_at FROM agents WHERE agent_id = :id"), {"id": translator_id}
+            select(agents.c.delisted_at).where(agents.c.agent_id == translator_id)
         )
     ).mappings().first()
     assert row["delisted_at"] is None
@@ -84,8 +85,7 @@ async def test_list_agents_excludes_stale_and_reports_online(session, new_identi
     # Backdate past the stale-hidden window — should disappear from the
     # roster entirely, not just show online=False.
     await session.execute(
-        text("UPDATE agents SET last_seen_at = :ts"),
-        {"ts": datetime.now(timezone.utc) - timedelta(days=30)},
+        update(agents).values(last_seen_at=datetime.now(timezone.utc) - timedelta(days=30))
     )
     await session.commit()
 
