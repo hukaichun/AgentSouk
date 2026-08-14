@@ -51,7 +51,7 @@ def create_app(souk: Souk, serving: ServingSettings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         await startup(souk)
-        sweeper = asyncio.create_task(run_health_sweeps_forever(souk))
+        sweeper = souk.spawn(run_health_sweeps_forever(souk), name="health-sweeps")
         try:
             yield
         finally:
@@ -113,7 +113,7 @@ async def _serve() -> None:
         await asyncio.gather(http_server.serve(), grpc_server.wait_for_termination())
     finally:
         await grpc_server.stop(grace=5)
-        await souk.dispose()
+        await souk.aclose()
 
 
 def main() -> None:

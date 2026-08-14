@@ -13,7 +13,7 @@ no socket anywhere, a gRPC-connected remote agent, or — later — a peer souk
 node holding that agent's connection; core cannot tell the difference, which
 is the whole point.
 
-Connection strategy is deliberately *not* part of this contract. `run` is
+Connection strategy is deliberately *not* part of this contract. `start` is
 called once per run, but that says nothing about connections: a transport is
 free to multiplex every run of every agent over one connection, which is
 exactly what the gRPC implementation does.
@@ -21,7 +21,6 @@ exactly what the gRPC implementation does.
 
 from __future__ import annotations
 
-import inspect
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
@@ -45,35 +44,34 @@ AgentEvent = Any
 class AgentProvider(Protocol):
     """Anything that can run an agent and stream back AG-UI events.
 
-    Structural, so there is nothing to subclass and no adapter to write for
-    the common case: an object whose `run` takes a RunAgentInput and yields
-    AG-UI events already satisfies this.
+    Starting a run is an explicit act — `start` returns only once the run has
+    genuinely been handed over — and consuming its events is a separate one.
+    That split matters because it is what actually happens: an agent behind a
+    wire begins working the moment it receives its input and pushes events at
+    its own pace, whether or not souk is reading. Modelling the handover as
+    "iterate a lazy generator" would fuse the two and describe a pull that
+    isn't real; it also means the input goes out only if and when somebody
+    iterates, which leaves a cancel arriving first able to strand an agent
+    waiting for input that was never sent.
 
-    Two call shapes are accepted, and `open_run` below normalizes them:
+    Structural, so there is nothing to subclass. A local AG-UI agent — whose
+    own `run_stream(run_input)` is already an async generator — is wrapped in
+    three lines:
 
-    - a plain async generator — `def run(self, run_input) -> AsyncIterator`.
-      The natural shape, and what an AG-UI adapter already is. Lazy: nothing
-      happens until the stream is first iterated.
-    - an async function returning one — `async def run(self, run_input)`.
-      For transports that must do work *before* the first event is asked
-      for, notably delivering the run input over a wire; see
-      souk.grpc_server.GrpcProvider, which relies on that delivery having
-      happened by the time this returns.
+        class Local:
+            async def start(self, run_input):
+                return agent.run_stream(run_input)
     """
 
-    def run(self, run_input: dict) -> AsyncIterator[AgentEvent]: ...
+    async def start(self, run_input: dict) -> AsyncIterator[AgentEvent]: ...
 
+    async def cancel(self, run_id: str) -> None:
+        """Ask the agent to stop. A request, not a command.
 
-async def open_run(provider: AgentProvider, run_input: dict) -> AsyncIterator[AgentEvent]:
-    """Start `provider`'s run and hand back its event stream.
-
-    Awaits the provider's own setup if it has any (the async-function shape
-    above), so a caller can rely on "this returned" meaning "the run really
-    has been handed over" — which is what makes it safe to cancel a run
-    immediately afterwards without the agent being left waiting for an input
-    that was never sent.
-    """
-    stream = provider.run(run_input)
-    if inspect.isawaitable(stream):
-        stream = await stream
-    return stream
+        souk does not enforce it and must not pretend to: the provider may
+        honour it immediately, take a while, or ignore it and run to
+        completion. Whatever it emits meanwhile is real output. What
+        actually happened is read off the stream's ending, not assumed here
+        — see souk.handlers._handle_finish.
+        """
+        ...

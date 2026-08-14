@@ -55,7 +55,6 @@ from souk.broker import drain_run, request_cancel
 from souk.config import ServingSettings
 from souk.core import Souk
 from souk.deps import get_serving_settings, get_session, get_souk
-from souk.handlers import make_handlers
 from souk.identity import InvalidActorChain, verify_actor_chain
 from souk.pause import is_resuming
 from souk.translate_a2a import (
@@ -295,9 +294,7 @@ async def _start_run(
 
     await session.commit()
 
-    souk.broker.enqueue_run(
-        run_id, agent_id, thread_id, agui_input_json, "a2a", make_handlers(souk), seq=starting_seq
-    )
+    souk.enqueue_run(run_id, agent_id, thread_id, agui_input_json, "a2a", seq=starting_seq)
     return run_id, thread_id, True
 
 
@@ -417,7 +414,7 @@ async def _rpc(
         # This is the only place in AG-UI/A2A that actually cancels a run
         # — a disconnected caller (tasks/sendSubscribe, AG-UI's
         # run_agent) never does, only this explicit request. broker.
-        # request_cancel flips run.cancelled immediately (see its
+        # request_cancel flips run.cancel_requested immediately (see its
         # docstring), then — if this run is still live on some
         # AgentSession connection — its own pipeline task writes the DB
         # status and tells the agent side to stop producing further

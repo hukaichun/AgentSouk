@@ -160,9 +160,9 @@ def test_request_cancel_marks_the_run_synchronously_before_any_pipeline_processi
     """
     broker = RunBroker()
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
-    assert not run.cancelled
+    assert not run.cancel_requested
     request_cancel(run)
-    assert run.cancelled
+    assert run.cancel_requested
     assert run.in_queue.qsize() == 1
 
 

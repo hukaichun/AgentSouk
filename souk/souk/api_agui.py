@@ -24,7 +24,6 @@ from sse_starlette.sse import EventSourceResponse
 from souk import repo
 from souk.agui import build_run_agent_input, rewrite_message_ids
 from souk.broker import drain_run
-from souk.handlers import make_handlers
 from souk.core import Souk
 from souk.deps import get_session, get_souk
 from souk.identity import InvalidActorChain, verify_actor_chain
@@ -349,9 +348,7 @@ async def _run_agent(
 
     await session.commit()
 
-    run = souk.broker.enqueue_run(
-        run_id, agent_id, thread_id, input_json, "ag-ui", make_handlers(souk), seq=starting_seq
-    )
+    run = souk.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui", seq=starting_seq)
 
     async def event_stream():
         # Maps the agent's own provider-generated messageId (e.g.

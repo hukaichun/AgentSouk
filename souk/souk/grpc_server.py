@@ -60,16 +60,15 @@ def _authenticate(context, signing_secret: str) -> str | None:
 class GrpcProvider:
     """One connected SDK client, presented as an AgentProvider.
 
-    Satisfies souk/providers.py's port: `run(run_input)` hands back the event
-    stream for one run. The connection is held here, not per run, so every
+    Satisfies souk/providers.py's port: `start(run_input)` delivers the input
+    and hands back the event stream for that one run. The connection is held here, not per run, so every
     run this client claims is multiplexed over the same AgentSession stream —
     which is why the port being "one call per run" says nothing about how
     many connections a transport opens.
 
-    `run` is the awaitable shape the port allows, deliberately: awaiting it
-    must mean the input has actually been put on the wire, because the SDK's
-    run task blocks waiting for exactly that frame and a cancel arriving
-    first would otherwise strand it (see souk.handlers._handle_claim).
+    `start` puts the input on the wire before it returns, which is exactly
+    what the port promises: the SDK's run task blocks waiting for that frame,
+    so a cancel arriving first would otherwise strand it.
     """
 
     # Sentinel queued when the agent sends end_of_stream for a run — ends
@@ -89,7 +88,7 @@ class GrpcProvider:
         """
         self._agent_ids[run_id] = agent_id
 
-    async def run(self, run_input: dict) -> AsyncIterator[Any]:
+    async def start(self, run_input: dict) -> AsyncIterator[Any]:
         run_id = run_input["runId"]
         agent_id = self._agent_ids.get(run_id, "")
         queue: asyncio.Queue = asyncio.Queue()
@@ -102,23 +101,26 @@ class GrpcProvider:
         return self._events(run_id, agent_id, queue)
 
     async def _events(self, run_id: str, agent_id: str, queue: asyncio.Queue) -> AsyncIterator[Any]:
+        """Ends when the agent's own end_of_stream arrives, and not before —
+        including for a cancelled run, which keeps being read until the agent
+        actually stops (see souk.handlers._pump)."""
         try:
             while (item := await queue.get()) is not self._DONE:
                 yield item
         finally:
-            # Reached either normally or because souk closed the stream to
-            # cancel this run (see souk.handlers._pump). Tell the agent to
-            # stop; it will unwind and send its own end_of_stream, whose
-            # frame — plus any events still in flight behind it — lands in
-            # `queue` with nobody reading, and is dropped when the run is
-            # forgotten below. Absorbing stragglers here is what keeps them
-            # from surfacing as "unknown run_id" noise.
             self._runs.pop(run_id, None)
             self._agent_ids.pop(run_id, None)
-            with contextlib.suppress(Exception):
-                await self.outbound.put(
-                    souk_pb2.AgentEventEnvelope(run_id=run_id, agent_id=agent_id, cancel=True)
-                )
+
+    async def cancel(self, run_id: str) -> None:
+        """Put souk's cancel request on the wire. The SDK races it against
+        the run in flight (see souk_agent_sdk.client's watch_cancel); whether
+        the agent stops is its own business, and this returning says only
+        that the request was sent."""
+        await self.outbound.put(
+            souk_pb2.AgentEventEnvelope(
+                run_id=run_id, agent_id=self._agent_ids.get(run_id, ""), cancel=True
+            )
+        )
 
     def deliver_event(self, run_id: str, event: Any) -> None:
         queue = self._runs.get(run_id)

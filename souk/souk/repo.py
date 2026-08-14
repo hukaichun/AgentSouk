@@ -605,7 +605,7 @@ async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> di
             .where(
                 thread_history.c.thread_id == thread_id,
                 thread_history.c.kind == "run_status",
-                thread_history.c.status.in_(["queued", "running", "input-required"]),
+                thread_history.c.status.in_(["queued", "running", "cancelling", "input-required"]),
             )
             .order_by(thread_history.c.id.desc())
             .limit(1)
@@ -691,7 +691,7 @@ async def fail_orphaned_runs(session: AsyncSession) -> list[str]:
     return await _fail_runs(
         session,
         (thread_history.c.kind == "run_status")
-        & (thread_history.c.status.in_(["queued", "running"])),
+        & (thread_history.c.status.in_(["queued", "running", "cancelling"])),
         "orphaned_by_souk_restart",
     )
 
@@ -717,7 +717,7 @@ async def fail_stalled_runs(session: AsyncSession, stall_timeout_seconds: int) -
     return await _fail_runs(
         session,
         (thread_history.c.kind == "run_status")
-        & (thread_history.c.status == "running")
+        & (thread_history.c.status.in_(["running", "cancelling"]))
         & (thread_history.c.last_activity_at < cutoff),
         "stalled_no_activity",
     )

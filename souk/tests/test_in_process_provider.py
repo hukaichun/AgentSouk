@@ -29,8 +29,11 @@ class LocalAgent:
         self._reply = reply
         self.seen_input: dict | None = None
 
-    async def run(self, run_input: dict):
+    async def start(self, run_input: dict):
         self.seen_input = run_input
+        return self._events(run_input)
+
+    async def _events(self, run_input: dict):
         yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": self._reply}

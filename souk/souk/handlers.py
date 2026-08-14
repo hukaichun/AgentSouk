@@ -34,7 +34,7 @@ from souk.broker import (
     Run,
 )
 from souk.pause import interrupt_outcome_of
-from souk.providers import AgentProvider, open_run
+from souk.providers import AgentProvider
 
 if TYPE_CHECKING:
     from souk.core import Souk
@@ -49,12 +49,13 @@ async def _pump(souk: "Souk", run: Run, stream) -> None:
     broker's pipeline (push: commands on a queue). Runs as its own task so
     the pipeline stays free to process cancels while the agent is producing.
 
-    Always ends by pushing FinishStream, whether the agent finished on its
-    own or this task was cancelled — the pipeline needs that either way to
-    terminate the run, and _handle_finish already distinguishes the two by
-    checking `run.cancelled`. Closing the stream on the way out is what
-    tells the provider to stop, which for a remote agent is the cancel
-    signal going back over the wire.
+    Reads until the provider's stream ends, and only then pushes
+    FinishStream. souk never tears this down to force a run to end — not
+    even for a cancel. Asking a provider to stop is a request (see
+    _handle_cancel); whether and when it actually stops is the provider's
+    business, and anything it emits in the meantime is real output that gets
+    persisted and relayed like any other. A provider that ignores the
+    request and runs to completion has, honestly, completed.
     """
     try:
         async for event in stream:
@@ -64,39 +65,26 @@ async def _pump(souk: "Souk", run: Run, stream) -> None:
     except Exception:
         logger.exception("run %s: provider stream failed", run.run_id)
     finally:
-        with contextlib.suppress(Exception):
-            await stream.aclose()
         run.in_queue.put_nowait(FinishStream())
 
 
 async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
+    if run.cancel_requested:
+        # The request arrived before this run ever reached a provider, so
+        # there is nobody to ask to stop — don't hand it over at all.
+        # (poll() already refuses to hand out such a run; this covers the
+        # narrow window where the request landed after poll() gave it out
+        # but before this claim was processed.) The queued RequestCancel
+        # behind this Claim records the outcome.
+        run.in_queue.put_nowait(FinishStream())
+        return
     run.provider = cmd.provider
-    # If already cancelled here, RequestCancel's own DB write is still
-    # queued *behind* this Claim (see Run.cancelled's docstring — the
-    # flag is set synchronously, ahead of the queue, so this can observe
-    # it true before _handle_cancel has actually run) — don't race it by
-    # also writing "running" here; let that queued command own the DB
-    # write, as it would for any other cancel.
-    if not run.cancelled:
-        async with souk.session() as session:
-            await repo.mark_run_status(session, run.run_id, "running")
-    # Hand the run over regardless of whether it's already cancelled.
-    # open_run awaits the provider's own setup, so by the time this returns
-    # a remote agent really has been sent its input — which matters because
-    # the SDK's run task blocks waiting for exactly that (see
-    # souk_agent_sdk.client._handle_run) and would otherwise sit there while
-    # the cancel below tore everything down around it.
-    stream = await open_run(cmd.provider, run.input_json)
-    run.pump_task = asyncio.create_task(_pump(souk, run, stream))
-    if run.cancelled:
-        # broker.poll() already filters out cancelled runs before they're
-        # ever handed to an agent — this only fires in the narrow window
-        # where a run was cancelled *after* poll() handed it out but
-        # *before* this claim arrived. Cancelling the pump closes the
-        # stream, which is how the provider learns to stop; the queued
-        # RequestCancel behind this Claim still runs next and does its own
-        # (redundant but harmless) DB write.
-        run.pump_task.cancel()
+    async with souk.session() as session:
+        await repo.mark_run_status(session, run.run_id, "running")
+    # `start` returning means the agent really has its input — for a remote
+    # one, that the frame is on the wire.
+    stream = await cmd.provider.start(run.input_json)
+    run.pump_task = souk.spawn(_pump(souk, run, stream), name=f"pump:{run.run_id}")
 
 
 async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
@@ -104,12 +92,15 @@ async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
     # live caller must not end up having seen an event that was never
     # durably recorded.
     event = cmd.event
-    interrupts = interrupt_outcome_of(event)
-    if interrupts is not None:
-        # Remembered for _handle_finish, which decides the run's final
-        # status once the stream actually ends — an interrupt outcome
-        # isn't itself a stream terminator (see souk/pause.py).
-        run.pause_payload = {"interrupts": interrupts}
+    if event.get("type") == "RUN_FINISHED":
+        # The agent finished on its own terms. Remembered rather than acted
+        # on: RUN_FINISHED is not itself a stream terminator (see
+        # souk/pause.py), and _handle_finish is where the run's outcome is
+        # decided once the stream really ends.
+        run.saw_run_finished = True
+        interrupts = interrupt_outcome_of(event)
+        if interrupts is not None:
+            run.pause_payload = {"interrupts": interrupts}
     run.seq += 1
     async with souk.session() as session:
         await repo.append_run_event(session, run.run_id, run.seq, event)
@@ -122,29 +113,49 @@ async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
 
 
 async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
-    # A run already cancelled (see _handle_cancel) reaching FinishStream
-    # is the agent unwinding after being told to stop, not a real
-    # completion — the DB status must stay "cancelled", not get
-    # overwritten.
-    if not run.cancelled:
-        async with souk.session() as session:
-            if run.pause_payload is not None:
-                await repo.mark_run_status(session, run.run_id, "input-required", metadata=run.pause_payload)
-            else:
-                await repo.mark_run_status(session, run.run_id, "completed")
-            # A genuine reply was produced (as opposed to failed/
-            # cancelled — see souk/agui_reduce.py's module docstring for
-            # why those don't go through this at all) — persist it as
-            # real thread_history messages so souk is an actual source
-            # of truth for the full conversation, not just the caller's
-            # half of it. Only this round's own events (see
-            # Run.round_starting_seq) — a resumed run's earlier round(s)
-            # were already persisted the first time they finished.
+    """The provider's stream has ended. This is where — and only where — a
+    run's outcome is decided, because until now souk could not honestly know
+    it: asking a provider to stop is a request, and a provider is free to
+    ignore it and finish normally.
+
+    AG-UI gives no cancellation signal to read: its terminal events are
+    RUN_FINISHED (outcome success or interrupt) and RUN_ERROR, with no
+    cancelled event or outcome. So the only evidence that a run did *not*
+    finish on its own terms is the absence of RUN_FINISHED, and what
+    distinguishes "stopped because we asked" from "stopped because it broke"
+    is whether souk asked:
+
+        RUN_FINISHED, interrupt outcome  -> input-required
+        RUN_FINISHED                     -> completed  (even if a cancel was
+                                            requested — it finished anyway)
+        no RUN_FINISHED, cancel asked    -> cancelled
+        no RUN_FINISHED, nothing asked   -> failed
+    """
+    if run.pause_payload is not None:
+        status, metadata = "input-required", run.pause_payload
+    elif run.saw_run_finished:
+        status, metadata = "completed", None
+    elif run.cancel_requested:
+        status, metadata = "cancelled", None
+    else:
+        status, metadata = "failed", {"failureReason": "provider_stream_ended_without_finishing"}
+
+    async with souk.session() as session:
+        await repo.mark_run_status(session, run.run_id, status, metadata=metadata)
+        if status in ("completed", "input-required"):
+            # A genuine reply was produced (as opposed to failed/cancelled —
+            # see souk/agui_reduce.py's module docstring for why those don't
+            # go through this at all) — persist it as real thread_history
+            # messages so souk is an actual source of truth for the full
+            # conversation, not just the caller's half of it. Only this
+            # round's own events (see Run.round_starting_seq) — a resumed
+            # run's earlier round(s) were already persisted the first time
+            # they finished.
             round_events = await repo.get_run_events(session, run.run_id, since_seq=run.round_starting_seq)
             reply_messages = reduce_events_to_messages(round_events)
             if reply_messages:
                 await repo.append_thread_messages(session, run.thread_id, run.run_id, reply_messages)
-            await session.commit()
+        await session.commit()
     # Nothing goes back to the agent here. souk used to send an `ack=true`
     # envelope at this point, once everything was persisted; it was removed
     # because the agent could only ever log it — it has already produced and
@@ -156,32 +167,39 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
 
 
 async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
-    """The async half of a cancellation — see broker.request_cancel,
-    which is what actually queues this and has already set
-    `run.cancelled = True` synchronously before this ever runs (do not
-    set it here too; some callers, e.g. _handle_claim's own narrow-race
-    check, depend on observing it true *before* this handler has had a
-    chance to run at all — see Run.cancelled's docstring). This handler
-    is just the DB write and telling the agent side (if it already
-    claimed this run) to stop producing further events, so it doesn't
-    linger as 'running' until repo.fail_stalled_runs eventually sweeps
-    it.
+    """Cancelling is only ever one of two situations, and which one it is
+    is unambiguous by the time this runs — Claim and RequestCancel are
+    processed in order on the run's own pipeline task, so "has a provider
+    got this yet" is already settled:
 
-    Telling the agent to stop *is* cancelling the pump: that closes the
-    provider's stream, which a remote transport turns back into whatever
-    its own cancel signal is. The pump then pushes FinishStream on its way
-    out, so this run still terminates through the same path a normally
-    finished one does.
+    1. **No provider has it.** Nobody is working on the run, so nothing has
+       to be asked of anyone and souk can record `cancelled` outright — it
+       is the only party involved, so it knows. broker._pipeline treats this
+       as terminal and forgets the run right after this returns.
 
-    If broker.poll() never handed this run to any agent at all, there's no
-    pump and no provider to signal — broker._pipeline treats that
-    combination as terminal and forgets the run right after this returns.
+    2. **A provider has it.** souk *asks* it to stop and records
+       `cancelling`, not `cancelled`: the provider may honour the request,
+       may take a while, or may ignore it and finish normally, and souk
+       cannot know which until its stream ends. The outcome is decided
+       there instead (see _handle_finish). Nothing is torn down here —
+       whatever the agent emits between now and then is real output and is
+       persisted and relayed like any other.
+
+    `run.cancel_requested` was already set synchronously by
+    broker.request_cancel before this was queued (do not set it here too —
+    _handle_claim depends on observing it true before this handler has had a
+    chance to run at all; see that field's docstring).
     """
+    if run.provider is None:
+        async with souk.session() as session:
+            await repo.mark_run_status(session, run.run_id, "cancelled")
+        await run.out_queue.put(END_OF_STREAM)
+        return
+
     async with souk.session() as session:
-        await repo.mark_run_status(session, run.run_id, "cancelled")
-    if run.pump_task is not None:
-        run.pump_task.cancel()
-    await run.out_queue.put(END_OF_STREAM)
+        await repo.mark_run_status(session, run.run_id, "cancelling")
+    with contextlib.suppress(Exception):
+        await run.provider.cancel(run.run_id)
 
 
 async def _handle_fail(souk: "Souk", run: Run, cmd: Fail) -> None:

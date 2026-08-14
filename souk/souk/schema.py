@@ -191,7 +191,7 @@ thread_history = Table(
     CheckConstraint("kind IN ('message', 'run_status')", name="ck_thread_history_kind"),
     CheckConstraint("protocol IN ('ag-ui', 'a2a')", name="ck_thread_history_protocol"),
     CheckConstraint(
-        "status IN ('queued', 'running', 'input-required', 'resumed', 'completed', 'failed', 'cancelled')",
+        "status IN ('queued', 'running', 'input-required', 'resumed', 'cancelling', 'completed', 'failed', 'cancelled')",
         name="ck_thread_history_status",
     ),
     UniqueConstraint("thread_id", "message_id", name="uq_thread_history_thread_message"),

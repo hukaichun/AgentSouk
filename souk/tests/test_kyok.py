@@ -121,7 +121,7 @@ async def test_chat_completions_cancelled_run_403s(client, session, souk, new_id
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_cancelled"
     run = souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
-    run.cancelled = True
+    run.cancel_requested = True
     try:
         token = issue_kyok_token(run_id, "sess_1", agent_id, "test-signing-secret")
         resp = await client.post(

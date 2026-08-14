@@ -11,24 +11,79 @@ import.
 Deliberately network-free: this module knows about a database and nothing
 else. See docs/library-architecture.md.
 
-For now `Souk` is the database/settings holder; the domain methods
-(start_run, get_thread, list_agents, …) land here in a later step of that
-document's migration.
+`Souk` is also the domain surface an embedding caller uses — attaching an
+agent, starting a run, asking what a thread or run currently looks like —
+so nothing outside needs to reach into `repo` or `broker` directly.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import event
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from souk.broker import RunBroker
+from souk import repo
+from souk.broker import Claim, Run, RunBroker, drain_run, request_cancel
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
+from souk.handlers import make_handlers
 from souk.kyok import KyokBridge
+from souk.providers import AgentProvider
+
+logger = logging.getLogger("souk.core")
+
+
+@dataclass
+class RunHandle:
+    """A started run, addressable three different ways at once.
+
+    A bare event iterator would only cover the first: AG-UI and A2A's
+    `tasks/sendSubscribe` stream events as they arrive, but `tasks/send`
+    drains the whole run and answers with one object, and `tasks/get` /
+    `tasks/cancel` come back to a run long after the call that started it —
+    A2A's `Task.id` *is* `run_id`, so the id has to be available without
+    consuming (or even starting) a stream.
+    """
+
+    run_id: str
+    thread_id: str
+    # False when there is nothing live to consume: the run was already
+    # paused or finished, or failed immediately because its agent was
+    # offline. There is no in-memory run to drain in that case and the
+    # answer has to be reconstructed from persisted state — callers branch
+    # on this, and they branch *differently* (collecting stored events vs
+    # emitting a single status update), so it is exposed rather than
+    # papered over.
+    is_live: bool
+    _run: Run | None = None
+
+    async def events(self) -> AsyncIterator[Any]:
+        """The run's events as they arrive. Empty for a run that isn't
+        live — read its persisted events (see `Souk.get_run_events`)
+        instead of waiting on a stream that will never produce anything.
+
+        Leaving this early (a caller disconnecting, breaking out of the
+        loop) does not cancel the run; see `broker.drain_run`.
+        """
+        if self._run is None:
+            return
+        async for item in drain_run(self._run):
+            yield item
+
+    def cancel(self) -> None:
+        """Stop the run. Synchronous on purpose — the flag flips
+        immediately so nothing hands the run out in the meantime, while the
+        multi-step part (DB write, telling the agent) happens in order on
+        the run's own task. See `broker.request_cancel`."""
+        if self._run is not None:
+            request_cancel(self._run)
 
 
 class Souk:
@@ -49,10 +104,14 @@ class Souk:
         # implementation (Postgres SKIP LOCKED, Redis) substitute without
         # any caller changing; see docs/library-architecture.md on
         # horizontal scaling. Nothing distributed exists today.
-        self.broker = broker or RunBroker()
+        self.broker = broker or RunBroker(spawn=self.spawn)
         # KYOK's completion relay — structurally a second broker (see
         # souk/kyok.py), so it is held the same way for the same reasons.
         self.kyok_bridge = KyokBridge()
+        # Agents running in this process, by agent_id (see attach_provider).
+        self._providers: dict[str, AgentProvider] = {}
+        # Every background task this souk started — see spawn().
+        self._tasks: set[asyncio.Task] = set()
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
@@ -61,12 +120,237 @@ class Souk:
         async with self.sessionmaker() as session:
             yield session
 
-    async def dispose(self) -> None:
-        """Release the connection pool. Worth calling when a Souk is
-        discarded before the process exits — several instances in one
-        process is now a supported case, so their pools shouldn't outlive
-        them."""
+    # ---- Background work
+
+    def spawn(self, coro, *, name: str | None = None) -> asyncio.Task:
+        """Start a background task this souk owns.
+
+        Two things this fixes over a bare `asyncio.create_task`. The loop
+        keeps only a weak reference to a running task, so one nothing else
+        holds can be garbage-collected mid-flight — not hypothetical, it is
+        what silently killed run pipelines once already (see broker.py).
+        And a fire-and-forget task has no owner at shutdown, so in-flight
+        runs were simply abandoned, left for the next process start to clean
+        up as orphans.
+
+        Deliberately a supervised set rather than an `asyncio.TaskGroup`:
+        a TaskGroup cancels every sibling when one task fails, and runs must
+        be isolated from each other — one agent blowing up cannot be allowed
+        to take down every other run in flight.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
+    async def aclose(self) -> None:
+        """Stop everything this souk started, then release the database pool.
+
+        Cancels in-flight background work and waits for it to unwind, so
+        handlers get to finish their current statement rather than being
+        killed mid-write. Runs still live at that point stay 'running' in the
+        database and are reconciled on the next start (repo.fail_orphaned_runs)
+        — souk's dispatch state is in-memory by design and does not survive a
+        restart.
+        """
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
         await self.engine.dispose()
+
+    # ---- Agents
+
+    def attach_provider(self, agent_id: str, provider: AgentProvider) -> None:
+        """Register an agent that runs in this process.
+
+        Its runs are claimed the moment they're enqueued rather than waiting
+        for anyone to poll — an in-process agent is by definition already
+        there. A remote agent claims its own work instead (PollForWork), so
+        nothing is attached here for it.
+
+        `provider` only has to have the AG-UI agent shape; see
+        souk/providers.py. There is no wrapper class to construct.
+        """
+        self._providers[agent_id] = provider
+
+    def detach_provider(self, agent_id: str) -> None:
+        self._providers.pop(agent_id, None)
+
+    async def list_agents(self) -> list[dict[str, Any]]:
+        """The roster, with this souk's own online/staleness policy applied."""
+        async with self.session() as session:
+            return await repo.list_agents(
+                session,
+                online_window_seconds=self.settings.online_window_seconds,
+                stale_hidden_window_seconds=self.settings.stale_hidden_window_seconds,
+            )
+
+    async def get_agent(self, agent_id: str) -> dict[str, Any] | None:
+        async with self.session() as session:
+            return await repo.get_agent_by_id(session, agent_id)
+
+    async def resolve_agents_by_name(self, name: str) -> list[dict[str, Any]]:
+        """Every currently-listed agent under this display name — zero, one,
+        or several, since a name is not exclusive across identities."""
+        async with self.session() as session:
+            return await repo.resolve_agents_by_name(session, name)
+
+    # ---- Threads
+
+    async def create_thread(
+        self, agent_id: str, parent_thread_id: str | None = None, metadata: dict | None = None
+    ) -> str:
+        async with self.session() as session:
+            thread_id = await repo.create_thread(session, agent_id, parent_thread_id, metadata)
+            await session.commit()
+            return thread_id
+
+    async def get_thread(self, thread_id: str) -> dict[str, Any] | None:
+        async with self.session() as session:
+            return await repo.get_thread(session, thread_id)
+
+    async def get_thread_messages(self, thread_id: str) -> list[dict[str, Any]]:
+        async with self.session() as session:
+            return await repo.get_thread_messages(session, thread_id)
+
+    async def get_thread_snapshot(self, thread_id: str) -> dict[str, Any] | None:
+        """Messages plus the current active run — what a caller needs to
+        catch up on a thread without a live stream."""
+        async with self.session() as session:
+            return await repo.get_thread_snapshot(session, thread_id)
+
+    async def get_thread_tree(self, thread_id: str) -> dict[str, Any] | None:
+        """Full call-chain lineage rooted at `thread_id` — itself plus every
+        descendant thread spawned from it. Only as complete as callers chose
+        to make it: a hop appears only if the caller recorded the lineage
+        when it called through souk.
+        """
+        async with self.session() as session:
+            root = await repo.get_thread(session, thread_id)
+            if root is None:
+                return None
+
+            async def build(node_thread_id: str) -> list[dict[str, Any]]:
+                children = await repo.get_thread_children(session, node_thread_id)
+                return [
+                    {**child, "children": await build(child["thread_id"])} for child in children
+                ]
+
+            return {
+                "thread_id": thread_id,
+                "agent_id": root["agent_id"],
+                "children": await build(thread_id),
+            }
+
+    # ---- Runs
+
+    async def get_run(self, run_id: str) -> dict[str, Any] | None:
+        async with self.session() as session:
+            return await repo.get_run(session, run_id)
+
+    async def get_run_events(self, run_id: str, since_seq: int = 0) -> list[dict[str, Any]]:
+        async with self.session() as session:
+            return await repo.get_run_events(session, run_id, since_seq=since_seq)
+
+    def active_runs(self) -> list[str]:
+        """run_ids this souk is currently dispatching, from live in-memory
+        state — distinct from the database's view, which also holds runs
+        that already finished."""
+        return self.broker.active_run_ids()
+
+    def enqueue_run(
+        self,
+        run_id: str,
+        agent_id: str,
+        thread_id: str,
+        input_json: dict[str, Any],
+        protocol: str,
+        seq: int = 0,
+    ) -> Run:
+        """Put a persisted run into live dispatch.
+
+        The one place a run enters the broker, so an attached in-process
+        provider picks up work no matter which path created the run — a
+        library call, an AG-UI request, or an A2A one. A remote agent's runs
+        simply sit here until it polls for them.
+        """
+        run = self.broker.enqueue_run(
+            run_id, agent_id, thread_id, input_json, protocol, make_handlers(self), seq=seq
+        )
+        provider = self._providers.get(agent_id)
+        if provider is not None:
+            run.in_queue.put_nowait(Claim(provider))
+        return run
+
+    async def start_run(
+        self,
+        agent_id: str,
+        run_input: dict[str, Any],
+        thread_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> RunHandle:
+        """Start a run against `agent_id` and hand back a handle to it.
+
+        The library entry point: persists the run, puts it into dispatch, and
+        returns without waiting for it. `run_input` is an AG-UI RunAgentInput
+        payload; its threadId/runId are filled in with the real ids souk
+        assigns, since those are souk's to mint (a caller-supplied one is
+        never trusted as a real identity).
+
+        Protocol surfaces do more than this on the way in — persisting the
+        caller's messages, verifying an actor chain, failing fast against an
+        offline agent — which is theirs to do, not this method's.
+        """
+        async with self.session() as session:
+            resolved_thread_id = await repo.ensure_thread(
+                session, agent_id, thread_id, metadata=metadata, create_if_missing=True
+            )
+            created = await repo.create_run(session, resolved_thread_id, agent_id, "ag-ui", run_input, metadata)
+            run_id = created["run_id"]
+
+        run = self.enqueue_run(
+            run_id,
+            agent_id,
+            resolved_thread_id,
+            {**run_input, "threadId": resolved_thread_id, "runId": run_id},
+            "ag-ui",
+        )
+        return RunHandle(run_id=run_id, thread_id=resolved_thread_id, is_live=True, _run=run)
+
+    async def resume_run(self, run_id: str, run_input: dict[str, Any], metadata: dict | None = None) -> RunHandle:
+        """Restart a paused ('input-required') run for another round under
+        its *same* run_id — a run's identity stays stable across however many
+        pause/resume rounds it goes through, so a caller's task id keeps
+        pointing at the same task for its whole life.
+        """
+        async with self.session() as session:
+            stored = await repo.get_run(session, run_id)
+            if stored is None:
+                raise LookupError(f"no such run: {run_id}")
+            await repo.reopen_run(session, run_id, run_input, metadata)
+            # Continue this run's existing seq rather than restarting at 0 —
+            # earlier rounds already wrote events under the same run_id.
+            starting_seq = await repo.get_last_event_seq(session, run_id)
+
+        run = self.enqueue_run(
+            run_id,
+            stored["agent_id"],
+            stored["thread_id"],
+            run_input,
+            stored["protocol"] or "ag-ui",
+            seq=starting_seq,
+        )
+        return RunHandle(run_id=run_id, thread_id=stored["thread_id"], is_live=True, _run=run)
+
+    def cancel_run(self, run_id: str) -> bool:
+        """Cancel a live run. False if souk isn't dispatching it — already
+        finished, or never started here."""
+        run = self.broker.get(run_id)
+        if run is None:
+            return False
+        request_cancel(run)
+        return True
 
 
 def _create_engine(settings: CoreSettings):

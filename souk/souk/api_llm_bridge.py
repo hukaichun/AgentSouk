@@ -121,7 +121,7 @@ async def chat_completions(
         raise HTTPException(status_code=401, detail="invalid or expired KYOK token")
 
     run = souk.broker.get(token.run_id)
-    if run is None or run.cancelled or run.agent_id != token.agent_id:
+    if run is None or run.cancel_requested or run.agent_id != token.agent_id:
         # Either this run has already finished/been forgotten (broker.
         # RunBroker.forget — souk's pipeline task calls this the moment a
         # run terminates, see broker.py's _pipeline), was cancelled, or
