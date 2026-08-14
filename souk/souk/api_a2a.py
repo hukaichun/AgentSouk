@@ -51,7 +51,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
 from souk.agui import build_run_agent_input
-from souk.broker import broker, drain_run, request_cancel
+from souk.broker import drain_run, request_cancel
 from souk.config import ServingSettings
 from souk.core import Souk
 from souk.deps import get_serving_settings, get_session, get_souk
@@ -295,7 +295,7 @@ async def _start_run(
 
     await session.commit()
 
-    broker.enqueue_run(
+    souk.broker.enqueue_run(
         run_id, agent_id, thread_id, agui_input_json, "a2a", make_handlers(souk), seq=starting_seq
     )
     return run_id, thread_id, True
@@ -332,7 +332,7 @@ async def _rpc(
 
     if method == "tasks/send":
         run_id, thread_id, is_new = await _start_run(session, agent_id, params, souk)
-        run = broker.get(run_id) if is_new else None
+        run = souk.broker.get(run_id) if is_new else None
         if run is not None:
             # No cleanup on early exit, deliberately: a caller
             # disconnecting mid-wait does not cancel the run — see
@@ -354,7 +354,7 @@ async def _rpc(
 
     if method == "tasks/sendSubscribe":
         run_id, thread_id, is_new = await _start_run(session, agent_id, params, souk)
-        run = broker.get(run_id) if is_new else None
+        run = souk.broker.get(run_id) if is_new else None
 
         async def event_stream():
             if run is None:
@@ -427,7 +427,7 @@ async def _rpc(
         # so there's nothing here that actually depends on it, just a
         # caller doing tasks/get immediately after could in principle
         # still observe the old status for a moment.
-        run = broker.get(run_id)
+        run = souk.broker.get(run_id)
         if run is not None:
             request_cancel(run)
         events = await repo.get_run_events(session, run_id)

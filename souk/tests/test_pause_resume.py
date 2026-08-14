@@ -18,7 +18,7 @@ import json
 
 from souk import repo
 from souk.api_a2a import _finalize_delegated_call
-from souk.broker import FinishStream, RelayEvent, broker
+from souk.broker import FinishStream, RelayEvent
 from souk.grpc_server import _handle_finish, _handle_relay
 
 
@@ -37,7 +37,7 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_id
     run_id = created["run_id"]
     await session.commit()
 
-    run = broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
+    run = souk.broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
     interrupt = {"id": "int_1", "reason": "tool_call", "message": "Approve foo(1)?"}
     finished_event = {
         "type": "RUN_FINISHED",
@@ -51,7 +51,7 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_id
     reread = await repo.get_run(session, run_id)
     assert reread["status"] == "input-required"
     assert reread["metadata"]["interrupts"] == [interrupt]
-    broker.forget(run_id)
+    souk.broker.forget(run_id)
 
 
 async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, souk, new_identity):
@@ -67,14 +67,14 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, so
     run_id = created["run_id"]
     await session.commit()
 
-    run = broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
+    run = souk.broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
     finished_event = {"type": "RUN_FINISHED", "threadId": thread_b, "runId": run_id}
     await _handle_relay(souk, run, RelayEvent(json_payload=json.dumps(finished_event)))
     await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
     assert reread["status"] == "completed"
-    broker.forget(run_id)
+    souk.broker.forget(run_id)
 
 
 async def test_finalize_delegated_call_reports_honestly_without_registering_any_interest(

@@ -17,7 +17,6 @@ import pytest
 
 from souk import repo
 from souk.api_llm_bridge import _collapse_stream
-from souk.broker import broker
 from souk.kyok import issue_kyok_token, verify_kyok_token
 
 
@@ -95,7 +94,7 @@ async def test_chat_completions_with_invalid_token_401s(client):
     assert resp.status_code == 401
 
 
-async def test_chat_completions_run_not_in_broker_403s(client, session, new_identity):
+async def test_chat_completions_run_not_in_broker_403s(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     token = issue_kyok_token("run_never_started", "sess_1", agent_id, "test-signing-secret")
     resp = await client.post(
@@ -104,10 +103,10 @@ async def test_chat_completions_run_not_in_broker_403s(client, session, new_iden
     assert resp.status_code == 403
 
 
-async def test_chat_completions_agent_id_mismatch_403s(client, session, new_identity):
+async def test_chat_completions_agent_id_mismatch_403s(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_mismatch"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, "sess_1", "some_other_agent_id", "test-signing-secret")
         resp = await client.post(
@@ -115,13 +114,13 @@ async def test_chat_completions_agent_id_mismatch_403s(client, session, new_iden
         )
         assert resp.status_code == 403
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_chat_completions_cancelled_run_403s(client, session, new_identity):
+async def test_chat_completions_cancelled_run_403s(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_cancelled"
-    run = broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    run = souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     run.cancelled = True
     try:
         token = issue_kyok_token(run_id, "sess_1", agent_id, "test-signing-secret")
@@ -130,13 +129,13 @@ async def test_chat_completions_cancelled_run_403s(client, session, new_identity
         )
         assert resp.status_code == 403
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_chat_completions_missing_signature_headers_401s(client, session, new_identity):
+async def test_chat_completions_missing_signature_headers_401s(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_no_sig"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, "sess_1", agent_id, "test-signing-secret")
         resp = await client.post(
@@ -144,13 +143,13 @@ async def test_chat_completions_missing_signature_headers_401s(client, session, 
         )
         assert resp.status_code == 401
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_chat_completions_stale_timestamp_401s(client, session, new_identity):
+async def test_chat_completions_stale_timestamp_401s(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_stale"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, "sess_1", agent_id, "test-signing-secret")
         body = b"{}"
@@ -169,13 +168,13 @@ async def test_chat_completions_stale_timestamp_401s(client, session, new_identi
         )
         assert resp.status_code == 401
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_chat_completions_malformed_timestamp_401s(client, session, new_identity):
+async def test_chat_completions_malformed_timestamp_401s(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_malformed_ts"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, "sess_1", agent_id, "test-signing-secret")
         resp = await client.post(
@@ -189,17 +188,17 @@ async def test_chat_completions_malformed_timestamp_401s(client, session, new_id
         )
         assert resp.status_code == 401
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_chat_completions_unregistered_agent_403s(client, session, new_identity):
+async def test_chat_completions_unregistered_agent_403s(client, session, souk, new_identity):
     """The token names a real, live run — but the agent behind it was
     never actually registered (or has since been delisted), so there's
     no public_key on file to verify the call-time signature against.
     """
     identity, _real_agent_id = await _register_agent(session, new_identity)
     run_id = "run_unregistered"
-    broker.enqueue_run(run_id, "agent_does_not_exist", "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, "agent_does_not_exist", "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, "sess_1", "agent_does_not_exist", "test-signing-secret")
         body = b"{}"
@@ -207,13 +206,13 @@ async def test_chat_completions_unregistered_agent_403s(client, session, new_ide
         resp = await client.post("/kyok/v1/chat/completions", content=body, headers=headers)
         assert resp.status_code == 403
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_chat_completions_bad_signature_401s(client, session, new_identity):
+async def test_chat_completions_bad_signature_401s(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_bad_sig"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, "sess_1", agent_id, "test-signing-secret")
         body = b"{}"
@@ -222,7 +221,7 @@ async def test_chat_completions_bad_signature_401s(client, session, new_identity
         resp = await client.post("/kyok/v1/chat/completions", content=body, headers=headers)
         assert resp.status_code == 401
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
 # --- Full success round trip ---------------------------------------------
@@ -243,11 +242,11 @@ def _chunk(content: str = "", role: str | None = None, finish_reason: str | None
     }
 
 
-async def test_full_round_trip_non_streaming(client, session, new_identity):
+async def test_full_round_trip_non_streaming(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_success_nonstream"
     session_id = "sess_success_nonstream"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, session_id, agent_id, "test-signing-secret")
         body = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
@@ -276,14 +275,14 @@ async def test_full_round_trip_non_streaming(client, session, new_identity):
         assert result["choices"][0]["message"]["role"] == "assistant"
         assert result["choices"][0]["finish_reason"] == "stop"
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_full_round_trip_streaming(client, session, new_identity):
+async def test_full_round_trip_streaming(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_success_stream"
     session_id = "sess_success_stream"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, session_id, agent_id, "test-signing-secret")
         body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "stream": True}).encode()
@@ -307,14 +306,14 @@ async def test_full_round_trip_streaming(client, session, new_identity):
         assert lines[-1] == "data: [DONE]"
         assert any("hi" in line for line in lines[:-1])
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_respond_error_line_surfaces_as_error_and_stream_ends(client, session, new_identity):
+async def test_respond_error_line_surfaces_as_error_and_stream_ends(client, session, souk, new_identity):
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_error_line"
     session_id = "sess_error_line"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, session_id, agent_id, "test-signing-secret")
         body = json.dumps({"messages": [], "stream": True}).encode()
@@ -336,16 +335,16 @@ async def test_respond_error_line_surfaces_as_error_and_stream_ends(client, sess
         assert len(lines) == 1
         assert json.loads(lines[0].removeprefix("data: ")) == {"error": "upstream LLM call failed"}
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
-async def test_claim_timeout_returns_502(client, session, new_identity, monkeypatch):
+async def test_claim_timeout_returns_502(client, session, souk, new_identity, monkeypatch):
     import souk.api_llm_bridge as bridge_module
 
     monkeypatch.setattr(bridge_module, "CLAIM_TIMEOUT_SECONDS", 0.05)
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_claim_timeout"
-    broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
+    souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
     try:
         token = issue_kyok_token(run_id, "sess_unclaimed", agent_id, "test-signing-secret")
         body = json.dumps({"messages": []}).encode()
@@ -353,7 +352,7 @@ async def test_claim_timeout_returns_502(client, session, new_identity, monkeypa
         resp = await client.post("/kyok/v1/chat/completions", content=body, headers=headers)
         assert resp.status_code == 502
     finally:
-        broker.forget(run_id)
+        souk.broker.forget(run_id)
 
 
 async def test_respond_unknown_request_id_404s(client):

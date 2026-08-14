@@ -43,10 +43,16 @@ broker.poll() hands out already-cancelled runs because it can't see
 `cancelled` go true until the pipeline processes a queued command that
 just hasn't run yet. See git history on this file for both.)
 
+A RunBroker instance belongs to one Souk (see souk/core.py) rather than
+being a module-level singleton — same reasoning as its settings and engine,
+and what would let a distributed implementation substitute here without
+touching any caller (see docs/library-architecture.md on horizontal
+scaling).
+
 souk runs as a single process holding both the HTTP server and the gRPC
 server on one event loop, so all of this is implemented with plain
-asyncio primitives rather than round-tripping through Postgres. Postgres
-(souk/schema.py) is the durable record for anything that needs to survive a
+asyncio primitives rather than round-tripping through the database. The
+database (souk/schema.py) is the durable record for anything that needs to survive a
 restart or be queried after the fact (roster, thread history, run
 status, run_events) — it is not on the live event-relay hot path.
 """
@@ -372,6 +378,3 @@ class RunBroker:
 
     def forget(self, run_id: str) -> None:
         self._runs.pop(run_id, None)
-
-
-broker = RunBroker()

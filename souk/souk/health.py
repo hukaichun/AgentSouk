@@ -26,7 +26,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from souk import repo
-from souk.broker import Fail, broker
+from souk.broker import Fail
 
 if TYPE_CHECKING:
     from souk.core import Souk
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("souk.health")
 
 
-async def _close_with_terminal_event(run_id: str, failure_reason: str) -> None:
+async def _close_with_terminal_event(souk: "Souk", run_id: str, failure_reason: str) -> None:
     """Unblocks whoever's still waiting on this run's output (an open AG-UI
     SSE connection or an A2A tasks/sendSubscribe stream) — otherwise they'd
     hang until their own client-side timeout with no idea the run had
@@ -48,7 +48,7 @@ async def _close_with_terminal_event(run_id: str, failure_reason: str) -> None:
     cancelled) — this is just a command push, not a direct mutation, so
     unlike the rest of this module it doesn't touch a Run's fields itself.
     """
-    run = broker.get(run_id)
+    run = souk.broker.get(run_id)
     if run is not None:
         run.in_queue.put_nowait(Fail(failure_reason))
 
@@ -66,7 +66,7 @@ async def sweep_once(souk: "Souk") -> None:
         if settings.paused_timeout_seconds is not None:
             stale_paused = await repo.fail_stale_paused_runs(session, settings.paused_timeout_seconds)
     for run_id in stalled:
-        await _close_with_terminal_event(run_id, "stalled_no_activity")
+        await _close_with_terminal_event(souk, run_id, "stalled_no_activity")
     if stalled:
         logger.warning(
             "health sweep: %d run(s) claimed but silent past %ds, marked failed: %s",
@@ -75,7 +75,7 @@ async def sweep_once(souk: "Souk") -> None:
             stalled,
         )
     for run_id in unclaimed:
-        await _close_with_terminal_event(run_id, "no_provider_online")
+        await _close_with_terminal_event(souk, run_id, "no_provider_online")
     if unclaimed:
         logger.warning(
             "health sweep: %d run(s) queued past %ds with target agent offline, marked failed: %s",
@@ -84,7 +84,7 @@ async def sweep_once(souk: "Souk") -> None:
             unclaimed,
         )
     for run_id in stale_paused:
-        await _close_with_terminal_event(run_id, "paused_no_resume")
+        await _close_with_terminal_event(souk, run_id, "paused_no_resume")
     if stale_paused:
         logger.warning(
             "health sweep: %d run(s) paused (input-required) past %ds with no resume, marked failed: %s",

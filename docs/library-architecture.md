@@ -286,6 +286,52 @@ await souk.resume_run(run_id, input)          # HITL: same run_id across rounds
 souk.active_runs()                            # live in-memory broker state
 ```
 
+## What this leaves open: horizontal scaling
+
+Not a goal now, but the layering should not foreclose it. Where souk's state
+lives today:
+
+| Durable, already shared | Live, per-process |
+|---|---|
+| agent roster | `RunBroker._runs`, `_pending_by_agent` |
+| threads, thread_history | each `Run`'s `in_queue` / `out_queue` |
+| run status, `run_events` | `_wake_subscribers` (long-poll wakeups) |
+| | the KYOK bridge registry (same shape) |
+| | the `AgentSession` gRPC connection itself |
+
+That split is deliberate: the database is the durable record, explicitly *not*
+on the live event-relay hot path, so dispatch runs on plain asyncio primitives
+(see `broker.py`'s module docstring).
+
+The real obstacle to multiple replicas is not the queue, it is **connection
+affinity**: a provider's `AgentSession` is pinned to one process. If node A
+holds agent X's stream and a run for X is created on node B, B cannot dispatch
+it. The SSE side has the mirror problem — events are produced wherever
+`out_queue` lives.
+
+The `AgentProvider` port is exactly the seam that problem needs. Forwarding to
+whichever node holds the connection becomes another implementation of it —
+core does not care whether a provider is in-process, a gRPC-connected agent,
+or a peer node:
+
+```python
+class RemoteProvider:                  # forwards to the node holding the stream
+    def run(self, run_input): ...      # same port, core unchanged
+```
+
+Two things would still be required, and neither is built here:
+
+1. **`RunBroker` behind an interface**, so a Postgres `SKIP LOCKED` or Redis
+   implementation can substitute. This design does the cheap half now: the
+   broker becomes an instance owned by a `Souk` rather than a module-level
+   singleton, injected like settings and the engine. `broker.py` already
+   anticipated this — its wake mechanism is deliberately a plain
+   `asyncio.Event` and documents itself as a swap-in seam.
+2. **Cross-node fan-out for `out_queue`**, so an SSE consumer on one node can
+   read a run produced on another.
+
+Building either now would be premature. Leaving the door shut would not.
+
 ## Protocol adapters (core)
 
 Pure translation. No framework, no transport:

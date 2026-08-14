@@ -23,7 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from souk import repo
 from souk.agui import build_run_agent_input, rewrite_message_ids
-from souk.broker import broker, drain_run
+from souk.broker import drain_run
 from souk.grpc_server import make_handlers
 from souk.core import Souk
 from souk.deps import get_session, get_souk
@@ -349,7 +349,7 @@ async def _run_agent(
 
     await session.commit()
 
-    run = broker.enqueue_run(
+    run = souk.broker.enqueue_run(
         run_id, agent_id, thread_id, input_json, "ag-ui", make_handlers(souk), seq=starting_seq
     )
 

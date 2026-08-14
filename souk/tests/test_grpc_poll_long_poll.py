@@ -11,7 +11,6 @@ import asyncio
 import time
 
 from souk import repo
-from souk.broker import broker
 from souk.grpc_gen import souk_pb2
 from souk.grpc_server import SoukAgentGatewayServicer
 from souk.identity import issue_session_token
@@ -37,7 +36,7 @@ async def test_poll_for_work_returns_as_soon_as_a_run_is_enqueued(session, souk,
 
     async def enqueue_soon() -> None:
         await asyncio.sleep(0.05)
-        broker.enqueue_run("run_1", agent_id, "thread_1", {}, "ag-ui")
+        souk.broker.enqueue_run("run_1", agent_id, "thread_1", {}, "ag-ui")
 
     enqueue_task = asyncio.create_task(enqueue_soon())
     start = time.monotonic()

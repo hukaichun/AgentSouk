@@ -35,7 +35,6 @@ from souk.broker import (
     RelayEvent,
     RequestCancel,
     Run,
-    broker,
 )
 from souk.config import ServingSettings
 from souk.grpc_gen import souk_pb2, souk_pb2_grpc
@@ -238,21 +237,21 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
             )
 
         max_claim = request.max_claim if request.HasField("max_claim") else None
-        runs = broker.poll(agent_ids, max_claim=max_claim)
+        runs = souk.broker.poll(agent_ids, max_claim=max_claim)
 
         wait_seconds = request.wait_seconds if request.HasField("wait_seconds") else 0
         # No point holding the call open when the caller explicitly
         # reported zero spare capacity (max_claim=0) — nothing souk-side
         # will change that; capacity only frees up on the caller's end.
         if not runs and wait_seconds > 0 and max_claim != 0:
-            event = broker.subscribe_wake(agent_ids)
+            event = souk.broker.subscribe_wake(agent_ids)
             try:
                 await asyncio.wait_for(event.wait(), timeout=wait_seconds)
             except asyncio.TimeoutError:
                 pass
             finally:
-                broker.unsubscribe_wake(agent_ids, event)
-            runs = broker.poll(agent_ids, max_claim=max_claim)
+                souk.broker.unsubscribe_wake(agent_ids, event)
+            runs = souk.broker.poll(agent_ids, max_claim=max_claim)
 
         async with souk.session() as session:
             for agent_id in agent_ids:
@@ -270,6 +269,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         if _authenticate(context, self._souk.settings.token_signing_secret) is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
 
+        souk = self._souk
         outbound: asyncio.Queue = asyncio.Queue()
 
         async def handle_incoming() -> None:
@@ -281,7 +281,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
             # longer take out this whole connection's dispatch loop.
             async for envelope in request_iterator:
                 run_id = envelope.run_id
-                run = broker.get(run_id)
+                run = souk.broker.get(run_id)
                 if run is None:
                     logger.warning("AgentSession: frame for unknown/finished run_id=%s", run_id)
                     continue

@@ -25,8 +25,10 @@ from sqlalchemy import event
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from souk.broker import RunBroker
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
+from souk.kyok import KyokBridge
 
 
 class Souk:
@@ -37,10 +39,20 @@ class Souk:
         souk = Souk(CoreSettings(database_url="..."))    # explicit
     """
 
-    def __init__(self, settings: CoreSettings | None = None) -> None:
+    def __init__(self, settings: CoreSettings | None = None, broker: RunBroker | None = None) -> None:
         self.settings = settings or CoreSettings()
         self.engine = _create_engine(self.settings)
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False)
+        # Live dispatch state, held per instance rather than as a module
+        # singleton — the same reasoning as settings and the engine above.
+        # Accepting one here is also what would let a distributed
+        # implementation (Postgres SKIP LOCKED, Redis) substitute without
+        # any caller changing; see docs/library-architecture.md on
+        # horizontal scaling. Nothing distributed exists today.
+        self.broker = broker or RunBroker()
+        # KYOK's completion relay — structurally a second broker (see
+        # souk/kyok.py), so it is held the same way for the same reasons.
+        self.kyok_bridge = KyokBridge()
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
