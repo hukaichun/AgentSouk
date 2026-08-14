@@ -35,7 +35,7 @@ applies to registration (see `docs/federation-and-anti-abuse.md`).
 ```
 souk/                 # the library. Network-free.
   core/               #   ① Souk class, broker, handlers, repo, schema
-  providers/          #   AgentProvider port + InProcessProvider
+  providers/          #   AgentProvider port (the AG-UI agent shape)
   protocols/          #   ② agui, a2a — pure translation, in-process usable
 souk-server/          # ③ separate subproject: the reference gateway
   http/               #   FastAPI/uvicorn wiring of souk.protocols
@@ -113,63 +113,53 @@ A2AAdapter(souk, public_base_url="https://souk.example.com")
 ### Attaching agents
 
 ```python
-souk.attach_provider("my-agent", InProcessProvider(my_agent_fn))
+souk.attach_provider("my-agent", pydantic_ai_agent.to_ag_ui())
 ```
 
-An agent reaches souk through an `AgentProvider`. Nothing about that port is
-network-shaped:
+An agent reaches souk through an `AgentProvider`, and that port is *the AG-UI
+agent shape* — input in, event stream out — not an interface of souk's own
+invention:
 
 ```python
 class AgentProvider(Protocol):
-    """souk's outbound half: what souk needs to say to a running agent."""
-    async def deliver_input(self, inbox: RunInbox, run_input: RunAgentInput) -> None: ...
-    async def signal_cancel(self, run_id: str) -> None: ...
-    async def ack(self, run_id: str) -> None: ...
-
-
-class RunInbox(Protocol):
-    """The return path souk hands the provider for one specific run."""
-    run_id: str
-    # Raw payload by design, not an oversight — this is the relay path;
-    # see "Typed data, and where typing stops" below.
-    def relay_event(self, event: dict) -> None: ...
-    def finish(self) -> None: ...
+    def run(self, run_input: RunAgentInput) -> AsyncIterator[AgentEvent]: ...
 ```
 
-Both halves are needed, and they are deliberately asymmetric. Outbound is
-method calls; inbound is `RunInbox`, which enqueues commands onto that run's
-`in_queue` rather than mutating anything directly. That asymmetry is not
-stylistic — `broker.py` guarantees exactly one pipeline task per run is ever
-applying changes to it, so every inbound signal has to serialize through the
-queue. (Its module docstring records what the alternative cost: an earlier
-version let four modules poke a shared dataclass, and cancellation took two
-rounds of ordering fixes before it worked.) `RunInbox` exists so a provider
-never has to reach into `broker.get(run_id).in_queue` to do that itself.
+An earlier draft of this document had four methods here (`deliver_input`,
+`signal_cancel`, `ack`) plus a `RunInbox` return-path interface for the
+provider to push events back through. That was souk inventing a protocol
+alongside one that already exists: AG-UI already defines an agent as
+`RunAgentInput → stream of events`, which is exactly what
+`pydantic_ai.ui.ag_ui.AGUIAdapter` produces. Inventing a parallel push
+interface is precisely what `souk-no-forced-protocol-deviation` exists to
+prevent, so the port collapses to the standard shape:
 
-### What each call means
+| earlier draft | AG-UI-aligned |
+|---|---|
+| `deliver_input(inbox, run_input)` | call `run(run_input)` |
+| `inbox.relay_event(e)` | `yield e` |
+| `inbox.finish()` | the iterator ends |
+| `signal_cancel(run_id)` | `aclose()` on the iterator |
+| `ack(run_id)` | gone from the port — see below |
+| `RunInbox` | does not exist |
 
-The full life of one run, and where each port method lands:
+Two consequences worth stating plainly, because they are costs, not free wins:
 
-```
-agent → PollForWork              "any work for me?"  → souk answers with run_id
-agent → AgentSession, empty frame "I'm taking it"     → becomes a Claim command
-souk  → deliver_input             ★ hands over the run's RunAgentInput
-agent → events…                   → inbox.relay_event(...) per event
-agent → end_of_stream             → inbox.finish()
-souk  → ack                       "every event persisted and relayed"
-```
+- **`ack` leaves the port.** It exists so an SDK knows souk durably persisted
+  *and* relayed everything for a run — a wire concern with no meaning
+  in-process. It becomes an internal detail of the gRPC implementation, which
+  is where it belongs.
+- **The gRPC provider does its own per-run demultiplexing.** `AgentSession` is
+  one multiplexed connection carrying every run that client claimed, so
+  turning that back into one iterator per run needs an internal queue. That
+  complexity does not disappear; it moves out of core and into the transport.
+  It is also close to what `AgentSession` already does today with its
+  `outbound` queue and `handle_incoming` demux loop.
 
-`deliver_input` is the one that is easy to misread as bookkeeping: it is the
-step that actually gives the agent its work. Claiming a run only tells the
-agent *which* run it got; without `deliver_input` it knows the id and nothing
-else — not the thread, not the messages, not the tools. What it carries is
-AG-UI's `RunAgentInput` (threadId, runId, messages, tools, state, resume).
-
-`signal_cancel` asks a claimed run to stop producing events. `ack` confirms
-souk has durably persisted *and* relayed everything for that run, so an SDK
-knows the call was fully consumed rather than merely sent. `ack` is a no-op
-for an in-process provider — there is no delivery to confirm when there is no
-wire.
+Claiming still happens the same way (`PollForWork`, then a claim frame); what
+changes is only that souk hands the claimed run's `RunAgentInput` to
+`provider.run(...)` and consumes what comes back, instead of pushing
+protobuf envelopes onto a queue.
 
 This port is what removes the one genuine transport leak in today's code.
 `souk/broker.py` is already transport-agnostic (plain asyncio, commands are
@@ -180,14 +170,17 @@ construct `souk_pb2.AgentEventEnvelope` protobuf messages directly onto
 five handlers into core unchanged in substance, and leaves protobuf
 serialization to the one implementation that needs it.
 
-Two implementations:
+Because `AgentProvider` is a structural `Protocol` matching the AG-UI agent
+shape, **an in-process agent needs no souk-specific wrapper at all** — anything
+with `run(RunAgentInput) -> AsyncIterator[...]` already satisfies it, which is
+what `pydantic_ai_agent.to_ag_ui()` returns. souk ships no `InProcessProvider`
+adapter class because there is nothing for it to adapt.
 
-- **`InProcessProvider`** — wraps a local callable. No socket anywhere.
-- **`GrpcProvider`** (in `souk-server`) — serializes to `AgentEventEnvelope`
-  over an `AgentSession` stream. Exactly today's behavior.
-
-Both go through the same broker machinery, so claim races, cancellation
-semantics and ack ordering are implemented once, not per transport.
+That leaves one real implementation: **`GrpcProvider`** (in `souk-server`),
+which presents the relay's multiplexed `AgentSession` stream as one iterator
+per run, and owns the `ack` framing. Both paths go through the same broker
+machinery, so claim races and cancellation semantics are implemented once
+rather than per transport.
 
 ### Typed data, and where typing stops
 
@@ -203,19 +196,45 @@ So: **anything souk constructs or owns is a pydantic model** — `RunAgentInput`
 on the way to a provider, and souk's own agent/thread/run state on the way
 back out of the query methods.
 
-There is one deliberate exception, and it is not laziness. souk is a relay:
-it forwards a provider's event stream to the caller without interpreting it,
-which is what `souk-no-forced-protocol-deviation` protects. Strictly parsing
-every relayed event into a model would introduce two real failure modes —
-rejecting a valid event from a newer AG-UI version souk does not know yet,
-and silently rewriting payloads on the reparse/reserialize round trip (field
-order, nulls, defaults).
+The relayed **event stream** is where that stops, and the reason is specific
+rather than general caution. Measured against the installed `ag-ui-protocol`:
 
-The relay path therefore parses leniently and forwards faithfully: souk
-reads only the fields it actually makes decisions on (`type`, and
-`outcome` for pause detection — see `pause.interrupt_outcome_of`) and relays
-the original payload untouched. Parse for souk's own decisions; never
-validate-and-rewrite something a provider owns.
+| behaviour | result |
+|---|---|
+| unknown event `type` (a newer AG-UI's new event) | **rejected** — `type` is an `EventType` enum, and the `Event` union is discriminated on it: *"Input tag 'SOME_FUTURE_EVENT' … does not match any of the expected tags"* |
+| unknown *field* on a known event type | **preserved** — `model_config` is `extra='allow'`; a `futureField` survives a validate/dump round trip intact |
+| validate then dump, default settings | **adds** `timestamp: null` and `rawEvent: null` to the payload |
+| validate then dump with `exclude_none=True` | **byte-identical** to the input |
+
+So the risk is narrower than "reparsing rewrites things". Unknown *fields* are
+safe, and the null-injection is avoidable. souk also already round-trips every
+event through a `dict` today (`_handle_relay` does `json.loads` and forwards
+the parsed object, never the original bytes), so parse-and-reserialize is not
+a new hazard being introduced.
+
+The one real hazard is the first row: souk is a relay, and a provider running
+a newer AG-UI than souk must not have its run broken because souk refuses an
+event type it has not heard of. `RawEvent` cannot paper over this — its `type`
+is a hard-coded `Literal[EventType.RAW]`, so wrapping an unrecognized event in
+one changes what the caller sees from the real new event type to `RAW`. That
+is not faithful relaying; it is quiet corruption, and worse than passing the
+event through untouched.
+
+Hence the port's event type admits both:
+
+```python
+AgentEvent = BaseEvent | dict
+```
+
+Typed when the provider produces typed events — an in-process pydantic-ai
+adapter naturally does — and the original mapping when it is an event this
+souk does not recognize. Two rules follow:
+
+1. Whenever souk dumps a typed event, it uses `exclude_none=True`, so it never
+   injects `timestamp: null` / `rawEvent: null` into a caller's stream.
+2. souk reads only the fields it actually decides on (`type`, and `outcome`
+   for pause detection — see `pause.interrupt_outcome_of`), in a way that
+   works for both forms.
 
 ### Running and querying
 
