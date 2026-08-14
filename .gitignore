@@ -3,6 +3,15 @@ __pycache__/
 *.pyc
 .env
 
+# Local SQLite database files — souk's zero-config default backend writes
+# ./souk.db (plus -wal/-shm sidecars) when SOUK_DATABASE_URL is unset. Local
+# state, never commit; a real deployment uses Postgres instead.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
 # Provider identity keys (see souk_agent_sdk/identity.py) — a credential,
 # never commit one.
 *.key
