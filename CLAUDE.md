@@ -49,10 +49,12 @@ transport-specific", write eight lines that prove it instead.
 - Run the suite on **both** backends. SQLite is the default;
   `SOUK_DATABASE_URL=postgresql+psycopg://…` for the other. A throwaway
   Postgres container is enough. Dialect bugs only appear on one side.
-- **A green suite does not mean the app starts.** Nothing imports
-  `souk-server/souk_server/server.py` at test time. A rename sweep once left an import there
-  that doesn't even parse, with 167 tests passing. After any broad edit,
-  build the app: `create_app(Souk())`.
+- **A green suite does not mean the app starts.** The lesson came from the
+  serving layer (now the AgentSoukServer repo): nothing imported its
+  `server.py` at test time, and a rename sweep once left an import there
+  that doesn't even parse, with 167 tests passing. The app-builds probe
+  lives in that repo's CI now; the lesson applies to any bootstrap no test
+  imports.
 - `tests/test_core_is_network_free.py` is a hard constraint, not a
   suggestion. If it fails, the fix is almost never to widen its allow-list.
 - **Every test provider is a stub, so nothing here proves souk works.** The

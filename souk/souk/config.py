@@ -2,9 +2,9 @@
 
 The database, the domain's own timing policy, and the key it signs its
 tokens with. Everything that only means something once there is a socket —
-hosts, ports, TLS, CORS — lives in `souk_server.config.ServingSettings`, in
-the other distribution, which is what stops it drifting back in here. See
-docs/library-architecture.md.
+hosts, ports, TLS, CORS — lives in the gateway's own `ServingSettings`, in
+the AgentSoukServer repository, which is what stops it drifting back in
+here. See docs/library-architecture.md.
 
 Neither class is instantiated at import time. A `Souk` is constructed with a
 `CoreSettings` (see souk/core.py), so nothing here runs as a side effect of

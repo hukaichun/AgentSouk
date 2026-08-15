@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 # No fastapi, uvicorn, sse-starlette or grpcio here, and that is the point:
 # core knows a database and nothing else, so it cannot import a transport
 # even by accident (see docs/library-architecture.md). Serving lives in the
-# sibling `souk-server` distribution, which depends on this one.
+# AgentSoukServer repository, which consumes this package via a submodule.
 dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     # SQLite is souk's zero-config default backend (see souk/config.py's
