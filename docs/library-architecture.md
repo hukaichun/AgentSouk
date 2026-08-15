@@ -15,7 +15,7 @@ between the second and the third:
 |---|---|---|
 | ① **Domain** | agents, threads, runs, events, providers | ✅ core |
 | ② **Protocol translation** | AG-UI event shapes, A2A JSON-RPC semantics — pure translation, no I/O | ✅ core |
-| ③ **Serving** | uvicorn, binding ports, TLS, `grpc.aio.server()` | ❌ never |
+| ③ **Serving** | uvicorn, binding ports, TLS, whatever carries a worker's calls | ❌ never |
 
 ② is core, not an optional extra, for the same reason `pydantic-ai` ships
 `AGUIAdapter` in the library rather than as a plugin: the protocol mapping
@@ -44,13 +44,14 @@ souk/souk/            # the library. Network-free.
 souk-server/souk_server/   # ③ the reference gateway, a separate distribution
   server.py           #   process bootstrap, CORS, TLS, both listeners
   api_*.py deps.py    #   FastAPI wiring of souk.protocols, and the models
-  grpc_server.py      #   gRPC servicer (the NAT-traversal relay)
+  grpc_server.py      #   the worker channel (the NAT-traversal relay).
+                      #   gRPC today; becoming a WebSocket, see below
 ```
 
 `souk` depends on SQLAlchemy (plus a driver), pydantic-settings,
 ag-ui-protocol, cryptography, pyjwt and alembic — and on no transport at all.
-It cannot import `fastapi`, `uvicorn`, `sse-starlette` or `grpcio`, because
-none of them is installed with it: that is the invariant this whole design
+It cannot import `fastapi`, `uvicorn`, `sse-starlette`, `grpcio` or
+`websockets`, because none of them is installed with it: that is the invariant this whole design
 exists to protect, and packaging is what makes it structural rather than a
 matter of discipline. A test enforces it too (see souk/tests/
 test_core_is_network_free.py) — packaging protects against the accident, not
@@ -85,7 +86,7 @@ and no driver message — only the exception's type name.
 than a convenience. Reconciling orphans is idempotent over rows from before
 the process began, *not* over a run created since — so a second pass would
 mark that one failed. The serving layer used to call its own startup twice
-by design (once before opening the gRPC port, once from the ASGI lifespan)
+by design (once before opening its second listener, once from the ASGI lifespan)
 with a comment explaining why that was harmless; it was harmless only
 because the window between them was usually empty.
 
@@ -129,9 +130,10 @@ case, and it stays in core because issuing a token is part of registering an
 agent — a domain act — not part of serving a port.
 
 **`souk-server`** — every field that only means something once there is a
-socket: `http_host`, `http_port`, `grpc_host`, `grpc_port`,
-`cors_allow_origins`, and the four `*_tls_cert_path` / `*_tls_key_path`
-values.
+socket: `http_host`, `http_port`, `cors_allow_origins`, the
+`*_tls_cert_path` / `*_tls_key_path` values, and (until the worker channel
+moves onto the HTTP app) `grpc_host` / `grpc_port`. Which of these exist is
+the serving layer's business to change; none of them can reach core.
 
 **`public_http_url` is the one genuine boundary case.** It looks like
 serving (it is a URL) but is used as *content*: `api_a2a` interpolates it to
@@ -196,8 +198,25 @@ against three core methods and nothing else:
 
 souk ships that loop (`souk/worker.py`) so an attached provider uses it
 rather than a shortcut; `souk-agent-sdk` runs the same loop on the far side
-of gRPC, where `PollForWork` carries `claim_work` and `AgentSession` carries
-the other two.
+of a wire, where some transport carries those three calls and one
+notification back the other way (souk asking a run to stop).
+
+**Which transport is not core's business, and core says so nowhere.** That
+sentence used to read "on the far side of gRPC, where `PollForWork` carries
+`claim_work` and `AgentSession` carries the other two", and the same naming
+had spread through `broker.py`, `identity.py`, `repo.py` and `kyok.py` — core
+describing itself in the vocabulary of one deployment's wire. It is gone: the
+contract is the three methods and the cancel notification, and a transport
+implements framing around them.
+
+That matters right now, because the transport is changing. The base server
+mode is **HTTP + WebSocket**, so the gRPC service — a second listening port,
+a `.proto`, generated stubs and a build step to produce them — is being
+removed in favour of one WebSocket on the app that already exists. Core is
+untouched by that, which is the test of whether this boundary was real: the
+worker loop, the ownership checks, the long-poll wait and the cancel
+notification are all the same calls afterwards. The landing is `souk-server`
+and `souk-agent-sdk`'s job, tracked separately from this document.
 
 Three properties follow, and each replaces something the previous port needed
 a mechanism for:
@@ -232,7 +251,9 @@ already transport-agnostic, and the run handlers are pure domain logic —
 persist an event, decide a status, reduce a reply — but three of them built
 `souk_pb2.AgentEventEnvelope` protobuf messages directly. They now live in
 `souk/handlers.py`, in core, and `tests/test_core_is_network_free.py` asserts
-no core module imports grpc, fastapi, uvicorn, starlette or httpx. That test
+no core module imports grpc, fastapi, uvicorn, starlette, httpx or
+websockets — the last one listed before anything imports it, so the
+WebSocket that replaces gRPC cannot leak in either. That test
 was verified to fail when a violation is introduced, rather than assumed.
 
 ### Cancelling: a request, with the outcome decided later
@@ -903,15 +924,22 @@ no A2A type.
 
 The reference gateway, assembled from the above and owning every I/O
 decision: reads `SOUK_*` env vars into `CoreSettings` + its own
-`ServingSettings`, applies CORS, binds the HTTP port, binds the gRPC port,
-terminates TLS, runs the relay. Behaviour is what the `souk-server` console
-script always did; what changed is which distribution it ships in.
+`ServingSettings`, applies CORS, binds its listeners, terminates TLS, runs
+the relay. Behaviour is what the `souk-server` console script always did;
+what changed is which distribution it ships in.
 
-It is also where the gRPC relay lives — outbound-only NAT traversal is
+It is also where the worker channel lives — outbound-only NAT traversal is
 souk's headline capability, but architecturally it is a transport, so it
 ships in the server subproject rather than in core. It carries a worker's
-three core calls and holds nothing of its own beyond the open streams it can
-reach a cancel request on.
+three core calls, plus souk's cancel request back the other way, and holds
+nothing of its own beyond the open connections it can reach one on.
+
+**The base server mode is HTTP + WebSocket**, so that channel is moving off
+gRPC: one listener instead of two, and no `.proto`, generated stubs or
+codegen step in the build. This section still describes the gRPC shape
+because that is what is in the tree; the swap is tracked as its own piece of
+work. What it must not touch is anything above this heading — if it does,
+the boundary this document is about was not real.
 
 ## Migration status
 

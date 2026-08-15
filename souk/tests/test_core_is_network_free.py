@@ -36,7 +36,18 @@ import pytest
 SOUK_PACKAGE = Path(__file__).resolve().parent.parent / "souk"
 
 # Transport/framework packages core may never import, directly or otherwise.
-FORBIDDEN_ROOTS = {"grpc", "fastapi", "uvicorn", "starlette", "sse_starlette", "httpx"}
+FORBIDDEN_ROOTS = {
+    "grpc",
+    "fastapi",
+    "uvicorn",
+    "starlette",
+    "sse_starlette",
+    "httpx",
+    # Listed ahead of anything importing it: the reference gateway is moving
+    # its worker channel to a WebSocket, and core has no more business
+    # knowing about that one than about the gRPC service it replaces.
+    "websockets",
+}
 
 def _core_modules() -> list[Path]:
     """Every module in the package. There is no allow-list any more: the
@@ -70,14 +81,19 @@ def test_core_module_imports_no_transport(module: Path) -> None:
     )
 
 
-def test_grpc_generated_stubs_are_not_reachable_from_core() -> None:
-    """protobuf leaks the same way an import of `grpc` does, and used to:
-    three handlers built souk_pb2 envelopes directly. They now live in
-    souk/handlers.py and never talk to a worker at all — a worker pushes
+def test_generated_wire_stubs_are_not_reachable_from_core() -> None:
+    """Generated protocol code leaks the same way an import of `grpc` does,
+    and used to: three handlers built wire envelopes directly. They now live
+    in souk/handlers.py and never talk to a worker at all — a worker pushes
     events in, and whatever carried them was peeled off before core saw it.
+
+    Note this is about the *worker channel's* generated stubs, not about
+    protobuf as such: souk core does import a2a-sdk's generated A2A types
+    (see souk/protocols/a2a_translate.py), which are protocol vocabulary
+    rather than a transport, and carry no client or server with them.
     """
     offenders = [m.name for m in _core_modules() if "grpc_gen" in m.read_text()]
-    assert not offenders, f"core modules referencing generated gRPC stubs: {offenders}"
+    assert not offenders, f"core modules referencing generated worker-channel stubs: {offenders}"
 
 
 def test_no_transport_is_even_installable_as_a_dependency() -> None:

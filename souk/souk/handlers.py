@@ -5,12 +5,12 @@ see its module docstring for why exactly one task per run applies them, and
 why nothing else may touch a Run's fields. `make_handlers` builds the
 dispatch table for one Souk.
 
-This module used to live in grpc_server.py, and was the one genuine transport
-leak in souk: three of these handlers constructed `souk_pb2.AgentEventEnvelope`
-protobuf messages directly. Everything they do is domain logic — persist,
-reduce, decide a status — so they belong in core. Nothing here imports a
-transport, and nothing here calls out to a worker either: events arrive as
-commands, pushed by whoever holds the run (see souk/worker.py).
+This module used to live in the serving layer, and was the one genuine
+transport leak in souk: three of these handlers built wire frames directly.
+Everything they do is domain logic — persist, reduce, decide a status — so
+they belong in core. Nothing here imports a transport, and nothing here calls
+out to a worker either: events arrive as commands, pushed by whoever holds the
+run (see souk/worker.py).
 """
 
 from __future__ import annotations
@@ -165,12 +165,11 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
             await repo.append_run_event(session, run.run_id, run.seq, failure_event)
         await session.commit()
     # Nothing goes back to the agent here. souk used to send an `ack=true`
-    # envelope at this point, once everything was persisted; it was removed
-    # because the agent could only ever log it — it has already produced and
-    # discarded its events, so there is no recovery action available to it if
-    # souk failed to persist. Whether a run is durable is a question its
-    # *caller* asks, via the run's own status. See proto/souk.proto's
-    # reserved field 5.
+    # acknowledgement at this point, once everything was persisted; it was
+    # removed because the agent could only ever log it — it has already
+    # produced and discarded its events, so there is no recovery action
+    # available to it if souk failed to persist. Whether a run is durable is a
+    # question its *caller* asks, via the run's own status.
     if failure_event is not None:
         await run.out_queue.put(failure_event)
     await run.out_queue.put(END_OF_STREAM)

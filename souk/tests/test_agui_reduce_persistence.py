@@ -1,4 +1,4 @@
-"""grpc_server._handle_finish now persists a completed/paused run's own
+"""handlers._handle_finish persists a completed/paused run's own
 reply into thread_history (see souk/agui_reduce.py) — this is what makes
 GET /threads/{thread_id} an actual source of truth for the full
 conversation, not just the caller's half of it. End-to-end verified

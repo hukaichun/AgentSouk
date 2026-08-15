@@ -215,7 +215,7 @@ class Souk:
         sounds: reconciliation is idempotent over rows from *before* the
         process started, not over a run created since, and a second pass
         would mark that one failed. The serving layer used to call this
-        twice on purpose — once before opening the gRPC port and again from
+        twice on purpose — once before opening its listeners and again from
         the ASGI lifespan — with a comment explaining why that was harmless.
         It was harmless only because the window between the two was usually
         empty.

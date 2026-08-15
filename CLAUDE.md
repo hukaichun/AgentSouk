@@ -76,8 +76,13 @@ transport-specific", write eight lines that prove it instead.
 
 These are load-bearing; breaking one has caused a real bug here.
 
-- **Core is network-free.** It knows a database and nothing else. Which
-  protocol something arrives over is a serving-layer choice.
+- **Core is network-free — including its vocabulary.** It knows a database
+  and nothing else. Which protocol something arrives over is a serving-layer
+  choice, so core must not *name* one either: `broker.py`, `identity.py`,
+  `repo.py` and `kyok.py` all described themselves in terms of `PollForWork`
+  and `AgentSession` until the transport changed and every one of those
+  sentences became a lie. The contract is `claim_work` / `report_event` /
+  `finish_run` plus a cancel notification; a transport frames those.
 - **souk never decides on a provider's behalf.** It can *ask* an agent to
   stop; it cannot make it. Never record an outcome souk hasn't observed —
   recording `cancelled` at request time was a lie the run's own output could

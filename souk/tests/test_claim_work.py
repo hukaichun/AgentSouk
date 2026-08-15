@@ -1,4 +1,4 @@
-"""Claiming work is a domain act, not a gRPC one.
+"""Claiming work is a domain act, not a transport one.
 
 Every worker comes through here — the one souk runs in its own process for
 an attached agent as much as one behind a wire — because deciding whether

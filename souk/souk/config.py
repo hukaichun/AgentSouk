@@ -106,7 +106,7 @@ class CoreSettings(BaseSettings):
     # ---- Identity
 
     # Signs the bearer tokens issued at registration and required on every
-    # gRPC call (see souk.identity), and the run-scoped KYOK tokens (see
+    # worker call (see souk.identity), and the run-scoped KYOK tokens (see
     # souk.kyok). Core rather than serving: issuing a token is part of
     # registering an agent, a domain act, not part of serving a port. No
     # default — an insecure fallback here is a real auth bypass (a
