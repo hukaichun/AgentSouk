@@ -171,9 +171,21 @@ thread_history = Table(
     # souk/pause.py) rather than completing normally. Not terminal like the
     # other non-active statuses: resuming reopens this *same* row under its
     # existing run_id for another round (see repo.reopen_run) so a run's
-    # identity stays stable across pause/resume rounds. 'resumed' is
-    # accepted but no longer written — kept so this CHECK doesn't reject
-    # pre-existing rows from before pause/resume was tracked this way.
+    # identity stays stable across pause/resume rounds.
+    #
+    # 'cancelling': souk has asked the provider to stop and it still has the
+    # run. Non-terminal, and deliberately distinct from 'cancelled' — souk
+    # can ask, it cannot compel, so whether the run was really cancelled is
+    # only knowable once the agent's stream ends. A provider that ignores
+    # the request and finishes normally has completed, and recording
+    # 'cancelled' up front would assert something souk never verified (see
+    # handlers._handle_finish for how the outcome is decided). Counts as
+    # active, and as still-running for the stall sweep, so a provider that
+    # never answers is eventually reaped instead of hanging here.
+    #
+    # 'resumed' is accepted but no longer written — kept so this CHECK
+    # doesn't reject pre-existing rows from before pause/resume was tracked
+    # this way.
     Column("status", String, nullable=True),
     Column("input_json", _JSON, nullable=True),
     Column("started_at", _TS, nullable=True),
