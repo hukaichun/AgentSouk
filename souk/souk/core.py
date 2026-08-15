@@ -411,6 +411,16 @@ class Souk:
         PollRequest.max_claim. None (the default) is unlimited, matching the
         remote SDK's default.
 
+        One thing to know before setting it: if an agent hosted here
+        delegates to another agent hosted *here* (see docs/agent-provider-
+        guide.md on cycles), the delegating run holds a slot while it waits,
+        and the delegated run needs a free one before anything claims it. A
+        provider that delegates to its own agents therefore needs room for
+        the whole chain, and one that recurses should stay unlimited —
+        otherwise the outer run waits until the stall sweep gives up on it.
+        Delegating to a different provider is unaffected: it has its own
+        budget.
+
         Attaching the same provider_id again replaces what it serves: the
         provider object, its agent list and its budget. The worker keeps
         running, and runs already in flight are untouched.

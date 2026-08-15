@@ -139,6 +139,13 @@ class SoukProvider:
         # Set this to your real concurrency limit so souk knows to leave
         # the rest queued instead of dumping more than you can actually
         # process; see PollRequest.max_claim.
+        #
+        # If one of your agents delegates (A2A) to another agent *this same
+        # provider* hosts, leave room for the whole chain: the delegating
+        # run holds a slot while it waits, and the delegated run needs a
+        # free one before anything claims it. A provider that recurses into
+        # itself should leave this unlimited. Delegating to a different
+        # provider is unaffected — it has its own budget.
         self.max_concurrent_runs = max_concurrent_runs
 
         # Belongs to the *current* connection attempt, replaced by

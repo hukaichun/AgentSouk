@@ -83,12 +83,27 @@ repo as a regression fixture, not a live demo):
   shared callee ends up with two unrelated threads, one per caller — no
   cross-talk, even though it's the same `agent_id` on both branches.
 - **Cycles** (agent A delegates to B, and B's own logic calls back into
-  A): safe from deadlock — a callback lands on a fresh thread (no
+  A): no *scheduling* deadlock — a callback lands on a fresh thread (no
   `context_id` reuse means it's a brand-new call from souk's point of
   view), and souk's own event loop is never blocked by your `run_stream`
-  awaiting an outbound A2A call. **What souk does *not* do: stop you from
-  looping forever.** There's no depth limit, no cycle detection — if your
-  own logic unconditionally delegates back on every message, you've built
+  awaiting an outbound A2A call.
+
+  **Capacity is a different matter, and it is yours to get right.** If a
+  provider delegates to an agent *it hosts itself* — including back to the
+  same agent — the outer run is holding one of that provider's slots while
+  it waits, and the inner run needs the same provider to claim it. With
+  `max_claim=1` (in-process) or `max_concurrent_runs=1` (remote) that never
+  happens: the outer run sits `running` until the stall sweep gives up on
+  it, about two minutes later by default. Measured in-process; the remote
+  knob is the same number reaching the same queue. So a provider that
+  delegates to its own agents needs capacity for the whole chain, and one
+  that recurses should stay on the default (unlimited). Delegating to a
+  *different* provider is unaffected — it has its own budget, and a caller
+  capped at 1 is fine.
+
+  **What souk does *not* do: stop you from looping forever.** There's no
+  depth limit, no cycle detection — if your own logic unconditionally
+  delegates back on every message, you've built
   an infinite loop, and souk will happily keep running it (each hop
   eventually fails on its own `httpx` timeout, but only after real work
   and real LLM spend). Design your own base case, the same way you'd
