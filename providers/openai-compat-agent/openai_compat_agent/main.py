@@ -35,7 +35,7 @@ from typing import Any
 
 import httpx
 from httpx_sse import aconnect_sse
-from souk_agent_sdk import AgentHandle, SoukAgentClient
+from souk_agent_sdk import AgentHandle, SoukProvider
 
 from openai_compat_agent.config import AgentConfig, load_config
 
@@ -113,10 +113,10 @@ async def main() -> None:
     for agent in cfg.agents:
         logger.info("wrapping OpenAI-compatible endpoint as agent '%s': api_base=%s", agent.name, agent.api_base)
 
-    client = SoukAgentClient(
+    provider = SoukProvider(
         cfg.souk_http_url, cfg.souk_grpc_url, handles, provider_name=cfg.provider_name
     )
-    await client.run_forever()
+    await provider.run_forever()
 
 
 def run() -> None:

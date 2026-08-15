@@ -45,15 +45,15 @@ DEV_GUIDES: dict[str, str] = {
 2. **Install SDK**: `pip install souk-agent-sdk` (or add as a dependency via `uv`).
 3. **Write an AgentHandle**:
 ```python
-from souk_agent_sdk import AgentHandle, SoukAgentClient
+from souk_agent_sdk import AgentHandle, SoukProvider
 
 async def my_agent_run(run_input: dict):
     # Process messages from run_input
     yield {"type": "TEXT_DELTA", "delta": "Hello from my agent!"}
 
 handle = AgentHandle(name="my-custom-agent", description="My agent description", run_stream=my_agent_run)
-client = SoukAgentClient(souk_http_url="http://localhost:8000", souk_grpc_url="localhost:50051", handles=[handle])
-await client.run_forever()
+provider = SoukProvider(souk_http_url="http://localhost:8000", souk_grpc_url="localhost:50051", handles=[handle])
+await provider.run_forever()
 ```
 4. **Run Docker or Host Process**: Launch your agent, and it will register automatically via Ed25519 identity key!
 """,

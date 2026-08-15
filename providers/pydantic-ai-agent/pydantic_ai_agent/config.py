@@ -40,7 +40,7 @@ class TemplateConfig(BaseModel):
     souk_grpc_url: str
     # Optional storefront label for this provider's public_key — shown
     # when souk-directory groups agents by provider. Provider-level, not
-    # per-agent (see souk_agent_sdk.client.SoukAgentClient's provider_name
+    # per-agent (see souk_agent_sdk.client.SoukProvider's provider_name
     # kwarg / souk/db.py's providers table).
     provider_name: str | None = None
     agents: list[AgentConfig]

@@ -34,4 +34,4 @@ register any name — see souk's README, "Provider identity"): a production
 delegation that must reach one *specific* provider, not "whichever agent
 currently owns this name", should target `/a2a/id/{agent_id}/rpc` instead —
 the `agent_id` returned in that provider's own `/agents/register` response
-(also logged on startup by `souk_agent_sdk.SoukAgentClient.register`).
+(also logged on startup by `souk_agent_sdk.SoukProvider.register`).

@@ -4,7 +4,7 @@ localhost during development/testing — see souk.config's grpc_tls_*/
 http_tls_* settings. Not for production: a real deployment needs a
 CA-issued certificate (or TLS terminated at a reverse proxy in front of
 souk), since a self-signed cert only works if every client is separately
-told to trust this exact file (souk_agent_sdk.SoukAgentClient's
+told to trust this exact file (souk_agent_sdk.SoukProvider's
 ca_cert_path), which doesn't scale past "everyone building against one
 souk you personally control".
 

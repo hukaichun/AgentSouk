@@ -800,9 +800,16 @@ cheapest possible moment to make these changes.
 - **`sdk_client_id` is gone**, everywhere: out of `POST /agents/register`'s
   body, out of `Souk.register_agents`, out of the session token (which now
   carries the `public_key`), and out of the `agents` table via a
-  dialect-branched migration. `SoukAgentClient` loses the constructor
-  parameter. A provider's identity is its keypair — see "A provider is its
-  key" above for the two things that were measured before removing it.
+  dialect-branched migration. A provider's identity is its keypair — see "A
+  provider is its key" above for the two things that were measured before
+  removing it.
+- `SoukAgentClient` is now **`SoukProvider`**, and loses its `sdk_client_id`
+  parameter. The rename is not cosmetic: the class is one identity hosting
+  several agents, which is what souk means by a provider, and it now
+  satisfies the same `run_stream(agent_id, run_input)` port as an in-process
+  one. Agents are still declared as `AgentHandle(name, run_stream)` and are
+  still the plain AG-UI shape — the provider does the routing, which is where
+  it belongs when one identity serves several agents.
 - `thread_history.status` gains `cancelling`, via a migration that is
   dialect-branched (Postgres re-adds the CHECK in place; SQLite cannot alter
   a constraint, so batch mode rebuilds the table).

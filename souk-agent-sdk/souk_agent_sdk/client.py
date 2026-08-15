@@ -1,6 +1,14 @@
-"""Agent-side SDK: a worker loop against a souk.
+"""A souk provider: one identity, several agents, and the loop that serves
+them.
 
-The loop is the whole thing, and it is the same one souk runs for an agent
+`SoukProvider` is named for what it *is* in souk's own vocabulary — a
+provider is one keypair offering a batch of agents, which is exactly what
+this object holds. It is a client of souk's API, and it contains a worker
+loop, and it routes by agent_id; those are things it does. souk's in-process
+port is the same noun with the same method (`souk/providers.py`), so an agent
+moving between here and inside souk stays the same shape.
+
+The loop is the whole thing, and it is the one souk runs for a provider
 hosted in its own process (souk/worker.py) — this SDK is that loop with a
 wire in the middle:
 
@@ -54,7 +62,18 @@ class AgentHandle:
     agent_card_extra: dict[str, Any] = field(default_factory=dict)
 
 
-class SoukAgentClient:
+class SoukProvider:
+    """Satisfies souk's Provider port (`run_stream(agent_id, run_input)`) by
+    routing to whichever `AgentHandle` owns that agent_id — so an agent is
+    still declared the way AG-UI defines one, and the routing every provider
+    serving several agents needs is done once, here, rather than in each
+    agent.
+
+    Override `run_stream` to route differently (dynamic agents, a shared
+    model pool, a dispatch table of your own); everything else — claiming,
+    concurrency, reporting, cancellation — is unchanged by that.
+    """
+
     def __init__(
         self,
         souk_http_url: str,
@@ -361,6 +380,18 @@ class SoukAgentClient:
             else:
                 logger.warning("run %s: unexpected frame from souk, ignoring", envelope.run_id)
 
+    def run_stream(self, agent_id: str, run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """The provider port itself: which of this identity's agents a run is
+        for, and its input. Routes to that agent's own `run_stream`, which
+        stays exactly the AG-UI shape (`run_input` in, events out) — the
+        agent_id belongs to the provider, not to the agent.
+
+        Raises KeyError for an agent_id this provider does not host; the
+        caller (`_handle_run`) turns that into a warning and ends the run,
+        rather than leaving souk holding one nobody will serve.
+        """
+        return self._handle_by_id[agent_id].run_stream(run_input)
+
     async def _handle_run(self, run_id: str, agent_id: str, run_input: dict[str, Any]) -> None:
         """One claimed run: feed the input to the agent, push every event
         back. The input arrived with the claim, so there is nothing to wait
@@ -368,14 +399,13 @@ class SoukAgentClient:
         block on souk sending the input back, which is what a cancel
         arriving first could strand.
         """
-        handle = self._handle_by_id.get(agent_id)
-        if handle is None:
+        if agent_id not in self._handle_by_id:
             logger.warning("PollForWork returned run for unknown local agent_id '%s'", agent_id)
             return
 
         outbound = self._outbound
         try:
-            async for event in handle.run_stream(run_input):
+            async for event in self.run_stream(agent_id, run_input):
                 await outbound.put(
                     souk_pb2.AgentEventEnvelope(
                         run_id=run_id, agent_id=agent_id, json_payload=json.dumps(event)

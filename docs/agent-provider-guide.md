@@ -172,7 +172,7 @@ other credential — back it up, never commit it.
 Both the gRPC and HTTP sides support TLS, and **neither is on by
 default** — plaintext is fine same-host (e.g. `docker compose up`), not
 for anything reachable over a real network. Pass
-`SoukAgentClient(ca_cert_path=...)` to verify the souk you're connecting
+`SoukProvider(ca_cert_path=...)` to verify the souk you're connecting
 to against a specific CA/self-signed cert rather than the system trust
 store — this is what actually confirms you're talking to *this* souk and
 not an impostor on the network; skipping it means you can't tell the

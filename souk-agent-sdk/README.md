@@ -73,7 +73,7 @@ uv sync
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
-from souk_agent_sdk import AgentHandle, SoukAgentClient
+from souk_agent_sdk import AgentHandle, SoukProvider
 
 # 1. Define your agent stream handler (AG-UI event format)
 async def my_agent_stream(run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
@@ -100,14 +100,14 @@ async def main():
         run_stream=my_agent_stream,
     )
     
-    client = SoukAgentClient(
+    provider = SoukProvider(
         souk_http_url="http://localhost:8000",
         souk_grpc_url="localhost:50051",
         agents=[handle],
         max_concurrent_runs=10,  # Throttling limit
     )
     
-    await client.run_forever()
+    await provider.run_forever()
 
 if __name__ == "__main__":
     asyncio.run(main())
