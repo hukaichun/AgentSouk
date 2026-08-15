@@ -137,3 +137,38 @@ async def test_resolve_agents_by_name_zero_one_many(session, new_identity):
     b = new_identity()
     await repo.register_agents(session, b.public_key, [{"name": "greeter"}])
     assert len(await repo.resolve_agents_by_name(session, "greeter")) == 2
+
+
+async def test_an_agent_is_addressable_by_whose_it_is_and_what_it_is_called(session, new_identity):
+    """The pair is the natural key, so addressing by it can never be
+    ambiguous — unlike a name on its own, which two identities may both
+    register (see the test above). This is what lets a caller reach one
+    particular agent without knowing souk's own id for it."""
+    a, b = new_identity(), new_identity()
+    mine = await repo.register_agents(session, a.public_key, [{"name": "translator"}])
+    theirs = await repo.register_agents(session, b.public_key, [{"name": "translator"}])
+
+    assert (await repo.resolve_agent(session, a.public_key, "translator"))["agent_id"] == mine["translator"]
+    assert (await repo.resolve_agent(session, b.public_key, "translator"))["agent_id"] == theirs["translator"]
+    # ...while the name alone still answers with both, which is the other
+    # question: who offers this, not which one do I mean.
+    assert len(await repo.resolve_agents_by_name(session, "translator")) == 2
+
+
+async def test_resolving_an_agent_a_provider_never_registered_is_a_miss(session, new_identity):
+    identity = new_identity()
+    await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
+
+    assert await repo.resolve_agent(session, identity.public_key, "summarizer") is None
+    assert await repo.resolve_agent(session, new_identity().public_key, "translator") is None
+
+
+async def test_a_delisted_agent_is_not_addressable(session, new_identity):
+    """Same rule as every other lookup: de-listed is not found, and the
+    audit trail survives regardless."""
+    identity = new_identity()
+    await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
+    await repo.register_agents(session, identity.public_key, [{"name": "summarizer"}])
+
+    assert await repo.resolve_agent(session, identity.public_key, "translator") is None
+    assert await repo.resolve_agent(session, identity.public_key, "summarizer") is not None

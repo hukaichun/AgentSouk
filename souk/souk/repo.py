@@ -240,6 +240,38 @@ async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | No
     ).scalars().first()
 
 
+async def resolve_agent(session: AsyncSession, public_key: str, name: str) -> dict[str, Any] | None:
+    """The agent this identity registered under this name, or None.
+
+    Addressing an agent by *whose* it is and what they called it, which is
+    what an agent's identity has been all along: `UNIQUE(public_key, name)`
+    is the natural key an agent_id is assigned per, and de-listing sweeps by
+    public_key. So unlike resolve_agents_by_name this can never be
+    ambiguous — the pair is either registered or it is not — and callers
+    have nothing to disambiguate and no 409 to surface.
+
+    A delisted agent is not found, same as get_agent_by_id.
+    """
+    row = (
+        await session.execute(
+            select(
+                agents.c.agent_id,
+                agents.c.name,
+                agents.c.public_key,
+                agents.c.agent_card,
+                agents.c.metadata,
+                agents.c.joined_at,
+                agents.c.last_seen_at,
+            ).where(
+                agents.c.public_key == public_key,
+                agents.c.name == name,
+                agents.c.delisted_at.is_(None),
+            )
+        )
+    ).mappings().first()
+    return dict(row) if row else None
+
+
 async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[str, Any]]:
     """Every currently-listed agent registered under this display name —
     zero, one (the common case), or many if multiple identities picked the
