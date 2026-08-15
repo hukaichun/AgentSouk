@@ -26,16 +26,17 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from souk import repo
 from souk.broker import FinishStream, RelayEvent, RunBroker, RunSnapshot
 from souk.config import CoreSettings
-from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
+from souk.db_schema import DEFAULT_DB_SCHEMA, EXPECTED_SCHEMA_REVISION, quoted_schema
 from souk.errors import AgentNotFound, InvalidRegistration
 from souk.handlers import make_handlers
+from souk.health import run_health_sweeps_forever
 from souk.identity import (
     is_timestamp_fresh,
     issue_session_token,
@@ -56,6 +57,45 @@ class Registration:
 
     agent_ids: dict[str, str]
     session_token: str
+
+
+@dataclass(frozen=True)
+class Health:
+    """Whether this souk can do its job, as facts rather than a verdict.
+
+    Deliberately not a bool: "the process is alive" and "it can serve
+    traffic" are different questions with different answers, and only the
+    caller knows which one it is asking. A gateway maps these onto liveness
+    and readiness probes; an embedder may just log them.
+
+    Carries no connection string, no driver message and no exception text.
+    A readiness endpoint is normally unauthenticated, and a driver's error
+    for an unreachable database routinely contains the host and user it
+    tried — `database_error` is the exception's type name and nothing else.
+    """
+
+    database: bool
+    schema_revision: str | None
+    expected_schema_revision: str
+    background_running: bool
+    database_error: str | None = None
+
+    @property
+    def schema_current(self) -> bool:
+        return self.schema_revision == self.expected_schema_revision
+
+    @property
+    def ready(self) -> bool:
+        """Can this souk serve? The database has to be reachable and at the
+        migration this code was built against — a process pointed at an
+        unmigrated database would otherwise discover it as a missing column
+        halfway through someone's request.
+
+        Background work deliberately does not count. Not running the sweeps
+        is a degraded state, not an unservable one, and it is a legitimate
+        choice for an embedding caller that never calls `start`.
+        """
+        return self.database and self.schema_current
 
 
 @dataclass
@@ -146,6 +186,10 @@ class Souk:
         self._workers: dict[str, Worker] = {}
         # Every background task this souk started — see spawn().
         self._tasks: set[asyncio.Task] = set()
+        # Whether start() has run. Not "is the sweeper alive": a second
+        # start() must not reconcile again (see start), so this records the
+        # act, not the state.
+        self._started = False
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
@@ -153,6 +197,84 @@ class Souk:
         `async with SessionLocal() as session:`."""
         async with self.sessionmaker() as session:
             yield session
+
+    # ---- Lifecycle
+
+    async def start(self) -> list[str]:
+        """Bring this souk up: reconcile what the last process left behind,
+        then keep the health sweeps running. Returns the run_ids it gave up
+        on, which it also logs.
+
+        The counterpart to `aclose`, and the reason it exists at all: live
+        dispatch state is in memory, so a run still `queued` or `running` in
+        the database when a process starts will never be picked up or
+        completed by anyone — nothing consults the database for work. Saying
+        so is the only honest thing to do with it.
+
+        **Runs once.** A second call is a no-op, which matters more than it
+        sounds: reconciliation is idempotent over rows from *before* the
+        process started, not over a run created since, and a second pass
+        would mark that one failed. The serving layer used to call this
+        twice on purpose — once before opening the gRPC port and again from
+        the ASGI lifespan — with a comment explaining why that was harmless.
+        It was harmless only because the window between the two was usually
+        empty.
+
+        Optional, and a library caller that skips it keeps working: runs
+        still dispatch. What it loses is the reconciliation above and every
+        health sweep — a stalled run stays `running` forever, and a run
+        queued for an agent that never comes back is never given up on.
+        """
+        if self._started:
+            return []
+        self._started = True
+        async with self.session() as session:
+            orphaned = await repo.fail_orphaned_runs(session)
+        if orphaned:
+            logger.warning(
+                "start: marked %d run(s) failed — still queued/running from before this "
+                "process, and souk's dispatch state does not survive a restart: %s",
+                len(orphaned),
+                orphaned,
+            )
+        self.spawn(run_health_sweeps_forever(self), name="health-sweeps")
+        return orphaned
+
+    async def health(self, timeout: float = 2.0) -> Health:
+        """Ask the database whether it is there and what schema it is at.
+
+        Bounded, because a health check that hangs is worse than one that
+        fails — a probe blocked on an unreachable database reports nothing at
+        all, while the process it was meant to describe keeps taking traffic.
+        A timeout is reported as unreachable.
+        """
+        revision: str | None = None
+        reachable = True
+        error: str | None = None
+        try:
+            async with asyncio.timeout(timeout):
+                async with self.session() as session:
+                    # Reachability first and on its own: anything after this
+                    # may legitimately answer None, and "no answer" must not
+                    # be able to stand in for "no database".
+                    await session.execute(text("SELECT 1"))
+                    revision = await repo.get_schema_revision(session)
+        except TimeoutError:
+            reachable, error = False, "TimeoutError"
+        except Exception as exc:
+            # The type only: see Health's docstring on what a driver puts in
+            # the message.
+            reachable, error = False, type(exc).__name__
+
+        return Health(
+            database=reachable,
+            schema_revision=revision,
+            expected_schema_revision=EXPECTED_SCHEMA_REVISION,
+            background_running=any(
+                t.get_name() == "health-sweeps" and not t.done() for t in self._tasks
+            ),
+            database_error=error,
+        )
 
     # ---- Background work
 
@@ -180,6 +302,9 @@ class Souk:
     async def aclose(self) -> None:
         """Stop everything this souk started, then release the database pool.
 
+        Safe whether or not `start` was ever called — there is simply less
+        to stop.
+
         Cancels in-flight background work and waits for it to unwind, so
         handlers get to finish their current statement rather than being
         killed mid-write. Runs still live at that point stay 'running' in the
@@ -187,6 +312,11 @@ class Souk:
         — souk's dispatch state is in-memory by design and does not survive a
         restart.
         """
+        # So a later start() is a real start rather than a silent no-op —
+        # the engine survives dispose (it refills its pool on demand), so
+        # start/aclose/start is a lifecycle someone will reasonably expect
+        # to work rather than to quietly do nothing.
+        self._started = False
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:

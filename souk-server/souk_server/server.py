@@ -15,33 +15,15 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from souk import repo
-from souk_server import api_a2a, api_agui, api_llm_bridge, api_registry
+from souk_server import api_a2a, api_agui, api_health, api_llm_bridge, api_registry
 from souk.config import CoreSettings
 from souk_server.config import ServingSettings
 from souk.core import Souk
 from souk_server.deps import install_error_handlers
 from souk_server.grpc_server import create_grpc_server
-from souk.health import run_health_sweeps_forever
 
 logger = logging.getLogger("souk_server")
 logging.basicConfig(level=logging.INFO)
-
-
-async def startup(souk: Souk) -> None:
-    # Schema must already exist: `alembic upgrade head` (see souk/alembic/)
-    # is a deploy-time step run with DDL-capable credentials, separate from
-    # starting the server — souk itself only ever runs DML against
-    # settings.database_url, which may be a DML-only role.
-    async with souk.session() as session:
-        orphaned = await repo.fail_orphaned_runs(session)
-    if orphaned:
-        logger.warning(
-            "startup: marked %d run(s) failed — still queued/running from before this restart, "
-            "souk's in-memory dispatch state doesn't survive a restart: %s",
-            len(orphaned),
-            orphaned,
-        )
 
 
 def create_app(souk: Souk, serving: ServingSettings | None = None) -> FastAPI:
@@ -53,12 +35,22 @@ def create_app(souk: Souk, serving: ServingSettings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        await startup(souk)
-        sweeper = souk.spawn(run_health_sweeps_forever(souk), name="health-sweeps")
-        try:
-            yield
-        finally:
-            sweeper.cancel()
+        # Bringing souk up is souk's own business — reconciling what the last
+        # process left behind and keeping the health sweeps running (see
+        # Souk.start). This layer only decides *when*, and may call it after
+        # _serve already has: start() runs once.
+        #
+        # The schema is not part of it: `alembic upgrade head` (see
+        # souk/alembic/) is a deploy-time step with DDL-capable credentials,
+        # separate from starting the server, which only ever runs DML against
+        # a possibly DML-only role.
+        await souk.start()
+        yield
+        # Deliberately no aclose: this app was handed a Souk it does not own
+        # (see create_app's docstring — it may be mounted inside a larger
+        # app), and closing someone else's would take their background work
+        # and their connection pool with it. Whoever constructed it closes
+        # it; _serve below does exactly that for the one it constructs.
 
     app = FastAPI(title="souk", lifespan=lifespan)
     # Read back by souk.deps' dependencies, so the routers hold no
@@ -72,6 +64,7 @@ def create_app(souk: Souk, serving: ServingSettings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     install_error_handlers(app)
+    app.include_router(api_health.router)
     app.include_router(api_registry.router)
     app.include_router(api_agui.router)
     app.include_router(api_a2a.router)
@@ -84,14 +77,12 @@ async def _serve() -> None:
     serving = ServingSettings()
     app = create_app(souk, serving)
 
-    # Explicit call, ahead of starting the gRPC server: it must not accept
-    # PollForWork/AgentSession traffic before startup's cleanup has run.
-    # uvicorn's Server.serve() below also triggers the FastAPI app's ASGI
-    # lifespan, which calls startup() again (harmless — fail_orphaned_runs
-    # is idempotent) but is where the health-sweep background task
-    # actually gets started; it isn't started here too, to avoid two
-    # redundant sweep loops running concurrently.
-    await startup(souk)
+    # Ahead of the gRPC server: it must not accept PollForWork/AgentSession
+    # traffic before reconciliation has run. uvicorn's Server.serve() below
+    # triggers the app's ASGI lifespan, which calls this again — and that is
+    # simply a no-op now, rather than a second reconciliation pass justified
+    # by the window between the two usually being empty.
+    await souk.start()
 
     grpc_server = create_grpc_server(souk, serving)
     await grpc_server.start()

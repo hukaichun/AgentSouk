@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy import func, insert, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -76,6 +76,24 @@ class ThreadOwnershipMismatch(Exception):
     thread, but one owned by a different agent than the caller is
     addressing right now.
     """
+
+
+async def get_schema_revision(session: AsyncSession) -> str | None:
+    """Which migration this database is at, or None if it has never been
+    migrated.
+
+    Asks whether `alembic_version` exists rather than running the query and
+    reading the failure. Catching the error would have caught more than the
+    missing table: a connection failure raises OperationalError, which is a
+    DBAPIError too, so an unreachable database would have reported itself as
+    merely unmigrated — measured, not imagined.
+    """
+    connection = await session.connection()
+    if not await connection.run_sync(lambda c: inspect(c).has_table("alembic_version")):
+        return None
+    return (
+        await session.execute(select(text("version_num")).select_from(text("alembic_version")))
+    ).scalars().first()
 
 
 async def ensure_provider(session: AsyncSession, public_key: str) -> None:

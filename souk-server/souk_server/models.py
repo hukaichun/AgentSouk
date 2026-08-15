@@ -98,3 +98,26 @@ class CreateThreadRequest(BaseModel):
 
 class CreateThreadResponse(BaseModel):
     thread_id: str
+
+
+class LivenessResponse(BaseModel):
+    """`/healthz`. Nothing about souk's dependencies belongs here — the
+    response existing is the answer."""
+
+    status: str
+
+
+class HealthResponse(BaseModel):
+    """`/readyz`. Facts, so an operator reading a 503 does not have to go
+    and find out which of them was false. Carries no connection string and
+    no driver message — see souk.core.Health, and note that this endpoint is
+    unauthenticated because a probe cannot hold a credential.
+    """
+
+    ready: bool
+    database: bool
+    # The exception's type name, never its message.
+    database_error: str | None = None
+    schema_revision: str | None = None
+    expected_schema_revision: str
+    background_running: bool

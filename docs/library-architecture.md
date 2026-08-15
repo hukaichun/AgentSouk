@@ -68,7 +68,30 @@ from souk import Souk, Settings
 
 souk = Souk(Settings(database_url="sqlite+aiosqlite:///./souk.db"))
 await souk.start()          # orphan cleanup + health sweeps
+...
+await souk.aclose()         # stop what start() started, release the pool
 ```
+
+`health()` sits beside them: whether the database answers, which migration
+it is at against the one this code was built for, and whether the background
+half is running — reported as facts, because "the process is alive" and "it
+can serve" are different questions and only the caller knows which it is
+asking. souk-server maps them onto `/healthz` (answers from nothing, so a
+database blip cannot restart every replica) and `/readyz` (503 when not
+ready). Both are unauthenticated, so `Health` carries no connection string
+and no driver message — only the exception's type name.
+
+`start` runs once: a second call is a no-op, and that is the point rather
+than a convenience. Reconciling orphans is idempotent over rows from before
+the process began, *not* over a run created since — so a second pass would
+mark that one failed. The serving layer used to call its own startup twice
+by design (once before opening the gRPC port, once from the ASGI lifespan)
+with a comment explaining why that was harmless; it was harmless only
+because the window between them was usually empty.
+
+Both halves are optional for an embedding caller — runs dispatch either way.
+What skipping `start` costs is exactly what it does: the reconciliation, and
+every health sweep after it.
 
 `Settings` is passed in, not read from the environment at import time. The
 engine and sessionmaker belong to the instance, so several souks can coexist
@@ -652,6 +675,10 @@ things would be required, in this order:
 1. **Ownership on the sweeps.** Either one elected sweeper, or a lease on the
    run so a node reaps only what it owns and only what has genuinely expired.
    Small, no API change, and the only item here that is already doing damage.
+   Note where it belongs when it happens: "which runs am I responsible for"
+   is the broker's question — in memory the answer is its registry, and
+   distributed it is the runs recorded against this instance — so it is an
+   operation on whatever the broker becomes, not a rule in `health.py`.
 2. **A shared claim queue**, so `enqueue_run` on A is claimable on B — an
    INSERT plus a notify, and a `SELECT … FOR UPDATE SKIP LOCKED` where
    `RunBroker.claim` is now. Runs are already rows; this is mostly a query.
@@ -674,8 +701,8 @@ this document oversold it and the overstatement was believed:
   shaped, so a `LISTEN/NOTIFY` implementation could sit behind it.
 - `Run` is now the broker's own. Nothing outside `broker.py` holds one: a
   caller gets a `RunSnapshot` (a copy of the facts, no live references) and
-  affects a run through operations — `push`, `subscribe`, `request_cancel`,
-  `owned_run_ids`. The one exception is deliberate: `handlers.py` receives
+  affects a run through operations — `push`, `subscribe`, `request_cancel`.
+  The one exception is deliberate: `handlers.py` receives
   the live object, because the handlers *are* the pipeline's inner loop and
   the broker is what dispatches them. A different broker implementation
   brings its own.
