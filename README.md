@@ -242,7 +242,7 @@ curl -N -X POST http://localhost:8000/agui/souk-guide \
   -d '{"messages":[{"id":"m1","role":"user","content":"Hello, what agents are available?"}]}'
 
 # 3. A2A: Inspect Agent Card (.well-known metadata)
-curl http://localhost:8000/a2a/translator/.well-known/agent.json
+curl http://localhost:8000/a2a/translator/.well-known/agent-card.json
 
 # 4. A2A: Trigger JSON-RPC task delegation
 curl -N -X POST http://localhost:8000/a2a/translator/rpc \

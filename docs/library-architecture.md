@@ -888,8 +888,16 @@ souk emits v1.0 and only v1.0, and accepts every spelling it has ever
 offered — v1.0, v0.3, and its own original. That asymmetry is deliberate:
 lenient inbound costs an `or`, strict inbound breaks callers for nothing. The
 SDK ships the same accommodation (`enable_v0_3_compat`), so it is the spec's
-own idea of politeness rather than souk's invention. The pre-v1 card path is
-served for the same reason — a card is what a client finds souk *with*.
+own idea of politeness rather than souk's invention.
+
+The card's *path* is the one place that accommodation was not made, after
+being tried. Serving the pre-v1 URL looked like the same courtesy, but it
+answered that URL with the v1.0 body — no top-level `url`, no
+`preferredTransport` — so a client old enough to want the old path found a
+card it could not use to locate the RPC endpoint. Half an accommodation is
+not one. Answering it with a v0.3-shaped body would be a real one, and that
+is a gateway decision: it is a URL, and URLs are not this library's to
+choose.
 
 Also gained, since the spec had them and souk didn't: `Message.taskId`
 resolves to that task's thread (an unknown one is `-32001`, not a quietly

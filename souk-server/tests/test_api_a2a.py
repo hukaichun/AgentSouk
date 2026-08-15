@@ -34,18 +34,17 @@ async def test_name_and_id_routes_return_the_same_card(client, new_identity):
     assert by_name.json()["supportedInterfaces"][0]["url"].endswith(f"/a2a/id/{agent_id}/rpc")
 
 
-async def test_the_pre_v1_card_path_is_still_served(client, new_identity):
-    """A card is what a client finds souk *with*. v1.0 moved the well-known
-    path from `/.well-known/agent.json` to `/.well-known/agent-card.json`, and
-    404ing the old one would make souk undiscoverable to every client that
-    predates the move, for no gain."""
+async def test_the_pre_v1_card_path_is_not_served(client, new_identity):
+    """Only the current path. The old one was served for a while, answering
+    with the *new* body — which has no top-level `url`, so a pre-v1 client
+    found a card it could not use to locate the RPC endpoint. That is not an
+    accommodation, and whether to offer a real one is a gateway decision, not
+    this library's."""
     agent_id = await _register(client, new_identity(), "greeter", description="hi")
 
-    old = await client.get(f"/a2a/id/{agent_id}/.well-known/agent.json")
-    new = await client.get(f"/a2a/id/{agent_id}/.well-known/agent-card.json")
+    resp = await client.get(f"/a2a/id/{agent_id}/.well-known/agent.json")
 
-    assert old.status_code == 200
-    assert old.json() == new.json()
+    assert resp.status_code == 404
 
 
 async def test_ambiguous_name_409s_with_candidates_while_id_routes_still_work(client, new_identity):
@@ -53,13 +52,13 @@ async def test_ambiguous_name_409s_with_candidates_while_id_routes_still_work(cl
     id_a = await _register(client, a, "greeter")
     id_b = await _register(client, b, "greeter")
 
-    resp = await client.get("/a2a/greeter/.well-known/agent.json")
+    resp = await client.get("/a2a/greeter/.well-known/agent-card.json")
     assert resp.status_code == 409
     candidate_ids = {c["agent_id"] for c in resp.json()["detail"]["candidates"]}
     assert candidate_ids == {id_a, id_b}
 
     for agent_id in (id_a, id_b):
-        resp = await client.get(f"/a2a/id/{agent_id}/.well-known/agent.json")
+        resp = await client.get(f"/a2a/id/{agent_id}/.well-known/agent-card.json")
         assert resp.status_code == 200
 
 

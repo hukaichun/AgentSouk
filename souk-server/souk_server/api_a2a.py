@@ -39,17 +39,21 @@ def _adapter(souk: Souk, serving: ServingSettings) -> A2AAdapter:
     return A2AAdapter(souk, public_base_url=serving.public_http_url)
 
 
-# A2A renamed the well-known path along with everything else: v1.0 publishes
-# at `/.well-known/agent-card.json` (a2a.utils.constants'
-# AGENT_CARD_WELL_KNOWN_PATH, which is where this string comes from rather
-# than being typed here), where earlier versions used `/.well-known/agent.json`.
-# Both are served — a card is what a client finds souk *with*, so 404ing the
-# path an older client knows would make souk undiscoverable to it for no gain.
-CARD_PATHS = (AGENT_CARD_WELL_KNOWN_PATH, "/.well-known/agent.json")
-
-
-@router.get("/a2a/id/{agent_id}" + CARD_PATHS[0])
-@router.get("/a2a/id/{agent_id}" + CARD_PATHS[1])
+# The path comes from a2a.utils.constants rather than being typed here, for
+# the same reason every other A2A string in souk does: v1.0 moved it (from
+# `/.well-known/agent.json`), and souk should learn that from the package
+# rather than from a client failing against it.
+#
+# Only this one is served. A route for the older path existed briefly, on the
+# reasoning that a card is what a client finds souk *with* — but it answered
+# the old URL with the *new* body, which has no top-level `url` and no
+# `preferredTransport`, so a pre-v1 client found a card it could not use to
+# locate the RPC endpoint. Half an accommodation is not one, and the two that
+# do work — every older method name, and every older part spelling — work end
+# to end (see souk/tests/test_a2a_spec_methods.py). Whether to serve the
+# legacy path at all, and if so whether to answer it with a legacy-shaped
+# body, is a gateway decision and belongs downstream.
+@router.get("/a2a/id/{agent_id}" + AGENT_CARD_WELL_KNOWN_PATH)
 async def agent_card_by_id(
     agent_id: str,
     souk: Souk = Depends(get_souk),
@@ -58,8 +62,7 @@ async def agent_card_by_id(
     return await _adapter(souk, serving).agent_card(agent_id)
 
 
-@router.get("/a2a/{name}" + CARD_PATHS[0])
-@router.get("/a2a/{name}" + CARD_PATHS[1])
+@router.get("/a2a/{name}" + AGENT_CARD_WELL_KNOWN_PATH)
 async def agent_card_by_name(
     name: str,
     souk: Souk = Depends(get_souk),
