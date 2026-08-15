@@ -20,7 +20,6 @@ async def register_agents(
     body: RegisterBatchRequest, souk: Souk = Depends(get_souk)
 ) -> RegisterBatchResponse:
     registration = await souk.register_agents(
-        body.sdk_client_id,
         body.public_key,
         body.signature,
         body.timestamp,

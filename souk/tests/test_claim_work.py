@@ -25,20 +25,24 @@ from souk.errors import InvalidRegistration
 from souk.identity import registration_signing_payload
 
 
-async def _register(souk, sdk_client_id: str, *names: str):
+async def _register(souk, *names: str):
+    """Registers a fresh provider identity, and hands back both halves a
+    caller needs afterwards: what souk issued, and the public key that *is*
+    this provider (what it attaches and claims as)."""
     key = Ed25519PrivateKey.generate()
+    public_key = key.public_key().public_bytes_raw().hex()
     timestamp = int(time.time())
-    return await souk.register_agents(
-        sdk_client_id,
-        key.public_key().public_bytes_raw().hex(),
-        key.sign(registration_signing_payload(sdk_client_id, list(names), timestamp)).hex(),
+    registration = await souk.register_agents(
+        public_key,
+        key.sign(registration_signing_payload(list(names), timestamp)).hex(),
         timestamp,
         [{"name": n} for n in names],
     )
+    return registration, public_key
 
 
 async def test_claiming_returns_queued_runs_with_their_input(souk):
-    registration = await _register(souk, "sdk_1", "a")
+    registration, public_key = await _register(souk, "a")
     agent_id = registration.agent_ids["a"]
     souk.enqueue_run("run_1", agent_id, "thread_1", {"messages": [{"role": "user"}]}, "ag-ui")
 
@@ -54,20 +58,20 @@ async def test_a_claimed_run_is_recorded_as_taken(souk):
     """What makes a later cancel unambiguous: souk knows somebody has it,
     so it asks and waits rather than recording an outcome itself (see
     handlers._handle_cancel's two cases)."""
-    registration = await _register(souk, "sdk_1", "a")
+    registration, public_key = await _register(souk, "a")
     agent_id = registration.agent_ids["a"]
     run = souk.enqueue_run("run_1", agent_id, "thread_1", {}, "ag-ui")
     assert run.claimed_by is None
 
     await souk.claim_work(registration.session_token, [agent_id])
 
-    assert run.claimed_by == "sdk_1"
+    assert run.claimed_by == public_key
 
 
 async def test_souk_asks_the_worker_that_claimed_the_run_to_stop(souk):
     """Cancellation reaches a worker through what it supplied when it
     claimed — souk holds no provider object to call into."""
-    registration = await _register(souk, "sdk_1", "a")
+    registration, public_key = await _register(souk, "a")
     agent_id = registration.agent_ids["a"]
     souk.enqueue_run("run_1", agent_id, "thread_1", {}, "ag-ui")
     asked: list[str] = []
@@ -87,8 +91,8 @@ async def test_souk_asks_the_worker_that_claimed_the_run_to_stop(souk):
 async def test_a_token_cannot_claim_another_providers_agents(souk):
     """The check that matters. Both are validly registered; the token for one
     must not reach the other's work."""
-    mine = await _register(souk, "sdk_mine", "mine")
-    theirs = await _register(souk, "sdk_theirs", "theirs")
+    mine, _mine_key = await _register(souk, "mine")
+    theirs, _theirs_key = await _register(souk, "theirs")
     their_agent = theirs.agent_ids["theirs"]
     souk.enqueue_run("run_theirs", their_agent, "thread_1", {}, "ag-ui")
 
@@ -109,7 +113,7 @@ async def test_an_invalid_token_is_refused(souk):
 async def test_claiming_marks_the_agent_as_seen(souk):
     """How a remote provider stays online at all — the mirror of the
     heartbeat that keeps an attached one visible."""
-    registration = await _register(souk, "sdk_1", "a")
+    registration, public_key = await _register(souk, "a")
     agent_id = registration.agent_ids["a"]
 
     await souk.claim_work(registration.session_token, [agent_id])
@@ -118,7 +122,7 @@ async def test_claiming_marks_the_agent_as_seen(souk):
 
 
 async def test_max_claim_limits_and_zero_claims_nothing(souk):
-    registration = await _register(souk, "sdk_1", "a")
+    registration, public_key = await _register(souk, "a")
     agent_id = registration.agent_ids["a"]
     for i in range(3):
         souk.enqueue_run(f"run_{i}", agent_id, "thread_1", {}, "ag-ui")
@@ -133,7 +137,7 @@ async def test_max_claim_limits_and_zero_claims_nothing(souk):
 
 
 async def test_long_polling_returns_as_soon_as_work_arrives(souk):
-    registration = await _register(souk, "sdk_1", "a")
+    registration, public_key = await _register(souk, "a")
     agent_id = registration.agent_ids["a"]
 
     async def enqueue_soon():
@@ -151,7 +155,7 @@ async def test_long_polling_returns_as_soon_as_work_arrives(souk):
 
 
 async def test_long_polling_gives_up_when_nothing_arrives(souk):
-    registration = await _register(souk, "sdk_1", "a")
+    registration, public_key = await _register(souk, "a")
 
     runs = await souk.claim_work(
         registration.session_token, [registration.agent_ids["a"]], wait_seconds=0.1

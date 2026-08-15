@@ -39,27 +39,18 @@ class NeverFinishesProvider:
         await asyncio.Event().wait()
 
 
-SDK_CLIENT_ID = "sdk_1"
-
-
 async def _register(souk, name: str, identity) -> str:
     async with souk.session() as session:
-        agent_ids = await repo.register_agents(
-            session, SDK_CLIENT_ID, identity.public_key, [{"name": name}]
-        )
+        agent_ids = await repo.register_agents(session, identity.public_key, [{"name": name}])
     return agent_ids[name]
 
 
 async def _register_with_token(souk, name: str, identity):
     """Registration through souk's own door, which is the only one that
     hands back a session token — what a worker needs to claim with."""
-    body = identity.register_body(SDK_CLIENT_ID, [{"name": name}])
+    body = identity.register_body([{"name": name}])
     return await souk.register_agents(
-        body["sdk_client_id"],
-        body["public_key"],
-        body["signature"],
-        body["timestamp"],
-        body["agents"],
+        body["public_key"], body["signature"], body["timestamp"], body["agents"]
     )
 
 
@@ -70,8 +61,9 @@ async def _until(predicate, timeout: float = 1.0) -> None:
 
 
 async def test_attach_start_and_read_back(souk, new_identity):
-    agent_id = await _register(souk, "echo", new_identity())
-    await souk.attach_provider(SDK_CLIENT_ID, EchoProvider(), [agent_id])
+    identity = new_identity()
+    agent_id = await _register(souk, "echo", identity)
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "hi"}]})
 
@@ -111,8 +103,9 @@ async def test_roster_and_agent_lookup(souk, new_identity):
 
 
 async def test_cancel_a_running_agent(souk, new_identity):
-    agent_id = await _register(souk, "slow", new_identity())
-    await souk.attach_provider(SDK_CLIENT_ID, NeverFinishesProvider(), [agent_id])
+    identity = new_identity()
+    agent_id = await _register(souk, "slow", identity)
+    await souk.attach_provider(identity.public_key, NeverFinishesProvider(), [agent_id])
 
     handle = await souk.start_run(agent_id, {"messages": []})
     # Read the agent's first event before cancelling, so a worker
@@ -146,6 +139,7 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
     identity = new_identity()
     registration = await _register_with_token(souk, "stubborn", identity)
     agent_id = registration.agent_ids["stubborn"]
+    # This "worker" is the identity that claimed — its key, nothing else.
 
     handle = await souk.start_run(agent_id, {"messages": []})
     claimed = await souk.claim_work(registration.session_token, [agent_id])
@@ -157,9 +151,9 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
     souk.report_event(
         handle.run_id,
         {"type": "RUN_FINISHED", "threadId": handle.thread_id, "runId": handle.run_id},
-        claimed_by=SDK_CLIENT_ID,
+        claimed_by=identity.public_key,
     )
-    souk.finish_run(handle.run_id, claimed_by=SDK_CLIENT_ID)
+    souk.finish_run(handle.run_id, claimed_by=identity.public_key)
 
     events = [e async for e in handle.events()]
     await _until(lambda: handle.run_id not in souk.active_runs())
@@ -202,8 +196,9 @@ async def test_thread_lineage(souk, new_identity):
 
 
 async def test_start_run_reuses_an_existing_thread(souk, new_identity):
-    agent_id = await _register(souk, "echo", new_identity())
-    await souk.attach_provider(SDK_CLIENT_ID, EchoProvider(), [agent_id])
+    identity = new_identity()
+    agent_id = await _register(souk, "echo", identity)
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
 
     thread_id = await souk.create_thread(agent_id)
     first = await souk.start_run(agent_id, {"messages": []}, thread_id=thread_id)
@@ -217,8 +212,9 @@ async def test_resume_keeps_the_same_run_id(souk, new_identity):
     """A run's identity is stable across pause/resume rounds — that is what
     lets a caller's task id keep pointing at the same task for its whole
     life instead of chasing a chain of new ids."""
-    agent_id = await _register(souk, "echo", new_identity())
-    await souk.attach_provider(SDK_CLIENT_ID, EchoProvider(), [agent_id])
+    identity = new_identity()
+    agent_id = await _register(souk, "echo", identity)
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "one"}]})
     first_round = [e async for e in handle.events()]

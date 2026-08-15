@@ -13,8 +13,8 @@ from souk import repo
 from souk.schema import agents, thread_history
 
 
-async def _register(client, identity, sdk_client_id, name, **extra):
-    body = identity.register_body(sdk_client_id, [{"name": name, **extra}])
+async def _register(client, identity, name, **extra):
+    body = identity.register_body([{"name": name, **extra}])
     resp = await client.post("/agents/register", json=body)
     assert resp.status_code == 201, resp.text
     return resp.json()["agent_ids"][name]
@@ -22,7 +22,7 @@ async def _register(client, identity, sdk_client_id, name, **extra):
 
 async def test_name_and_id_routes_return_the_same_card(client, new_identity):
     identity = new_identity()
-    agent_id = await _register(client, identity, "sdk_1", "greeter", description="hi")
+    agent_id = await _register(client, identity, "greeter", description="hi")
 
     by_name = await client.get("/a2a/greeter/.well-known/agent.json")
     by_id = await client.get(f"/a2a/id/{agent_id}/.well-known/agent.json")
@@ -34,8 +34,8 @@ async def test_name_and_id_routes_return_the_same_card(client, new_identity):
 
 async def test_ambiguous_name_409s_with_candidates_while_id_routes_still_work(client, new_identity):
     a, b = new_identity(), new_identity()
-    id_a = await _register(client, a, "sdk_a", "greeter")
-    id_b = await _register(client, b, "sdk_b", "greeter")
+    id_a = await _register(client, a, "greeter")
+    id_b = await _register(client, b, "greeter")
 
     resp = await client.get("/a2a/greeter/.well-known/agent.json")
     assert resp.status_code == 409
@@ -49,7 +49,7 @@ async def test_ambiguous_name_409s_with_candidates_while_id_routes_still_work(cl
 
 async def test_offline_target_fails_fast_instead_of_queueing(client, new_identity, session):
     identity = new_identity()
-    agent_id = await _register(client, identity, "sdk_1", "translator")
+    agent_id = await _register(client, identity, "translator")
 
     await session.execute(
         update(agents)
@@ -98,7 +98,7 @@ async def test_a2a_can_never_bypass_a_paused_run_even_with_a_resume_flag(client,
     told the current state back, exactly like a plain duplicate call.
     """
     identity = new_identity()
-    agent_id = await _register(client, identity, "sdk_1", "approver")
+    agent_id = await _register(client, identity, "approver")
 
     # Built directly via repo, not through a live tasks/send — that would
     # block draining a run nothing ever claims/finishes (see

@@ -31,16 +31,20 @@ from souk.grpc_server import SoukAgentGatewayServicer
 from souk.identity import registration_signing_payload
 
 
-async def _register(souk, sdk_client_id: str, *names: str):
+async def _register(souk, *names: str):
+    """Registers a fresh provider identity, and hands back both halves a
+    caller needs afterwards: what souk issued, and the public key that *is*
+    this provider (what it attaches and claims as)."""
     key = Ed25519PrivateKey.generate()
+    public_key = key.public_key().public_bytes_raw().hex()
     timestamp = int(time.time())
-    return await souk.register_agents(
-        sdk_client_id,
-        key.public_key().public_bytes_raw().hex(),
-        key.sign(registration_signing_payload(sdk_client_id, list(names), timestamp)).hex(),
+    registration = await souk.register_agents(
+        public_key,
+        key.sign(registration_signing_payload(list(names), timestamp)).hex(),
         timestamp,
         [{"name": n} for n in names],
     )
+    return registration, public_key
 
 
 class _FakeContext:
@@ -138,7 +142,7 @@ async def test_the_grpc_transport_keeps_no_state_per_run(souk):
     client — no run_id appears anywhere in it, because events go straight
     to core by run_id instead of being demultiplexed here first.
     """
-    registration = await _register(souk, "sdk_grpc", "greeter")
+    registration, public_key = await _register(souk, "greeter")
     agent_id = registration.agent_ids["greeter"]
     servicer = SoukAgentGatewayServicer(souk)
     context = _FakeContext(registration.session_token)
@@ -174,7 +178,7 @@ async def test_the_grpc_transport_keeps_no_state_per_run(souk):
         assert not any(run_id in state for run_id in run_ids)
     finally:
         for run_id in run_ids:
-            souk.finish_run(run_id, claimed_by="sdk_grpc")
+            souk.finish_run(run_id, claimed_by=public_key)
         await session.close()
 
 
@@ -183,7 +187,7 @@ async def test_a_cancel_reaches_the_worker_holding_the_run(souk):
     provider identity has open when souk asks — not to the connection the
     run was claimed on, which may not even have existed yet.
     """
-    registration = await _register(souk, "sdk_cancel", "greeter")
+    registration, public_key = await _register(souk, "greeter")
     agent_id = registration.agent_ids["greeter"]
     servicer = SoukAgentGatewayServicer(souk)
     context = _FakeContext(registration.session_token)
@@ -207,7 +211,7 @@ async def test_a_cancel_reaches_the_worker_holding_the_run(souk):
         while (await souk.get_run(handle.run_id))["status"] != "cancelling":
             await asyncio.sleep(0.01)
 
-    souk.finish_run(handle.run_id, claimed_by="sdk_cancel")
+    souk.finish_run(handle.run_id, claimed_by=public_key)
     await session.close()
     async with asyncio.timeout(2):
         while souk.broker.get(handle.run_id) is not None:
@@ -224,7 +228,7 @@ async def test_a_connection_dropping_does_not_end_the_runs_it_carried(souk, fram
     stream. This used to synthesise an ending for every run on the
     connection the moment it closed.
     """
-    registration = await _register(souk, "sdk_drop", "greeter")
+    registration, public_key = await _register(souk, "greeter")
     agent_id = registration.agent_ids["greeter"]
     servicer = SoukAgentGatewayServicer(souk)
     context = _FakeContext(registration.session_token)
@@ -266,7 +270,7 @@ async def test_a_connection_dropping_does_not_end_the_runs_it_carried(souk, fram
         async with asyncio.timeout(2):
             while not souk.broker.get(handle.run_id).saw_run_finished:
                 await asyncio.sleep(0.01)
-        souk.finish_run(handle.run_id, claimed_by="sdk_drop")
+        souk.finish_run(handle.run_id, claimed_by=public_key)
     async with asyncio.timeout(2):
         while souk.broker.get(handle.run_id) is not None:
             await asyncio.sleep(0.01)

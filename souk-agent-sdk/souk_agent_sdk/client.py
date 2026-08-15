@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import secrets
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -61,7 +60,6 @@ class SoukAgentClient:
         souk_http_url: str,
         souk_grpc_url: str,
         agents: list[AgentHandle],
-        sdk_client_id: str | None = None,
         poll_interval: float = 2.0,
         long_poll_seconds: float = 25.0,
         reconnect_delay: float = 2.0,
@@ -95,7 +93,6 @@ class SoukAgentClient:
         # (see souk/db.py's UNIQUE(public_key, name)). Empty until the
         # first successful registration.
         self._handle_by_id: dict[str, AgentHandle] = {}
-        self.sdk_client_id = sdk_client_id or f"sdk_{secrets.token_hex(8)}"
         # How often to re-check for more work while already actively
         # processing runs on an open AgentSession stream (see
         # _active_session) — a plain sleep between top-up checks, not a
@@ -142,12 +139,11 @@ class SoukAgentClient:
     async def register(self) -> None:
         names = [a.name for a in self.agents.values()]
         timestamp = int(time.time())
-        payload = registration_signing_payload(self.sdk_client_id, names, timestamp)
+        payload = registration_signing_payload(names, timestamp)
         async with httpx.AsyncClient(verify=self.ca_cert_path or True) as client:
             resp = await client.post(
                 f"{self.souk_http_url}/agents/register",
                 json={
-                    "sdk_client_id": self.sdk_client_id,
                     "public_key": public_key_hex(self._identity),
                     "signature": sign(self._identity, payload),
                     "timestamp": timestamp,
@@ -169,7 +165,9 @@ class SoukAgentClient:
         self._handle_by_id = {
             agent_ids[name]: handle for name, handle in self.agents.items() if name in agent_ids
         }
-        logger.info("registered %d agent(s) as sdk_client_id=%s", len(self.agents), self.sdk_client_id)
+        logger.info(
+            "registered %d agent(s) as provider %s", len(self.agents), public_key_hex(self._identity)
+        )
 
     async def run_forever(self) -> None:
         """Keeps a connection to souk alive indefinitely — reconnecting

@@ -97,12 +97,19 @@ agents = Table(
     # the same name; see the UNIQUE(public_key, name) constraint instead).
     Column("agent_id", String, primary_key=True),
     Column("name", String, nullable=False),
-    Column("sdk_client_id", String, nullable=False),
     # Ed25519 public key (hex) that owns this agent_id — see
     # souk/identity.py. Set once at first registration of this (public_key,
     # name) pair, never changed by a later one. Whoever holds the matching
     # private key owns this agent_id; `name` itself is not exclusive, so a
     # different public_key may freely reuse the same name.
+    #
+    # This is the *only* identity an agent has a provider by. There used to
+    # be an `sdk_client_id` column beside it, holding whatever string the
+    # registering client called itself — and claiming filtered on that, so
+    # two unrelated keypairs choosing the same string could claim each
+    # other's work, while two processes of one real identity choosing
+    # different strings could not claim their own (both measured; see the
+    # migration that dropped it).
     Column("public_key", String, nullable=False),
     Column("agent_card", _JSON, nullable=False),
     # Free-form, souk-internal extension data — distinct from agent_card

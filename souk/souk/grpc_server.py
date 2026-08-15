@@ -83,35 +83,37 @@ class WorkerSessions:
     in the sense the old GrpcProvider._runs was — nothing an agent produces
     passes through here.
 
-    A client may briefly hold more than one stream (a reconnect overlapping
-    the old one), so this holds a set and asks all of them; a stream that
-    doesn't have the run ignores the frame.
+    Keyed by identity rather than by connection, so this is also how a
+    provider running two processes behaves correctly: both are the same
+    provider, either may hold the run, and asking both is harmless — a stream
+    that doesn't have the run ignores the frame. The same goes for one client
+    briefly holding two streams across a reconnect.
     """
 
     def __init__(self) -> None:
         self._outbound: dict[str, set[asyncio.Queue]] = defaultdict(set)
 
-    def add(self, sdk_client_id: str, outbound: asyncio.Queue) -> None:
-        self._outbound[sdk_client_id].add(outbound)
+    def add(self, public_key: str, outbound: asyncio.Queue) -> None:
+        self._outbound[public_key].add(outbound)
 
-    def remove(self, sdk_client_id: str, outbound: asyncio.Queue) -> None:
-        self._outbound[sdk_client_id].discard(outbound)
-        if not self._outbound[sdk_client_id]:
-            del self._outbound[sdk_client_id]
+    def remove(self, public_key: str, outbound: asyncio.Queue) -> None:
+        self._outbound[public_key].discard(outbound)
+        if not self._outbound[public_key]:
+            del self._outbound[public_key]
 
-    def notify_cancel(self, sdk_client_id: str, run_id: str) -> None:
+    def notify_cancel(self, public_key: str, run_id: str) -> None:
         """Put souk's cancel request on the wire. Synchronous and
         best-effort by design: this returning says only that the request was
         queued for the worker, never that anything stopped. Whether the agent
         stops, and when, is the worker's business — souk finds out by what
         the run's stream does next (see souk.handlers._handle_cancel).
         """
-        streams = self._outbound.get(sdk_client_id)
+        streams = self._outbound.get(public_key)
         if not streams:
             # Nothing open to ask on: the worker is between connections, or
             # gone. The run keeps running until it ends or the health sweep
             # gives up on it — souk records no outcome it hasn't observed.
-            logger.info("cancel for run %s: no open session for %s", run_id, sdk_client_id)
+            logger.info("cancel for run %s: no open session for %s", run_id, public_key)
             return
         for outbound in streams:
             outbound.put_nowait(souk_pb2.AgentEventEnvelope(run_id=run_id, cancel=True))
@@ -133,8 +135,8 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         input, and so no window where a worker holds a run it hasn't been
         told how to run.
         """
-        sdk_client_id = _authenticate(context, self._souk.settings.token_signing_secret)
-        if sdk_client_id is None:
+        public_key = _authenticate(context, self._souk.settings.token_signing_secret)
+        if public_key is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
 
         try:
@@ -143,7 +145,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
                 list(request.agent_ids),
                 max_claim=request.max_claim if request.HasField("max_claim") else None,
                 wait_seconds=request.wait_seconds if request.HasField("wait_seconds") else 0,
-                on_cancel=partial(self._sessions.notify_cancel, sdk_client_id),
+                on_cancel=partial(self._sessions.notify_cancel, public_key),
             )
         except InvalidRegistration as e:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, str(e))
@@ -162,13 +164,13 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
     async def AgentSession(
         self, request_iterator: AsyncIterator[souk_pb2.AgentEventEnvelope], context
     ):
-        sdk_client_id = _authenticate(context, self._souk.settings.token_signing_secret)
-        if sdk_client_id is None:
+        public_key = _authenticate(context, self._souk.settings.token_signing_secret)
+        if public_key is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
 
         souk = self._souk
         outbound: asyncio.Queue = asyncio.Queue()
-        self._sessions.add(sdk_client_id, outbound)
+        self._sessions.add(public_key, outbound)
 
         async def handle_incoming() -> None:
             # Unwrap and hand over, nothing else. Every frame names the run
@@ -180,10 +182,10 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
             # all is core's check, not a matter of having connected.
             async for envelope in request_iterator:
                 if envelope.end_of_stream:
-                    souk.finish_run(envelope.run_id, claimed_by=sdk_client_id)
+                    souk.finish_run(envelope.run_id, claimed_by=public_key)
                 elif envelope.json_payload:
                     souk.report_event(
-                        envelope.run_id, json.loads(envelope.json_payload), claimed_by=sdk_client_id
+                        envelope.run_id, json.loads(envelope.json_payload), claimed_by=public_key
                     )
                 else:
                     # Nothing to relay. An SDK older than the worker model
@@ -195,7 +197,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
                         "AgentSession: empty envelope for run_id=%s from %s — an SDK "
                         "predating the worker model?",
                         envelope.run_id,
-                        sdk_client_id,
+                        public_key,
                     )
 
         reader = asyncio.create_task(handle_incoming())
@@ -205,7 +207,7 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
                 yield item
         finally:
             reader.cancel()
-            self._sessions.remove(sdk_client_id, outbound)
+            self._sessions.remove(public_key, outbound)
             # Deliberately nothing else. This connection going away is not
             # evidence that the runs it was carrying have ended — the worker
             # may reconnect and report them (a run is addressed by id, not

@@ -114,13 +114,15 @@ A2AAdapter(souk, public_base_url="https://souk.example.com")
 ### Attaching providers: a worker claims, core never calls out
 
 ```python
-await souk.attach_provider(provider_id, my_provider, [translator, summarizer], max_claim=2)
+await souk.attach_provider(public_key, my_provider, [translator, summarizer], max_claim=2)
 ```
 
 A **provider** is one identity offering one or more agents — what souk has
 always meant by the word: registration is per provider and carries a batch of
 agents, the roster groups by it, and `souk-agent-sdk` is one process holding
-several `AgentHandle`s. The port is that, in souk's own process:
+several `AgentHandle`s. The id it is attached under is its Ed25519 public
+key, because that is the only identity it has (see "A provider is its key"
+below). The port is that identity, in souk's own process:
 
 ```python
 class Provider(Protocol):
@@ -315,6 +317,41 @@ souk does not recognize. Two rules follow:
 2. souk reads only the fields it actually decides on (`type`, and `outcome`
    for pause detection — see `pause.interrupt_outcome_of`), in a way that
    works for both forms.
+
+### A provider is its key, and has no other id
+
+There used to be a second one. Registration carried an `sdk_client_id` — a
+string the client picked for itself, defaulted by the SDK to
+`sdk_{random hex}` — and it was in the signed payload, in an `agents` column,
+in the session token, and, decisively, in the query that decides what a token
+may claim. The public key was right there in the same table the whole time.
+
+Two things were measured before removing it, and neither is subtle once the
+question is asked out loud — *is this an identity?*
+
+- **Two unrelated keypairs picking the same string were both accepted**, and
+  the second one's session token claimed the first one's run, received its
+  input, and could report events into it. Nothing about that string was ever
+  verified; the signature only proved the key held by whoever signed it.
+- **Two processes of one real identity could not share their own work.** The
+  SDK mints a fresh string per process, and registration overwrites the
+  column, so after the second process registered, the first could no longer
+  claim its own agent's runs — valid token, live connection, its own key.
+
+So it was neither an identity nor a usable per-process label, and every job
+it held is done better by the key: `UNIQUE(public_key, name)` is what
+ownership already meant, de-listing already swept by public_key, and the
+providers table was already keyed by it. Claiming, reporting and the session
+token all key off `public_key` now, and the column is gone (see the
+migration).
+
+What genuinely needs "which connection" — delivering a cancel request to a
+live stream — needs no id in the protocol at all: the servicer holds the
+connections and only has to know which belong to this provider, which is the
+key again. Two processes of one provider both get asked; the one without the
+run ignores it. Which is the same answer souk gives everywhere else: it
+carries data to a provider and checks it arrived, and how that provider
+arranges itself is its own business.
 
 ### In-process is not trusted
 
@@ -760,6 +797,12 @@ cheapest possible moment to make these changes.
     `souk/providers.py`'s port keeps `agent_id` and loses `start`/`cancel` —
     one method, `run_stream(agent_id, run_input)`, iterated by the worker
     (`souk/worker.py`) rather than called by core. `assign_provider` is gone.
+- **`sdk_client_id` is gone**, everywhere: out of `POST /agents/register`'s
+  body, out of `Souk.register_agents`, out of the session token (which now
+  carries the `public_key`), and out of the `agents` table via a
+  dialect-branched migration. `SoukAgentClient` loses the constructor
+  parameter. A provider's identity is its keypair — see "A provider is its
+  key" above for the two things that were measured before removing it.
 - `thread_history.status` gains `cancelling`, via a migration that is
   dialect-branched (Postgres re-adds the CHECK in place; SQLite cannot alter
   a constraint, so batch mode rebuilds the table).

@@ -184,7 +184,6 @@ class Souk:
 
     async def register_agents(
         self,
-        sdk_client_id: str,
         public_key: str,
         signature: str,
         timestamp: int,
@@ -195,25 +194,24 @@ class Souk:
 
         Domain, not HTTP: the same act whether the provider is across a
         network or in this process. A provider's identity *is* its Ed25519
-        keypair, and the signature is what ties this batch to it; the
-        timestamp bounds how long an observed-but-valid signature could be
-        replayed for.
+        keypair — there is no other id for it, and nothing it calls itself
+        that souk would take at face value — so the signature is what ties
+        this batch to it, and the timestamp bounds how long an
+        observed-but-valid signature could be replayed for.
         """
         if not is_timestamp_fresh(timestamp):
             raise InvalidRegistration("registration timestamp too far from souk's clock")
-        payload = registration_signing_payload(
-            sdk_client_id, [a["name"] for a in agents], timestamp
-        )
+        payload = registration_signing_payload([a["name"] for a in agents], timestamp)
         if not verify_signature(public_key, signature, payload):
             raise InvalidRegistration("invalid registration signature")
 
         async with self.session() as session:
             agent_ids = await repo.register_agents(
-                session, sdk_client_id, public_key, agents, provider_name=provider_name
+                session, public_key, agents, provider_name=provider_name
             )
         return Registration(
             agent_ids=agent_ids,
-            session_token=issue_session_token(sdk_client_id, self.settings.token_signing_secret),
+            session_token=issue_session_token(public_key, self.settings.token_signing_secret),
         )
 
     async def claim_work(
@@ -247,9 +245,11 @@ class Souk:
         Everything security-relevant happens here:
 
         - the session token is verified (`InvalidRegistration` if not),
-        - requested agent_ids are filtered down to ones this token's holder
-          actually owns, because a valid token for one provider must not be
-          usable to claim another's agents,
+          yielding the public key it was issued to — the provider's whole
+          identity,
+        - requested agent_ids are filtered down to ones that key actually
+          owns, because a valid token for one provider must not be usable to
+          claim another's agents,
         - and the agents it does own are marked as seen, which is how any
           provider — in-process or remote — stays online at all.
 
@@ -259,22 +259,22 @@ class Souk:
         `wait_seconds > 0` long-polls: returns as soon as work arrives for
         one of these agents rather than after a fixed sleep.
         """
-        sdk_client_id = verify_session_token(session_token, self.settings.token_signing_secret)
-        if sdk_client_id is None:
+        public_key = verify_session_token(session_token, self.settings.token_signing_secret)
+        if public_key is None:
             raise InvalidRegistration("missing or invalid session token")
 
         async with self.session() as session:
-            owned = await repo.get_agent_ids_for_sdk_client(session, sdk_client_id)
+            owned = await repo.get_agent_ids_for_public_key(session, public_key)
         allowed = [agent_id for agent_id in agent_ids if agent_id in owned]
         if len(allowed) != len(agent_ids):
             logger.warning(
-                "claim_work: sdk_client_id=%s asked for unowned agent id(s): %s",
-                sdk_client_id,
+                "claim_work: provider %s asked for agent id(s) it does not own: %s",
+                public_key,
                 sorted(set(agent_ids) - owned),
             )
 
         runs = self.broker.claim(
-            allowed, claimed_by=sdk_client_id, cancel_notify=on_cancel, max_claim=max_claim
+            allowed, claimed_by=public_key, cancel_notify=on_cancel, max_claim=max_claim
         )
         if not runs and wait_seconds > 0 and max_claim != 0:
             event = self.broker.subscribe_wake(allowed)
@@ -285,7 +285,7 @@ class Souk:
             finally:
                 self.broker.unsubscribe_wake(allowed, event)
             runs = self.broker.claim(
-                allowed, claimed_by=sdk_client_id, cancel_notify=on_cancel, max_claim=max_claim
+                allowed, claimed_by=public_key, cancel_notify=on_cancel, max_claim=max_claim
             )
 
         async with self.session() as session:
@@ -311,7 +311,7 @@ class Souk:
         to wait on souk's persistence — the run's pipeline does that, in
         order, on its own task.
 
-        `claimed_by` is the reporting provider's sdk_client_id, checked against
+        `claimed_by` is the reporting provider's public key, checked against
         the identity that actually claimed this run. Holding an authenticated
         connection is not the same as holding *this run*: without this, any
         connected provider could push events into any run_id it could guess.
@@ -368,21 +368,22 @@ class Souk:
         """Run a provider in this process.
 
         A provider, not an agent: `provider_id` is the identity that
-        registered (the `sdk_client_id` of `register_agents`), and
-        `agent_ids` are which of its agents it is here to serve. One object serving several agents is the ordinary case, not a
+        registered — its Ed25519 **public key** (hex), which is the only id a
+        provider has — and `agent_ids` are which of its agents it is here to
+        serve. One object serving several agents is the ordinary case, not a
         special one, which is why the port hands it the `agent_id` of each
         run and lets it route (see souk/providers.py).
 
         Deliberately *not* a shortcut past registration, in either
         direction:
 
-        - every agent_id must be one this provider_id actually registered.
-          Attaching used to derive the provider from the agent, which meant
-          there was nothing to check — the answer was whatever the agent row
-          said. Declaring the identity first is what makes it checkable, and
-          `AgentNotFound` is raised for an id this provider does not own.
+        - every agent_id must be one this key actually registered. Attaching
+          used to derive the provider from the agent, which meant there was
+          nothing to check — the answer was whatever the agent row said.
+          Declaring the identity first is what makes it checkable, and
+          `AgentNotFound` is raised for an id this key does not own.
         - the worker souk starts claims over the same `claim_work` a remote
-          provider calls, with a real session token scoped to `provider_id`,
+          provider calls, with a real session token issued to that same key,
           subject to the same ownership filtering. Sharing a process with
           souk is not a reason to be trusted, and is no longer a reason to
           take a different path.
@@ -409,7 +410,7 @@ class Souk:
                 "nothing for it to claim"
             )
         async with self.session() as session:
-            owned = await repo.get_agent_ids_for_sdk_client(session, provider_id)
+            owned = await repo.get_agent_ids_for_public_key(session, provider_id)
         unowned = [agent_id for agent_id in agent_ids if agent_id not in owned]
         if unowned:
             raise AgentNotFound(
@@ -457,11 +458,12 @@ class Souk:
                 await repo.mark_agent_offline(session, agent_id, self.settings.online_window_seconds)
 
     def _issue_worker_token(self, provider_id: str) -> str:
-        """The token an in-process provider's worker claims with. souk mints
-        it for the identity that registered rather than exempting in-process
-        providers from carrying one, so `claim_work`'s ownership filtering
-        applies to them unchanged — an attached provider cannot claim another
-        provider's work any more than a remote one can."""
+        """The token an in-process provider's worker claims with — issued to
+        its public key, exactly like a remote provider's. souk mints it here
+        rather than exempting in-process providers from carrying one, so
+        `claim_work`'s ownership filtering applies to them unchanged: an
+        attached provider cannot claim another's work any more than a remote
+        one can."""
         return issue_session_token(provider_id, self.settings.token_signing_secret)
 
     async def list_agents(self) -> list[dict[str, Any]]:

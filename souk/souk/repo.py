@@ -85,7 +85,6 @@ async def upsert_provider_name(session: AsyncSession, public_key: str, display_n
 
 async def register_agents(
     session: AsyncSession,
-    sdk_client_id: str,
     public_key: str,
     agents_batch: list[dict[str, Any]],
     provider_name: str | None = None,
@@ -135,7 +134,6 @@ async def register_agents(
         stmt = _upsert(session, agents).values(
             agent_id=agent_id,
             name=name,
-            sdk_client_id=sdk_client_id,
             public_key=public_key,
             agent_card=card,
             metadata=agent.get("metadata", {}),
@@ -147,7 +145,6 @@ async def register_agents(
         stmt = stmt.on_conflict_do_update(
             index_elements=[agents.c.agent_id],
             set_={
-                "sdk_client_id": stmt.excluded.sdk_client_id,
                 "agent_card": stmt.excluded.agent_card,
                 "metadata": stmt.excluded.metadata,
                 "last_seen_at": now,
@@ -170,13 +167,18 @@ async def register_agents(
     return agent_ids
 
 
-async def get_agent_ids_for_sdk_client(session: AsyncSession, sdk_client_id: str) -> set[str]:
-    """Which agent_ids this token's holder actually owns — used to stop a
-    valid token for one provider being used to poll for another provider's
-    agent ids in souk.grpc_server.PollForWork.
+async def get_agent_ids_for_public_key(session: AsyncSession, public_key: str) -> set[str]:
+    """Which agent_ids this key actually owns — what stops a valid token for
+    one provider being used to claim another's work (see Souk.claim_work).
+
+    By public_key because that is what ownership *is* here: agent_id is
+    assigned per (public_key, name) and de-listing sweeps by public_key. This
+    used to filter on a self-declared `sdk_client_id` instead, which two
+    unrelated keypairs could pick the same value for — and then each could
+    claim the other's runs, measured, not theorised.
     """
     rows = (
-        await session.execute(select(agents.c.agent_id).where(agents.c.sdk_client_id == sdk_client_id))
+        await session.execute(select(agents.c.agent_id).where(agents.c.public_key == public_key))
     ).scalars().all()
     return set(rows)
 

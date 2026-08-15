@@ -105,25 +105,27 @@ class Worker:
         self.max_claim = max_claim
         self._in_flight: dict[str, asyncio.Task] = {}
         self._loop_task: asyncio.Task | None = None
-        self.sdk_client_id = self._identify()
+        self.public_key = self._identify()
 
     def _identify(self) -> str:
-        """Who this worker reports as. Every event it pushes is checked
-        against the identity that claimed the run (see Souk.report_event), so
-        this is load-bearing, not decoration."""
-        sdk_client_id = verify_session_token(
+        """Which provider this worker is — the public key its token was
+        issued to. Every event it pushes is checked against the identity that
+        claimed the run (see Souk.report_event), so this is load-bearing, not
+        decoration, and it is read back out of the token rather than taken on
+        trust from whoever constructed the worker."""
+        public_key = verify_session_token(
             self.session_token, self.souk.settings.token_signing_secret
         )
-        if sdk_client_id is None:
+        if public_key is None:
             raise InvalidRegistration("worker: missing or invalid session token")
-        return sdk_client_id
+        return public_key
 
     # ---- Lifecycle
 
     def start(self) -> None:
         if self._loop_task is None or self._loop_task.done():
             self._loop_task = self.souk.spawn(
-                self.run_forever(), name=f"worker:{self.sdk_client_id}"
+                self.run_forever(), name=f"worker:{self.public_key}"
             )
 
     def stop(self) -> None:
@@ -186,12 +188,12 @@ class Worker:
                 # token it cannot fix would be a busy loop, and a silent one.
                 try:
                     self.session_token = self.renew_token()
-                    self.sdk_client_id = self._identify()
+                    self.public_key = self._identify()
                 except Exception:
-                    logger.exception("worker %s: could not renew its token", self.sdk_client_id)
+                    logger.exception("worker %s: could not renew its token", self.public_key)
                     await asyncio.sleep(settings.worker_poll_interval_seconds)
             except Exception:
-                logger.exception("worker %s: claim loop failed; retrying", self.sdk_client_id)
+                logger.exception("worker %s: claim loop failed; retrying", self.public_key)
                 await asyncio.sleep(self.souk.settings.worker_poll_interval_seconds)
 
     def _capacity(self) -> int | None:
@@ -221,18 +223,18 @@ class Worker:
             # going to run.
             logger.warning(
                 "worker %s: claimed run %s for agent_id '%s', which it no longer serves",
-                self.sdk_client_id,
+                self.public_key,
                 run.run_id,
                 run.agent_id,
             )
-            self.souk.finish_run(run.run_id, claimed_by=self.sdk_client_id)
+            self.souk.finish_run(run.run_id, claimed_by=self.public_key)
             return
         try:
             # The provider routes: it is given the agent_id, because one
             # provider serving several agents is ordinary (see
             # souk/providers.py) and RunAgentInput carries no agent identity.
             async for event in self.provider.run_stream(run.agent_id, run.run_input):
-                self.souk.report_event(run.run_id, event, claimed_by=self.sdk_client_id)
+                self.souk.report_event(run.run_id, event, claimed_by=self.public_key)
         except asyncio.CancelledError:
             logger.info("run %s: agent stopped", run.run_id)
             raise
@@ -243,7 +245,7 @@ class Worker:
             # cancellation, where an `await` here would be interrupted before
             # it ever reached souk and the run would hang until the stall
             # sweep noticed.
-            self.souk.finish_run(run.run_id, claimed_by=self.sdk_client_id)
+            self.souk.finish_run(run.run_id, claimed_by=self.public_key)
 
     def notify_cancel(self, run_id: str) -> None:
         """souk is asking for this run to stop. This worker complies, by

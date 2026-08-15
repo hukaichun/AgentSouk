@@ -52,13 +52,15 @@ def sign(private_key: Ed25519PrivateKey, payload: bytes) -> str:
     return private_key.sign(payload).hex()
 
 
-def registration_signing_payload(sdk_client_id: str, agent_names: list[str], timestamp: int) -> bytes:
+def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
     # Must match souk.identity.registration_signing_payload exactly —
     # souk verifies this signature against the same canonical string.
     # `timestamp` (unix seconds) must be current — souk rejects anything
     # outside its freshness window, so a captured signed request can't be
     # replayed indefinitely (see souk.identity.SIGNATURE_FRESHNESS_WINDOW_SECONDS).
-    return f"{sdk_client_id}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+    # The identity is not in here: the signature is verified against the
+    # public key sent alongside, which is what ties this request to it.
+    return f"{','.join(sorted(agent_names))}:{timestamp}".encode()
 
 
 def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | None) -> str:

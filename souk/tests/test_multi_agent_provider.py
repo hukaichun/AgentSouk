@@ -42,25 +42,29 @@ class TwoAgentProvider:
         yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
-async def _register(souk, sdk_client_id: str, *names: str):
+async def _register(souk, *names: str):
+    """Registers a fresh provider identity, and hands back both halves a
+    caller needs afterwards: what souk issued, and the public key that *is*
+    this provider (what it attaches and claims as)."""
     key = Ed25519PrivateKey.generate()
+    public_key = key.public_key().public_bytes_raw().hex()
     timestamp = int(time.time())
-    return await souk.register_agents(
-        sdk_client_id,
-        key.public_key().public_bytes_raw().hex(),
-        key.sign(registration_signing_payload(sdk_client_id, list(names), timestamp)).hex(),
+    registration = await souk.register_agents(
+        public_key,
+        key.sign(registration_signing_payload(list(names), timestamp)).hex(),
         timestamp,
         [{"name": n} for n in names],
     )
+    return registration, public_key
 
 
 async def test_one_provider_serves_several_agents(souk):
-    registration = await _register(souk, "sdk_1", "translator", "summarizer")
+    registration, public_key = await _register(souk, "translator", "summarizer")
     translator = registration.agent_ids["translator"]
     summarizer = registration.agent_ids["summarizer"]
 
     provider = TwoAgentProvider()
-    await souk.attach_provider("sdk_1", provider, [translator, summarizer])
+    await souk.attach_provider(public_key, provider, [translator, summarizer])
 
     replies = {}
     for agent_id in (translator, summarizer):
@@ -79,7 +83,7 @@ async def test_the_run_input_itself_still_carries_no_agent_id(souk):
     """Documents why the parameter exists: AG-UI's schema has no field for
     it, and souk does not smuggle one in — RunAgentInput stays exactly what
     the protocol says it is."""
-    registration = await _register(souk, "sdk_1", "solo")
+    registration, public_key = await _register(souk, "solo")
     agent_id = registration.agent_ids["solo"]
     seen: dict = {}
 
@@ -93,7 +97,7 @@ async def test_the_run_input_itself_still_carries_no_agent_id(souk):
                 "runId": run_input["runId"],
             }
 
-    await souk.attach_provider("sdk_1", Recorder(), [agent_id])
+    await souk.attach_provider(public_key, Recorder(), [agent_id])
     handle = await souk.start_run(agent_id, {"messages": []})
     [_ async for _ in handle.events()]
 
@@ -105,10 +109,10 @@ async def test_a_provider_cannot_attach_an_agent_it_did_not_register(souk):
     """The check that only became possible once the identity is declared
     up front. Attaching used to derive the provider from the agent, so there
     was nothing to verify it against."""
-    mine = await _register(souk, "sdk_mine", "mine")
-    theirs = await _register(souk, "sdk_theirs", "theirs")
+    mine, _mine_key = await _register(souk, "mine")
+    theirs, _theirs_key = await _register(souk, "theirs")
 
     with pytest.raises(AgentNotFound):
         await souk.attach_provider(
-            "sdk_mine", TwoAgentProvider(), [mine.agent_ids["mine"], theirs.agent_ids["theirs"]]
+            _mine_key, TwoAgentProvider(), [mine.agent_ids["mine"], theirs.agent_ids["theirs"]]
         )

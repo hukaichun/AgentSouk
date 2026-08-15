@@ -40,7 +40,7 @@ def _kyok_headers(bearer: str, private_key, body: bytes) -> dict:
 
 async def _register_agent(session, new_identity, name: str = "greeter"):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": name}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": name}])
     return identity, agent_ids[name]
 
 

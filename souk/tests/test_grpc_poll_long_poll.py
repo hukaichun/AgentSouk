@@ -26,12 +26,12 @@ class _FakeContext:
 
 async def test_poll_for_work_returns_as_soon_as_a_run_is_enqueued(session, souk, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
     await session.commit()
     agent_id = agent_ids["greeter"]
 
     servicer = SoukAgentGatewayServicer(souk)
-    context = _FakeContext(issue_session_token("sdk_1", "test-signing-secret"))
+    context = _FakeContext(issue_session_token(identity.public_key, "test-signing-secret"))
     request = souk_pb2.PollRequest(agent_ids=[agent_id], wait_seconds=10)
 
     async def enqueue_soon() -> None:
@@ -52,12 +52,12 @@ async def test_poll_for_work_returns_as_soon_as_a_run_is_enqueued(session, souk,
 
 async def test_poll_for_work_returns_empty_after_wait_seconds_with_no_work(session, souk, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
     await session.commit()
     agent_id = agent_ids["greeter"]
 
     servicer = SoukAgentGatewayServicer(souk)
-    context = _FakeContext(issue_session_token("sdk_1", "test-signing-secret"))
+    context = _FakeContext(issue_session_token(identity.public_key, "test-signing-secret"))
     request = souk_pb2.PollRequest(agent_ids=[agent_id], wait_seconds=1)
 
     response = await servicer.PollForWork(request, context)

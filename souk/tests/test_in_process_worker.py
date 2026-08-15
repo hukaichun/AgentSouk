@@ -30,16 +30,20 @@ from souk.core import Souk
 from souk.identity import registration_signing_payload
 
 
-async def _register(souk, sdk_client_id: str, *names: str):
+async def _register(souk, *names: str):
+    """Registers a fresh provider identity, and hands back both halves a
+    caller needs afterwards: what souk issued, and the public key that *is*
+    this provider (what it attaches and claims as)."""
     key = Ed25519PrivateKey.generate()
+    public_key = key.public_key().public_bytes_raw().hex()
     timestamp = int(time.time())
-    return await souk.register_agents(
-        sdk_client_id,
-        key.public_key().public_bytes_raw().hex(),
-        key.sign(registration_signing_payload(sdk_client_id, list(names), timestamp)).hex(),
+    registration = await souk.register_agents(
+        public_key,
+        key.sign(registration_signing_payload(list(names), timestamp)).hex(),
         timestamp,
         [{"name": n} for n in names],
     )
+    return registration, public_key
 
 
 async def _until(predicate, timeout: float = 5.0) -> None:
@@ -65,7 +69,7 @@ async def test_a_local_agent_can_drive_a_run_with_no_transport(souk):
     """What this buys: an agent that is a plain object, no registration over
     HTTP, no AgentSession, no ports bound — and the same broker, handlers and
     persistence carrying it through as for a remote one."""
-    registration = await _register(souk, "sdk_local", "local")
+    registration, public_key = await _register(souk, "local")
     agent_id = registration.agent_ids["local"]
     seen: dict = {}
 
@@ -78,7 +82,7 @@ async def test_a_local_agent_can_drive_a_run_with_no_transport(souk):
             yield {"type": "TEXT_MESSAGE_END", "messageId": "m1"}
             yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
-    await souk.attach_provider("sdk_local", LocalProvider(), [agent_id])
+    await souk.attach_provider(public_key, LocalProvider(), [agent_id])
     handle = await souk.start_run(agent_id, {"messages": []})
 
     assert [e["type"] async for e in handle.events()] == [
@@ -105,7 +109,7 @@ async def test_max_claim_caps_what_an_in_process_provider_starts_at_once(brisk_s
     starting the moment they are enqueued (which is what an attached
     provider did, measured, because souk pushed rather than it claiming).
     """
-    registration = await _register(brisk_souk, "sdk_capped", "capped")
+    registration, public_key = await _register(brisk_souk, "capped")
     agent_id = registration.agent_ids["capped"]
 
     running = 0
@@ -132,7 +136,7 @@ async def test_max_claim_caps_what_an_in_process_provider_starts_at_once(brisk_s
             finally:
                 running -= 1
 
-    await brisk_souk.attach_provider("sdk_capped", SlowProvider(), [agent_id], max_claim=2)
+    await brisk_souk.attach_provider(public_key, SlowProvider(), [agent_id], max_claim=2)
 
     handles = [await brisk_souk.start_run(agent_id, {"messages": []}) for _ in range(5)]
     await _until(lambda: running == 2)
@@ -150,7 +154,7 @@ async def test_max_claim_caps_what_an_in_process_provider_starts_at_once(brisk_s
 async def test_an_unlimited_worker_starts_everything_it_is_given(brisk_souk):
     """The default is still unlimited, matching the remote SDK's — the
     change is that it is now a choice."""
-    registration = await _register(brisk_souk, "sdk_uncapped", "uncapped")
+    registration, public_key = await _register(brisk_souk, "uncapped")
     agent_id = registration.agent_ids["uncapped"]
 
     running = 0
@@ -170,7 +174,7 @@ async def test_an_unlimited_worker_starts_everything_it_is_given(brisk_souk):
             finally:
                 running -= 1
 
-    await brisk_souk.attach_provider("sdk_uncapped", SlowProvider(), [agent_id])
+    await brisk_souk.attach_provider(public_key, SlowProvider(), [agent_id])
     for _ in range(5):
         await brisk_souk.start_run(agent_id, {"messages": []})
 
@@ -182,7 +186,7 @@ async def test_one_worker_serves_several_agents_on_one_budget(brisk_souk):
     """One provider object hosting a translator and a summarizer, exactly
     like one SDK process registering a batch — so its capacity is a budget
     across both, not two independent ones."""
-    registration = await _register(brisk_souk, "sdk_pair", "translator", "summarizer")
+    registration, public_key = await _register(brisk_souk, "translator", "summarizer")
     translator = registration.agent_ids["translator"]
     summarizer = registration.agent_ids["summarizer"]
 
@@ -216,7 +220,7 @@ async def test_one_worker_serves_several_agents_on_one_budget(brisk_souk):
                 running -= 1
 
     await brisk_souk.attach_provider(
-        "sdk_pair", PairProvider(), [translator, summarizer], max_claim=1
+        public_key, PairProvider(), [translator, summarizer], max_claim=1
     )
 
     first = await brisk_souk.start_run(translator, {"messages": []})

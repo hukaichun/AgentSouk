@@ -163,13 +163,13 @@ class Run:
     # pause/resume round under the same run_id — see repo.reopen_run.
     round_starting_seq: int = 0
     pause_payload: dict[str, Any] | None = None
-    # The sdk_client_id of the worker that took this run, set by `claim`
+    # The public key of the provider that took this run, set by `claim`
     # in the same synchronous step that hands the input over. None until
     # someone takes it — which several places test for, since "never
     # claimed" and "claimed then cancelled" need different handling.
     #
     # Also what every reported event is checked against (see
-    # souk.core.report_event): a worker may only speak for runs it was
+    # souk.core.report_event): a provider may only speak for runs it was
     # actually given, and a connection alone is not evidence of that.
     claimed_by: str | None = None
     # How to *ask* the worker holding this run to stop — supplied by

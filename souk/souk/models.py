@@ -28,7 +28,6 @@ class AgentRegistration(BaseModel):
 
 
 class RegisterBatchRequest(BaseModel):
-    sdk_client_id: str
     agents: list[AgentRegistration]
     # Optional storefront label for this public_key, shown when
     # souk-directory groups agents by provider — see souk/schema.py's

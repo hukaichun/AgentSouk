@@ -30,8 +30,8 @@ async def test_registration_assigns_and_reuses_agent_id(session, new_identity):
     identity = new_identity()
     agents = [{"name": "greeter", "description": "hi"}]
 
-    first = await repo.register_agents(session, "sdk_1", identity.public_key, agents)
-    second = await repo.register_agents(session, "sdk_1", identity.public_key, agents)
+    first = await repo.register_agents(session, identity.public_key, agents)
+    second = await repo.register_agents(session, identity.public_key, agents)
 
     assert first["greeter"] == second["greeter"]
     assert first["greeter"].startswith("agent_")
@@ -42,8 +42,8 @@ async def test_different_identity_same_name_gets_distinct_agent_id(session, new_
     b = new_identity()
     agents = [{"name": "greeter"}]
 
-    result_a = await repo.register_agents(session, "sdk_a", a.public_key, agents)
-    result_b = await repo.register_agents(session, "sdk_b", b.public_key, agents)
+    result_a = await repo.register_agents(session, a.public_key, agents)
+    result_b = await repo.register_agents(session, b.public_key, agents)
 
     assert result_a["greeter"] != result_b["greeter"]
 
@@ -55,12 +55,12 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
     identity = new_identity()
     both = [{"name": "greeter"}, {"name": "translator"}]
 
-    ids = await repo.register_agents(session, "sdk_1", identity.public_key, both)
+    ids = await repo.register_agents(session, identity.public_key, both)
     translator_id = ids["translator"]
 
     # Re-register with translator omitted — the batch is the declarative
     # full statement of what this identity offers now.
-    await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
 
     row = (
         await session.execute(
@@ -73,7 +73,7 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
     assert names_after_delist == ["greeter"]
 
     # Reappearing in a later batch clears delisted_at again (self-heal).
-    await repo.register_agents(session, "sdk_1", identity.public_key, both)
+    await repo.register_agents(session, identity.public_key, both)
     row = (
         await session.execute(
             select(agents.c.delisted_at).where(agents.c.agent_id == translator_id)
@@ -86,7 +86,7 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
 
 async def test_list_agents_excludes_stale_and_reports_online(session, souk, new_identity):
     identity = new_identity()
-    await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
 
     listed = await _listed(session, souk)
     assert len(listed) == 1
@@ -104,8 +104,7 @@ async def test_list_agents_excludes_stale_and_reports_online(session, souk, new_
 
 async def test_list_agents_reports_public_key_and_provider_name(session, souk, new_identity):
     identity = new_identity()
-    await repo.register_agents(
-        session, "sdk_1", identity.public_key, [{"name": "greeter"}], provider_name="Ada's Stall"
+    await repo.register_agents(session, identity.public_key, [{"name": "greeter"}], provider_name="Ada's Stall"
     )
 
     listed = await _listed(session, souk)
@@ -115,17 +114,16 @@ async def test_list_agents_reports_public_key_and_provider_name(session, souk, n
 
 async def test_provider_name_defaults_to_none_and_is_sticky_across_registrations(session, souk, new_identity):
     identity = new_identity()
-    await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
     assert (await _listed(session, souk))[0]["provider_name"] is None
 
-    await repo.register_agents(
-        session, "sdk_1", identity.public_key, [{"name": "greeter"}], provider_name="Ada's Stall"
+    await repo.register_agents(session, identity.public_key, [{"name": "greeter"}], provider_name="Ada's Stall"
     )
     assert (await _listed(session, souk))[0]["provider_name"] == "Ada's Stall"
 
     # A later registration that doesn't pass provider_name at all must not
     # blank out the name a previous one set.
-    await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "greeter"}])
+    await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
     assert (await _listed(session, souk))[0]["provider_name"] == "Ada's Stall"
 
 
@@ -133,9 +131,9 @@ async def test_resolve_agents_by_name_zero_one_many(session, new_identity):
     assert await repo.resolve_agents_by_name(session, "nobody") == []
 
     a = new_identity()
-    await repo.register_agents(session, "sdk_1", a.public_key, [{"name": "greeter"}])
+    await repo.register_agents(session, a.public_key, [{"name": "greeter"}])
     assert len(await repo.resolve_agents_by_name(session, "greeter")) == 1
 
     b = new_identity()
-    await repo.register_agents(session, "sdk_2", b.public_key, [{"name": "greeter"}])
+    await repo.register_agents(session, b.public_key, [{"name": "greeter"}])
     assert len(await repo.resolve_agents_by_name(session, "greeter")) == 2

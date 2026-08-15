@@ -141,12 +141,10 @@ class Identity:
         }
         return jwt.encode(payload, self._key, algorithm="EdDSA")
 
-    def register_body(self, sdk_client_id: str, agents: list[dict]) -> dict:
+    def register_body(self, agents: list[dict]) -> dict:
         timestamp = int(time.time())
-        names = [a["name"] for a in agents]
-        payload = registration_signing_payload(sdk_client_id, names, timestamp)
+        payload = registration_signing_payload([a["name"] for a in agents], timestamp)
         return {
-            "sdk_client_id": sdk_client_id,
             "public_key": self.public_key,
             "signature": self._key.sign(payload).hex(),
             "timestamp": timestamp,
