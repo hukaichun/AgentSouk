@@ -3,6 +3,13 @@ name = "souk-server"
 version = "0.1.0"
 description = "The reference souk gateway: AG-UI + A2A over HTTP, and the gRPC relay providers connect out to"
 requires-python = ">=3.12"
+# Not for an index. This package depends on a sibling in this repo by bare
+# name (souk), resolvable only through the [tool.uv.sources] path below —
+# uploaded anywhere, that name would resolve to whatever a stranger has
+# published under it. PyPI refuses an unrecognised classifier, which is what
+# makes this line a guard rather than a comment. Remove it when souk is
+# genuinely published and this can name a real version.
+classifiers = ["Private :: Do Not Upload"]
 # This is where every I/O decision lives — which framework, which port,
 # which TLS story — and why it is a separate distribution rather than an
 # extra of `souk`: core cannot grow a uvicorn import without someone

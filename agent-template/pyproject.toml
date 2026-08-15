@@ -3,6 +3,13 @@ name = "agent-template"
 version = "0.1.0"
 description = "Minimal reference souk provider: the smallest possible souk_agent_sdk.AgentHandle implementation, with no framework baggage. Copy this to start a new provider — see providers/ for fuller examples (MCP tools, sub-agents, multiple LLM backends)."
 requires-python = ">=3.12"
+# Not for an index. This package depends on a sibling in this repo by bare
+# name (souk-agent-sdk), resolvable only through the [tool.uv.sources] path below —
+# uploaded anywhere, that name would resolve to whatever a stranger has
+# published under it. PyPI refuses an unrecognised classifier, which is what
+# makes this line a guard rather than a comment. Remove it when souk-agent-sdk is
+# genuinely published and this can name a real version.
+classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "souk-agent-sdk",
 ]
