@@ -876,8 +876,7 @@ cheapest possible moment to make these changes.
     (`souk/worker.py`) rather than called by core. `assign_provider` is gone.
 - **`sdk_client_id` is gone**, everywhere: out of `POST /agents/register`'s
   body, out of `Souk.register_agents`, out of the session token (which now
-  carries the `public_key`), and out of the `agents` table via a
-  dialect-branched migration. A provider's identity is its keypair — see "A
+  carries the `public_key`), and out of the `agents` table. A provider's identity is its keypair — see "A
   provider is its key" above for the two things that were measured before
   removing it.
 - `SoukAgentClient` is now **`SoukProvider`**, and loses its `sdk_client_id`
@@ -887,9 +886,14 @@ cheapest possible moment to make these changes.
   one. Agents are still declared as `AgentHandle(name, run_stream)` and are
   still the plain AG-UI shape — the provider does the routing, which is where
   it belongs when one identity serves several agents.
-- `thread_history.status` gains `cancelling`, via a migration that is
-  dialect-branched (Postgres re-adds the CHECK in place; SQLite cannot alter
-  a constraint, so batch mode rebuilds the table).
+- `thread_history.status` gains `cancelling`.
+- **The migration chain is one revision again.** The baseline plus the three
+  changes made within days of it were collapsed: souk has never been
+  released, and a baseline that creates a column a later revision deletes
+  costs more in confusion than the history is worth. A database created by
+  the old chain has to be recreated — its `alembic_version` names a revision
+  that no longer exists. Verified by building the schema both ways and
+  comparing every column, constraint and index on both backends.
 
 ## KYOK splits the same way, for a structural reason
 
