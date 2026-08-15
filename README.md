@@ -88,7 +88,7 @@ uv run agent-template
 curl https://souk.example.com/agents
 ```
 
-The in-tree `docker compose up --build` still assembles a full local demo stack (gateway + database + example agents + directory UI) while `souk-server/` remains in this tree — see its row in the structure table below.
+The full local demo stack (gateway + database + example agents + directory UI) lives with the gateway, in AgentSoukServer — this repo's own `docker compose` carries only a Postgres for running the test suites.
 
 ---
 
@@ -145,7 +145,6 @@ Modular, independent distributions — no shared workspace, each stands alone:
 | [`providers/`](providers/) | Fuller provider examples (Pydantic-AI agent with MCP tools & sub-agent delegation) |
 | [`proto/souk.proto`](proto/souk.proto) | The current gRPC relay's wire contract, kept as the record of the worker-channel semantics the WebSocket framing re-encodes |
 | [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
-| [`souk-server/`](souk-server/) | ⚠️ **Extracted.** The reference gateway now lives in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer) and evolves there; this in-tree copy remains only until its removal lands, so the compose demo keeps working meanwhile. New serving work does not happen here |
 
 ---
 
@@ -173,7 +172,7 @@ cd souk-agent-sdk && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
 
 Schema changes are Alembic revisions under [`souk/alembic/`](souk/alembic/) — `uv run alembic upgrade head` is a deploy-time DDL step, deliberately separate from anything a running gateway does (see `CONTRIBUTING.md`).
 
-To see code running against a real gateway, use the in-tree compose stack (while it lasts) or a checkout of AgentSoukServer.
+To see code running against a real gateway, use a checkout of [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer) — its README is the gateway quick start.
 
 ---
 

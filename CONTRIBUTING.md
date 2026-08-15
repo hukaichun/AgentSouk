@@ -14,14 +14,17 @@ independently:
 
 ```bash
 cd souk && uv sync --group dev
-cd souk-server && uv sync --group dev   # path-depends on souk
 cd souk-agent-sdk && uv sync --group dev
 cd agent-template && uv sync   # path-depends on souk-agent-sdk
 ```
 
-If you touch `proto/souk.proto`, regenerate both packages' gRPC stubs from
-the repo root before doing anything else — see README's
-[Regenerating gRPC stubs](README.md#regenerating-grpc-stubs):
+(The serving layer is not in this tree: the reference gateway lives in
+[AgentSoukServer](https://github.com/hukaichun/AgentSoukServer), which
+consumes `souk` through a submodule. Network-facing changes belong there
+— see issue #27 for the boundary.)
+
+If you touch `proto/souk.proto`, regenerate the SDK's gRPC stubs from
+the repo root before doing anything else:
 
 ```bash
 uv sync --group dev
@@ -30,27 +33,20 @@ uv run bash scripts/gen_proto.sh
 
 ## Running the tests
 
-Two subprojects have suites. `souk/tests/` holds nearly all of the business
-logic (registration/identity, claiming, routing, offline handling) and needs
-no stubs and no web framework — souk depends on neither. `souk-server/tests/`
-covers what only exists once there is a socket: the HTTP surfaces, the gRPC
-servicer, and the KYOK endpoints.
+`souk/tests/` holds nearly all of the business logic (registration/
+identity, claiming, routing, offline handling) and needs no stubs and no
+web framework — souk depends on neither. What only exists once there is a
+socket — the HTTP surfaces, the relay, the KYOK endpoints — is tested in
+AgentSoukServer's own suite.
 
-Both run against **SQLite by default**, with no database to stand up first —
-souk's schema and queries are dialect-neutral (see `souk/schema.py` and
-`souk/repo.py`), so the same suites exercise the same semantics on either
-backend. The schema itself is applied by `souk`'s alembic either way, which
-is why souk-server's tests reach across to `souk/alembic.ini`.
+The suite runs against **SQLite by default**, with no database to stand up
+first — souk's schema and queries are dialect-neutral (see `souk/schema.py`
+and `souk/repo.py`), so it exercises the same semantics on either backend.
 
 ```bash
 cd souk
 uv sync --group dev
 uv run pytest -v                 # SQLite, zero config
-
-cd ../souk-server
-uv sync --group dev
-uv run bash ../scripts/gen_proto.sh souk_server/grpc_gen
-uv run pytest -v
 ```
 
 To run the exact same suite against Postgres, export a DSN first (the
@@ -60,7 +56,6 @@ To run the exact same suite against Postgres, export a DSN first (the
 docker compose up paradedb -d    # or point at any local Postgres
 export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
 (cd souk && uv run pytest -v)
-(cd souk-server && uv run pytest -v)
 ```
 
 `conftest.py` supplies a throwaway SQLite file and a test signing secret
@@ -74,9 +69,10 @@ which defaults to a local SQLite file.
 The test suite applies `souk/alembic/` itself (see `tests/conftest.py`'s
 `_schema` fixture) — no separate migration step needed for tests. A real
 deployment runs `uv run alembic upgrade head` before starting the server
-(see `docker-compose.yml`'s `souk-migrate` service). If you change the
-schema, add a new revision under `souk/alembic/versions/` rather than
-editing the initial one — `uv run alembic revision -m "..."` from `souk/`.
+(see AgentSoukServer's compose, whose `souk-migrate` service is exactly
+that step). If you change the schema, add a new revision under
+`souk/alembic/versions/` rather than editing the initial one —
+`uv run alembic revision -m "..."` from `souk/`.
 
 `souk-directory/` has no test suite (static TS/HTML, no backend logic to
 unit test) — `npm run build` failing on a type error is its CI check.
@@ -86,8 +82,11 @@ before a PR merges.
 
 ## Where a change belongs
 
-- Gateway/relay behavior (routing, identity, run dispatch, persistence) →
-  `souk/`.
+- Domain behavior (routing, identity, run dispatch, persistence, protocol
+  translation) → `souk/`.
+- Anything that needs a socket — endpoints, transports, TLS, wire framing
+  → the [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)
+  repo, not here (issue #27).
 - The agent-side polling/dispatch client, or the A2A sub-agent-calling
   helper → `souk-agent-sdk/`.
 - A caller-side convenience wrapper → `souk-client-sdk/`.

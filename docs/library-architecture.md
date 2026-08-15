@@ -41,7 +41,8 @@ souk/souk/            # the library. Network-free.
   worker.py           #   the loop that claims work and drives a provider
   repo.py schema.py   #   the database, and the only thing core knows about
   protocols/          #   ② agui, a2a, kyok — pure translation, no I/O
-souk-server/souk_server/   # ③ the reference gateway, a separate distribution
+souk_server/          # ③ the reference gateway — its own repository
+                      #   (AgentSoukServer), consuming souk via a submodule
   server.py           #   process bootstrap, CORS, TLS, both listeners
   api_*.py deps.py    #   FastAPI wiring of souk.protocols, and the models
   grpc_server.py      #   the worker channel (the NAT-traversal relay).
@@ -57,10 +58,12 @@ matter of discipline. A test enforces it too (see souk/tests/
 test_core_is_network_free.py) — packaging protects against the accident, not
 against someone adding the dependency back on purpose.
 
-`souk-server` is a sibling subproject like `souk-agent-sdk` and
-`souk-client-sdk`, not an extra of `souk`. A separate distribution makes the
-boundary impossible to erode by accident: core cannot grow a `uvicorn`
-import without someone noticing they're in the wrong package.
+The gateway is not an extra of `souk` — it began as a sibling subproject
+here and is now its own repository entirely (AgentSoukServer, which pins
+this one as a submodule). A separate distribution makes the boundary
+impossible to erode by accident: core cannot grow a `uvicorn` import
+without someone noticing they're in the wrong package. A separate repo
+goes further — network design cannot even *originate* here (issue #27).
 
 ## The core object
 
@@ -77,7 +80,7 @@ await souk.aclose()         # stop what start() started, release the pool
 it is at against the one this code was built for, and whether the background
 half is running — reported as facts, because "the process is alive" and "it
 can serve" are different questions and only the caller knows which it is
-asking. souk-server maps them onto `/healthz` (answers from nothing, so a
+asking. The gateway maps them onto `/healthz` (answers from nothing, so a
 database blip cannot restart every replica) and `/readyz` (503 when not
 ready). Both are unauthenticated, so `Health` carries no connection string
 and no driver message — only the exception's type name.
@@ -129,7 +132,7 @@ None of these describe a network. The signing secret is the one arguable
 case, and it stays in core because issuing a token is part of registering an
 agent — a domain act — not part of serving a port.
 
-**`souk-server`** — every field that only means something once there is a
+**The gateway (AgentSoukServer)** — every field that only means something once there is a
 socket: `http_host`, `http_port`, `cors_allow_origins`, the
 `*_tls_cert_path` / `*_tls_key_path` values, and (until the worker channel
 moves onto the HTTP app) `grpc_host` / `grpc_port`. Which of these exist is
@@ -215,8 +218,9 @@ a `.proto`, generated stubs and a build step to produce them — is being
 removed in favour of one WebSocket on the app that already exists. Core is
 untouched by that, which is the test of whether this boundary was real: the
 worker loop, the ownership checks, the long-poll wait and the cancel
-notification are all the same calls afterwards. The landing is `souk-server`
-and `souk-agent-sdk`'s job, tracked separately from this document.
+notification are all the same calls afterwards. The landing is the
+AgentSoukServer gateway's and `souk-agent-sdk`'s job, tracked separately
+from this document.
 
 Three properties follow, and each replaces something the previous port needed
 a mechanism for:
@@ -928,13 +932,14 @@ a different hop entirely — provider-to-souk work claiming, which A2A has no
 concept of — and its envelopes carry opaque `json_payload`, so it duplicates
 no A2A type.
 
-## What `souk-server` is
+## What the gateway is
 
 The reference gateway, assembled from the above and owning every I/O
 decision: reads `SOUK_*` env vars into `CoreSettings` + its own
 `ServingSettings`, applies CORS, binds its listeners, terminates TLS, runs
 the relay. Behaviour is what the `souk-server` console script always did;
-what changed is which distribution it ships in.
+what changed is where it ships: first a sibling distribution in this repo,
+now its own repository — AgentSoukServer, where all serving design lives.
 
 It is also where the worker channel lives — outbound-only NAT traversal is
 souk's headline capability, but architecturally it is a transport, so it
@@ -1072,7 +1077,7 @@ class LLMBridge(Protocol):
 ```
 
 - **in-process** — call a local LLM client directly; no HTTP anywhere
-- **HTTP** (`souk-server`) — today's three `/kyok/*` endpoints
+- **HTTP** (the gateway) — today's three `/kyok/*` endpoints
 
 Token minting/verifying (`kyok.py`) is core: it signs with
 `token_signing_secret`, which core already holds, and the `agent_id` it

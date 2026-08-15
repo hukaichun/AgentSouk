@@ -1,3 +1,10 @@
+# Library development only: a Postgres to run the suites against
+# (SQLite needs nothing at all — see CONTRIBUTING.md).
+#
+# The full demo stack — gateway + database + example agents + directory
+# UI — lives with the gateway, in the AgentSoukServer repository. This
+# compose deliberately carries no service that needs one: the serving
+# layer is not in this tree.
 services:
   paradedb:
     image: paradedb/paradedb:latest
@@ -15,147 +22,5 @@ services:
       timeout: 3s
       retries: 20
 
-  # One-shot: applies souk/alembic/ (DDL) against paradedb, then exits.
-  # Split out from the `souk` service below on purpose — souk itself never
-  # runs DDL at startup (see souk-server's server.py startup()), so a real
-  # deployment runs this step separately with DDL-capable credentials and
-  # gives the running server a DML-only role instead. Local dev reuses the
-  # same `souk` Postgres user for both here, for simplicity only.
-  souk-migrate:
-    # Same image tag as `souk` below (which shares this same build config)
-    # so Compose builds it once, not twice, under two different names.
-    image: agentsouk-souk
-    build:
-      context: .
-      dockerfile: souk-server/Dockerfile
-    # The schema belongs to souk (the library owns its tables), so this points
-    # alembic at souk's alembic.ini — but runs it from souk-server, because
-    # that is the only directory the image ran `uv sync` in. Running it from
-    # /app/souk instead makes `uv run` build a second environment at container
-    # start: a PyPI round-trip on every `up`, and a resolution that can differ
-    # from the one the server itself is running. `script_location` in that ini
-    # is `%(here)s/alembic`, so it still finds /app/souk/alembic.
-    working_dir: /app/souk-server
-    command: ["uv", "run", "alembic", "-c", "/app/souk/alembic.ini", "upgrade", "head"]
-    depends_on:
-      paradedb:
-        condition: service_healthy
-    environment:
-      SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
-      # Passes a host-exported SOUK_DB_SCHEMA through into the container —
-      # Compose does NOT forward arbitrary host env vars on its own, only
-      # ones a service's `environment:` explicitly references like this.
-      # Defaults to `public` (souk.db_schema's own default) if unset.
-      SOUK_DB_SCHEMA: ${SOUK_DB_SCHEMA:-public}
-
-  souk:
-    image: agentsouk-souk
-    build:
-      context: .
-      dockerfile: souk-server/Dockerfile
-    ports:
-      - "8000:8000"
-      - "50051:50051"
-    depends_on:
-      souk-migrate:
-        condition: service_completed_successfully
-    environment:
-      SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@paradedb:5432/souk
-      SOUK_PUBLIC_HTTP_URL: http://localhost:8000
-      # No default in souk.config for this one — a predictable JWT signing
-      # key is a real auth bypass. This value is only fine because it's
-      # this repo's own local-dev/demo stack; a real deployment must set
-      # its own via SOUK_TOKEN_SIGNING_SECRET (see README's Option B).
-      SOUK_TOKEN_SIGNING_SECRET: dev-insecure-change-me
-      # Must match souk-migrate's above — see that service's comment.
-      SOUK_DB_SCHEMA: ${SOUK_DB_SCHEMA:-public}
-
-  # Runs the pydantic-ai example provider (providers/pydantic-ai-agent) —
-  # see providers/README.md for other provider examples, and
-  # /agent-template for the minimal reference implementation this one
-  # builds on top of.
-  agent-demo:
-    build:
-      context: .
-      dockerfile: providers/pydantic-ai-agent/Dockerfile
-    depends_on:
-      - souk
-    volumes:
-      - ./providers/pydantic-ai-agent/config.example.yaml:/app/config.yaml:ro
-      # Without this, every rebuild/recreate of this container gets a
-      # fresh identity (see souk_agent_sdk/identity.py) — the *old* one's
-      # "souk-guide"/"translator" agent_ids are left behind as orphans (souk
-      # doesn't 409 a fresh key registering the same names, it just mints
-      # new, unrelated agent_ids for them — see souk/db.py's
-      # UNIQUE(public_key, name)), and a second "translator" existing makes
-      # the name-based route this demo's sub_agents config uses
-      # (/a2a/translator/rpc) ambiguous (409) instead of resolving to the
-      # live one. Persisting the key file is what makes
-      # `docker compose up --build` idempotent across restarts.
-      - agent_demo_identity:/data
-    environment:
-      SOUK_IDENTITY_KEY_PATH: /data/souk_identity.key
-      # config.example.yaml uses `model: custom-openai`, resolved by
-      # pydantic_ai_agent.main.resolve_model against these — point them at
-      # any OpenAI-compatible endpoint. Swap the model string to
-      # "anthropic:claude-..." etc. instead and use ANTHROPIC_API_KEY if
-      # you'd rather not run a custom endpoint.
-      LLM_BASE_URL: "${LLM_BASE_URL}"
-      LLM_MODEL_NAME: "${LLM_MODEL_NAME}"
-      LLM_API_KEY: "${LLM_API_KEY}"
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
-
-  # Human-browsable directory + chat UI for the `souk` service above — see
-  # souk-directory/README.md. Static output only (compiled TypeScript +
-  # HTML/CSS), no runtime dependency on souk beyond its public HTTP API.
-  souk-directory:
-    build:
-      context: souk-directory
-    ports:
-      - "8080:8080"
-    depends_on:
-      - souk
-
-  # Optional playground, off by default — see providers/openai-compat-agent/
-  # README.md. `docker compose --profile hermes-demo up` to bring both of
-  # these up alongside the services above.
-  hermes:
-    image: nousresearch/hermes-agent:latest
-    profiles: ["hermes-demo"]
-    command: ["gateway", "run"]
-    volumes:
-      - ./providers/openai-compat-agent/hermes-data:/opt/data
-    environment:
-      AZURE_FOUNDRY_BASE_URL: "${LLM_BASE_URL}"
-      AZURE_FOUNDRY_API_KEY: "${LLM_API_KEY}"
-      API_SERVER_ENABLED: "true"
-      API_SERVER_HOST: "0.0.0.0"
-      API_SERVER_PORT: "8642"
-      # Must be >=16 chars — Hermes's API server platform only activates
-      # if this looks like a real secret (see gateway/config.py's
-      # _has_usable_api_server_key), regardless of API_SERVER_ENABLED.
-      API_SERVER_KEY: "${HERMES_API_SERVER_KEY}"
-      API_SERVER_MODEL_NAME: "hermes"
-
-  openai-compat-demo:
-    build:
-      context: .
-      dockerfile: providers/openai-compat-agent/Dockerfile
-    profiles: ["hermes-demo"]
-    depends_on:
-      - souk
-      - hermes
-    volumes:
-      - ./providers/openai-compat-agent/config.hermes.yaml:/app/config.yaml:ro
-      # Same reasoning as agent_demo_identity above — without this, every
-      # restart mints a fresh identity and leaves the old "hermes"
-      # agent_id registration behind as an orphan.
-      - openai_compat_demo_identity:/data
-    environment:
-      SOUK_IDENTITY_KEY_PATH: /data/souk_identity.key
-      HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY}"
-
 volumes:
   paradedb_data:
-  agent_demo_identity:
-  openai_compat_demo_identity:

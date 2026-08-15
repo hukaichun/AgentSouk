@@ -7,7 +7,7 @@ rather than something baked into souk. That property is easy to state and
 easy to erode — one convenient import of `grpc` or `fastapi` in a core module
 and it is quietly gone — so it is asserted here rather than left to reviews.
 
-Since the serving layer moved out into the `souk-server` distribution, this
+Since the serving layer moved out to the AgentSoukServer repository, this
 is enforced twice over: by packaging (souk does not depend on fastapi,
 uvicorn, sse-starlette or grpcio, so an import would not even resolve) and by
 this test, which still runs because packaging protects against the accident
@@ -21,7 +21,7 @@ in a core module would now resolve perfectly well. Nothing but the assertion
 below stops it.
 
 If it fails, the fix is that whatever needed a transport type belongs in
-souk-server, or needs a port (souk/worker.py is the example: a worker reaches
+the serving repo, or needs a port (souk/worker.py is the example: a worker reaches
 core through plain method calls, so core never learns what carried them) so
 core can stay ignorant of it.
 """
@@ -51,8 +51,8 @@ FORBIDDEN_ROOTS = {
 
 def _core_modules() -> list[Path]:
     """Every module in the package. There is no allow-list any more: the
-    serving layer is a different distribution (souk-server), so nothing under
-    souk/ is exempt — including souk/protocols/, which is the code most
+    serving layer is a different repository (AgentSoukServer), so nothing
+    under souk/ is exempt — including souk/protocols/, which is the code most
     tempted to reach for a framework type and must not."""
     return sorted(
         path for path in SOUK_PACKAGE.rglob("*.py") if not path.name.startswith("__")
@@ -111,6 +111,6 @@ def test_no_transport_is_even_installable_as_a_dependency() -> None:
     )
     offenders = sorted(root for root in FORBIDDEN_ROOTS | {"sse-starlette"} if root in declared)
     assert not offenders, (
-        f"souk's own dependencies include {offenders}. Serving belongs in souk-server; "
-        "a transport listed here puts it one import away from core again."
+        f"souk's own dependencies include {offenders}. Serving belongs in the "
+        "AgentSoukServer repo; a transport listed here puts it one import away from core again."
     )
