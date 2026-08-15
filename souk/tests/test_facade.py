@@ -14,6 +14,7 @@ import asyncio
 import pytest
 
 from souk import repo
+from souk.core import Souk
 
 
 class EchoProvider:
@@ -235,3 +236,65 @@ async def test_resume_keeps_the_same_run_id(souk, new_identity):
 async def test_resume_an_unknown_run_is_an_error(souk):
     with pytest.raises(LookupError):
         await souk.resume_run("run_nope", {"messages": []})
+
+
+@pytest.fixture
+async def own_souk(settings):
+    """A souk this test owns and closes. The shared fixture is session-scoped,
+    and these tests start and stop background work."""
+    instance = Souk(settings)
+    try:
+        yield instance
+    finally:
+        await instance.aclose()
+
+
+async def test_start_reconciles_what_the_last_process_left_behind(own_souk, new_identity):
+    """Live dispatch state is in memory, so a run still queued or running in
+    the database when a process starts will never be picked up by anyone.
+    Saying so is the only honest thing to do with it."""
+    agent_id = await _register(own_souk, "echo", new_identity())
+    async with own_souk.session() as session:
+        thread_id = await repo.create_thread(session, agent_id)
+        stale = (await repo.create_run(session, thread_id, agent_id, "ag-ui", {"messages": []}))["run_id"]
+        await session.commit()
+
+    orphaned = await own_souk.start()
+
+    assert orphaned == [stale]
+    assert (await own_souk.get_run(stale))["status"] == "failed"
+
+
+async def test_start_runs_once_so_a_second_call_cannot_reap_live_work(own_souk, new_identity):
+    """Reconciliation is idempotent over rows from before the process, not
+    over a run created since. The serving layer used to call startup twice
+    on purpose; a run made in between would have been marked failed."""
+    agent_id = await _register(own_souk, "echo", new_identity())
+    await own_souk.start()
+
+    async with own_souk.session() as session:
+        thread_id = await repo.create_thread(session, agent_id)
+        fresh = (await repo.create_run(session, thread_id, agent_id, "ag-ui", {"messages": []}))["run_id"]
+        await session.commit()
+
+    assert await own_souk.start() == []
+    assert (await own_souk.get_run(fresh))["status"] == "queued"
+
+
+async def test_start_keeps_exactly_one_sweeper_and_aclose_stops_it(own_souk):
+    def sweepers():
+        return [t for t in own_souk._tasks if t.get_name() == "health-sweeps" and not t.done()]
+
+    await own_souk.start()
+    await own_souk.start()
+    assert len(sweepers()) == 1
+
+    await own_souk.aclose()
+    await _until(lambda: not sweepers())
+
+
+async def test_aclose_without_start_is_fine(own_souk):
+    """Nothing to stop is not an error — an embedder may never start the
+    background half at all. The fixture closes it; this asserts that doing
+    so without a start neither raises nor leaves anything running."""
+    assert not [t for t in own_souk._tasks if not t.done()]

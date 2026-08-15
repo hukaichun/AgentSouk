@@ -36,6 +36,7 @@ from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
 from souk.errors import AgentNotFound, InvalidRegistration
 from souk.handlers import make_handlers
+from souk.health import run_health_sweeps_forever
 from souk.identity import (
     is_timestamp_fresh,
     issue_session_token,
@@ -146,6 +147,10 @@ class Souk:
         self._workers: dict[str, Worker] = {}
         # Every background task this souk started — see spawn().
         self._tasks: set[asyncio.Task] = set()
+        # Whether start() has run. Not "is the sweeper alive": a second
+        # start() must not reconcile again (see start), so this records the
+        # act, not the state.
+        self._started = False
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
@@ -153,6 +158,48 @@ class Souk:
         `async with SessionLocal() as session:`."""
         async with self.sessionmaker() as session:
             yield session
+
+    # ---- Lifecycle
+
+    async def start(self) -> list[str]:
+        """Bring this souk up: reconcile what the last process left behind,
+        then keep the health sweeps running. Returns the run_ids it gave up
+        on, which it also logs.
+
+        The counterpart to `aclose`, and the reason it exists at all: live
+        dispatch state is in memory, so a run still `queued` or `running` in
+        the database when a process starts will never be picked up or
+        completed by anyone — nothing consults the database for work. Saying
+        so is the only honest thing to do with it.
+
+        **Runs once.** A second call is a no-op, which matters more than it
+        sounds: reconciliation is idempotent over rows from *before* the
+        process started, not over a run created since, and a second pass
+        would mark that one failed. The serving layer used to call this
+        twice on purpose — once before opening the gRPC port and again from
+        the ASGI lifespan — with a comment explaining why that was harmless.
+        It was harmless only because the window between the two was usually
+        empty.
+
+        Optional, and a library caller that skips it keeps working: runs
+        still dispatch. What it loses is the reconciliation above and every
+        health sweep — a stalled run stays `running` forever, and a run
+        queued for an agent that never comes back is never given up on.
+        """
+        if self._started:
+            return []
+        self._started = True
+        async with self.session() as session:
+            orphaned = await repo.fail_orphaned_runs(session)
+        if orphaned:
+            logger.warning(
+                "start: marked %d run(s) failed — still queued/running from before this "
+                "process, and souk's dispatch state does not survive a restart: %s",
+                len(orphaned),
+                orphaned,
+            )
+        self.spawn(run_health_sweeps_forever(self), name="health-sweeps")
+        return orphaned
 
     # ---- Background work
 
@@ -180,6 +227,9 @@ class Souk:
     async def aclose(self) -> None:
         """Stop everything this souk started, then release the database pool.
 
+        Safe whether or not `start` was ever called — there is simply less
+        to stop.
+
         Cancels in-flight background work and waits for it to unwind, so
         handlers get to finish their current statement rather than being
         killed mid-write. Runs still live at that point stay 'running' in the
@@ -187,6 +237,11 @@ class Souk:
         — souk's dispatch state is in-memory by design and does not survive a
         restart.
         """
+        # So a later start() is a real start rather than a silent no-op —
+        # the engine survives dispose (it refills its pool on demand), so
+        # start/aclose/start is a lifecycle someone will reasonably expect
+        # to work rather than to quietly do nothing.
+        self._started = False
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:

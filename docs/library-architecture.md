@@ -68,7 +68,21 @@ from souk import Souk, Settings
 
 souk = Souk(Settings(database_url="sqlite+aiosqlite:///./souk.db"))
 await souk.start()          # orphan cleanup + health sweeps
+...
+await souk.aclose()         # stop what start() started, release the pool
 ```
+
+`start` runs once: a second call is a no-op, and that is the point rather
+than a convenience. Reconciling orphans is idempotent over rows from before
+the process began, *not* over a run created since — so a second pass would
+mark that one failed. The serving layer used to call its own startup twice
+by design (once before opening the gRPC port, once from the ASGI lifespan)
+with a comment explaining why that was harmless; it was harmless only
+because the window between them was usually empty.
+
+Both halves are optional for an embedding caller — runs dispatch either way.
+What skipping `start` costs is exactly what it does: the reconciliation, and
+every health sweep after it.
 
 `Settings` is passed in, not read from the environment at import time. The
 engine and sessionmaker belong to the instance, so several souks can coexist
