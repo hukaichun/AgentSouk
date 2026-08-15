@@ -28,3 +28,7 @@ souk-directory/dist/
 
 .pytest_cache/
 
+
+# souk-directory: compiled output + npm deps, regenerate via `npm run build`.
+souk-directory/node_modules/
+souk-directory/dist/
