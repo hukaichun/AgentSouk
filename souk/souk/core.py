@@ -39,6 +39,7 @@ from souk.identity import (
     is_timestamp_fresh,
     issue_session_token,
     registration_signing_payload,
+    verify_session_token,
     verify_signature,
 )
 from souk.kyok import KyokBridge
@@ -210,6 +211,87 @@ class Souk:
             agent_ids=agent_ids,
             session_token=issue_session_token(sdk_client_id, self.settings.token_signing_secret),
         )
+
+    async def claim_work(
+        self,
+        session_token: str,
+        agent_ids: list[str],
+        *,
+        max_claim: int | None = None,
+        wait_seconds: float = 0,
+    ) -> list[Run]:
+        """A remote provider asking for work, and being told what it got.
+
+        The counterpart to `attach_provider`: an in-process agent is simply
+        present, a remote one has to come and claim. Both are the same
+        domain act — souk deciding this identity may run these agents — so
+        both belong here rather than in whichever transport happens to carry
+        the request. A second transport (WebSocket, say) implements framing
+        and calls this; it does not get to re-derive who owns what.
+
+        Everything security-relevant happens here:
+
+        - the session token is verified (`InvalidRegistration` if not),
+        - requested agent_ids are filtered down to ones this token's holder
+          actually owns, because a valid token for one provider must not be
+          usable to poll for another's agents,
+        - and the agents it does own are marked as seen, which is how a
+          remote provider stays online at all.
+
+        `max_claim=None` means unlimited; `0` explicitly means "no capacity
+        right now" and claims nothing — distinct from None, and a reason not
+        to hold the call open, since only the caller can change that.
+        `wait_seconds > 0` long-polls: returns as soon as work arrives for
+        one of these agents rather than after a fixed sleep.
+        """
+        sdk_client_id = verify_session_token(session_token, self.settings.token_signing_secret)
+        if sdk_client_id is None:
+            raise InvalidRegistration("missing or invalid session token")
+
+        async with self.session() as session:
+            owned = await repo.get_agent_ids_for_sdk_client(session, sdk_client_id)
+        allowed = [agent_id for agent_id in agent_ids if agent_id in owned]
+        if len(allowed) != len(agent_ids):
+            logger.warning(
+                "claim_work: sdk_client_id=%s asked for unowned agent id(s): %s",
+                sdk_client_id,
+                sorted(set(agent_ids) - owned),
+            )
+
+        runs = self.broker.poll(allowed, max_claim=max_claim)
+        if not runs and wait_seconds > 0 and max_claim != 0:
+            event = self.broker.subscribe_wake(allowed)
+            try:
+                await asyncio.wait_for(event.wait(), timeout=wait_seconds)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                self.broker.unsubscribe_wake(allowed, event)
+            runs = self.broker.poll(allowed, max_claim=max_claim)
+
+        async with self.session() as session:
+            for agent_id in allowed:
+                await repo.touch_agent(session, agent_id)
+        return runs
+
+    def assign_provider(self, run_id: str, provider: AgentProvider) -> bool:
+        """A provider says it is taking a run souk handed it.
+
+        The second half of `claim_work`: that decides *what* a provider may
+        take, this records *who* took a particular run, so the pipeline hands
+        that run's input to it. False if souk is no longer dispatching the
+        run — it finished or was given up on between being offered and being
+        taken, which is ordinary rather than an error.
+
+        Kept here, and not left as a transport poking the broker, for the
+        same reason as the rest: a second transport implements framing and
+        calls this.
+        """
+        run = self.broker.get(run_id)
+        if run is None:
+            return False
+        run.in_queue.put_nowait(Claim(provider))
+        return True
 
     async def attach_provider(self, agent_id: str, provider: AgentProvider) -> None:
         """Run an agent in this process.

@@ -31,9 +31,8 @@ from typing import TYPE_CHECKING, Any
 
 import grpc
 
-from souk import repo
-from souk.broker import Claim
 from souk.config import ServingSettings
+from souk.errors import InvalidRegistration
 from souk.grpc_gen import souk_pb2, souk_pb2_grpc
 from souk.identity import verify_session_token
 
@@ -43,18 +42,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger("souk.grpc")
 
 
-def _authenticate(context, signing_secret: str) -> str | None:
-    """Every gRPC call must present the bearer token issued at
-    /agents/register (see souk/identity.py) — returns its sdk_client_id,
-    or None if missing/invalid/expired. Defense in depth: PollForWork
-    additionally filters requested agent_ids down to ones this
-    sdk_client_id actually owns (see repo.get_agent_ids_for_sdk_client),
-    since a token alone doesn't say *which* names its holder controls.
-    """
+def _bearer(context) -> str:
+    """The session token off the call's metadata, empty if absent. Verifying
+    it is core's job (Souk.claim_work); lifting it out of gRPC metadata is
+    this file's."""
     for key, value in context.invocation_metadata() or ():
         if key == "authorization":
-            return verify_session_token(value, signing_secret)
-    return None
+            return value
+    return ""
+
+
+def _authenticate(context, signing_secret: str) -> str | None:
+    """AgentSession's own check: returns the sdk_client_id, or None if the
+    token is missing/invalid/expired. Defense in depth — PollForWork
+    additionally filters requested agent_ids down to ones this holder really
+    owns, since a token alone doesn't say *which* agents it controls."""
+    token = _bearer(context)
+    return verify_session_token(token, signing_secret) if token else None
 
 
 class GrpcProvider:
@@ -149,47 +153,22 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
         self._souk = souk
 
     async def PollForWork(self, request, context):
-        souk = self._souk
-        sdk_client_id = _authenticate(context, souk.settings.token_signing_secret)
-        if sdk_client_id is None:
-            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
-
-        requested_ids = list(request.agent_ids)
-        async with souk.session() as session:
-            owned_ids = await repo.get_agent_ids_for_sdk_client(session, sdk_client_id)
-        agent_ids = [agent_id for agent_id in requested_ids if agent_id in owned_ids]
-        if len(agent_ids) != len(requested_ids):
-            logger.warning(
-                "PollForWork: sdk_client_id=%s requested unowned agent id(s): %s",
-                sdk_client_id,
-                sorted(set(requested_ids) - owned_ids),
+        """Framing only. Who may claim what, filtering to owned agents, the
+        long-poll wait and marking agents seen are all one domain act, and
+        live on Souk.claim_work — so a second transport implements framing
+        rather than re-deriving any of it (see souk/core.py)."""
+        try:
+            runs = await self._souk.claim_work(
+                _bearer(context),
+                list(request.agent_ids),
+                max_claim=request.max_claim if request.HasField("max_claim") else None,
+                wait_seconds=request.wait_seconds if request.HasField("wait_seconds") else 0,
             )
-
-        max_claim = request.max_claim if request.HasField("max_claim") else None
-        runs = souk.broker.poll(agent_ids, max_claim=max_claim)
-
-        wait_seconds = request.wait_seconds if request.HasField("wait_seconds") else 0
-        # No point holding the call open when the caller explicitly
-        # reported zero spare capacity (max_claim=0) — nothing souk-side
-        # will change that; capacity only frees up on the caller's end.
-        if not runs and wait_seconds > 0 and max_claim != 0:
-            event = souk.broker.subscribe_wake(agent_ids)
-            try:
-                await asyncio.wait_for(event.wait(), timeout=wait_seconds)
-            except asyncio.TimeoutError:
-                pass
-            finally:
-                souk.broker.unsubscribe_wake(agent_ids, event)
-            runs = souk.broker.poll(agent_ids, max_claim=max_claim)
-
-        async with souk.session() as session:
-            for agent_id in agent_ids:
-                await repo.touch_agent(session, agent_id)
+        except InvalidRegistration as e:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, str(e))
 
         return souk_pb2.PollResponse(
-            pending=[
-                souk_pb2.PendingRun(run_id=r.run_id, agent_id=r.agent_id) for r in runs
-            ]
+            pending=[souk_pb2.PendingRun(run_id=r.run_id, agent_id=r.agent_id) for r in runs]
         )
 
     async def AgentSession(
@@ -210,14 +189,11 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
             async for envelope in request_iterator:
                 run_id = envelope.run_id
                 if not envelope.json_payload and not envelope.end_of_stream:
-                    # A claim. The provider owns this run from here on; the
-                    # pipeline's Claim handler is what hands it the input.
-                    run = souk.broker.get(run_id)
-                    if run is None:
+                    # A claim. Recording who took the run is core's call; all
+                    # this file knows is that a claim frame arrived.
+                    provider.bind_run(run_id, envelope.agent_id)
+                    if not souk.assign_provider(run_id, provider):
                         logger.warning("AgentSession: claim for unknown/finished run_id=%s", run_id)
-                        continue
-                    provider.bind_run(run_id, run.agent_id)
-                    run.in_queue.put_nowait(Claim(provider))
                 elif envelope.end_of_stream:
                     provider.close_run(run_id)
                 else:

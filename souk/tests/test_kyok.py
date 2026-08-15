@@ -16,7 +16,7 @@ import time
 import pytest
 
 from souk import repo
-from souk.api_llm_bridge import _collapse_stream
+from souk.protocols.kyok import collapse_stream
 from souk.kyok import issue_kyok_token, verify_kyok_token
 
 
@@ -339,9 +339,9 @@ async def test_respond_error_line_surfaces_as_error_and_stream_ends(client, sess
 
 
 async def test_claim_timeout_returns_502(client, session, souk, new_identity, monkeypatch):
-    import souk.api_llm_bridge as bridge_module
+    import souk.protocols.kyok as kyok_protocol
 
-    monkeypatch.setattr(bridge_module, "CLAIM_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(kyok_protocol, "CLAIM_TIMEOUT_SECONDS", 0.05)
     identity, agent_id = await _register_agent(session, new_identity)
     run_id = "run_claim_timeout"
     souk.broker.enqueue_run(run_id, agent_id, "thread_1", {}, "ag-ui")
@@ -364,14 +364,14 @@ async def test_respond_unknown_request_id_404s(client):
 
 
 def test_collapse_stream_empty_input():
-    result = _collapse_stream([])
+    result = collapse_stream([])
     assert result["choices"][0]["message"] == {"role": "assistant", "content": ""}
     assert result["choices"][0]["finish_reason"] == "stop"
 
 
 def test_collapse_stream_single_chunk():
     chunks = [_chunk(content="hello", role="assistant", finish_reason="stop")]
-    result = _collapse_stream(chunks)
+    result = collapse_stream(chunks)
     assert result["choices"] == [
         {"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}
     ]
@@ -383,7 +383,7 @@ def test_collapse_stream_multiple_chunks_concatenates_content():
         _chunk(content="lo"),
         _chunk(content="", finish_reason="stop"),
     ]
-    result = _collapse_stream(chunks)
+    result = collapse_stream(chunks)
     assert result["choices"][0]["message"]["content"] == "hello"
     assert result["choices"][0]["finish_reason"] == "stop"
 
@@ -411,7 +411,7 @@ def test_collapse_stream_multi_index_reassembles_per_choice():
             ],
         },
     ]
-    result = _collapse_stream(chunks)
+    result = collapse_stream(chunks)
     assert result["choices"][0] == {
         "index": 0,
         "message": {"role": "assistant", "content": "a"},

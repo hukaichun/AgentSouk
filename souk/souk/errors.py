@@ -17,6 +17,7 @@ from souk.repo import ThreadNotFound, ThreadOwnershipMismatch
 __all__ = [
     "AgentNotFound",
     "InvalidRegistration",
+    "KyokRejected",
     "AmbiguousAgentName",
     "InvalidRunInput",
     "RunNotFound",
@@ -53,6 +54,19 @@ class InvalidRegistration(SoukError):
     signature, or a timestamp too far from souk's clock to rule out a
     replay. Applies identically to a provider in this process and one
     across a network: being in-process is not a reason to be trusted."""
+
+
+class KyokRejected(SoukError):
+    """A KYOK completion was refused. Carries the status a caller should be
+    told, because the reasons differ in kind — an unusable token (401), a run
+    that is no longer live or an agent that isn't registered (403), and nobody
+    claiming the completion in time (502) — and flattening them would lose
+    information the caller needs to know whether to retry.
+    """
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class RunNotFound(SoukError):
