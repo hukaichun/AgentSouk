@@ -31,22 +31,34 @@ uv run bash scripts/gen_proto.sh
 
 `souk/` is the only subproject with a test suite so far (`souk/tests/`) —
 it holds nearly all of the actual business logic (registration/identity,
-routing, offline handling). It needs a real Postgres, not a mock or
-sqlite — the schema leans on Postgres-specific SQL (JSONB, `ON CONFLICT`,
-`make_interval`), so a substitute would exercise different semantics than
-what actually runs.
+routing, offline handling). It runs against **SQLite by default**, with no
+database to stand up first — souk's schema and queries are dialect-neutral
+(see `souk/schema.py` and `souk/repo.py`), so the same suite exercises the
+same semantics on either backend.
 
 ```bash
-docker compose up paradedb -d   # or point at any local Postgres
 cd souk
 uv sync --group dev
 uv run bash ../scripts/gen_proto.sh souk/grpc_gen
+uv run pytest -v                 # SQLite, zero config
+```
+
+To run the exact same suite against Postgres, export a DSN first (the
+`postgres` extra / dev group already brings in psycopg):
+
+```bash
+docker compose up paradedb -d    # or point at any local Postgres
 SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk \
-SOUK_TOKEN_SIGNING_SECRET=test-secret \
 uv run pytest -v
 ```
 
-Both env vars are required — `souk.config.Settings` has no default for either (see its comments), so importing `souk.server` without them set fails immediately rather than silently falling back to something insecure.
+`conftest.py` supplies a throwaway SQLite file and a test signing secret
+when the corresponding env vars are unset, so `pytest` works out of the
+box; exporting `SOUK_DATABASE_URL` (and/or `SOUK_TOKEN_SIGNING_SECRET`)
+overrides those defaults. Note the running server has no default for
+`SOUK_TOKEN_SIGNING_SECRET` — it must be set explicitly to start souk (an
+insecure fallback would be a real auth bypass), unlike `SOUK_DATABASE_URL`,
+which defaults to a local SQLite file.
 
 The test suite applies `souk/alembic/` itself (see `tests/conftest.py`'s
 `_schema` fixture) — no separate migration step needed for tests. A real

@@ -7,9 +7,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import text
+from sqlalchemy import func, select, update
 
 from souk import repo
+from souk.schema import agents, thread_history
 
 
 async def _register(client, identity, sdk_client_id, name, **extra):
@@ -51,8 +52,9 @@ async def test_offline_target_fails_fast_instead_of_queueing(client, new_identit
     agent_id = await _register(client, identity, "sdk_1", "translator")
 
     await session.execute(
-        text("UPDATE agents SET last_seen_at = :ts WHERE agent_id = :id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "id": agent_id},
+        update(agents)
+        .where(agents.c.agent_id == agent_id)
+        .values(last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()
 
@@ -77,11 +79,10 @@ async def test_offline_target_fails_fast_instead_of_queueing(client, new_identit
 
     run = (
         await session.execute(
-            text(
-                "SELECT status, metadata FROM thread_history "
-                "WHERE run_id = :run_id AND kind = 'run_status'"
-            ),
-            {"run_id": result["id"]},
+            select(thread_history.c.status, thread_history.c.metadata).where(
+                thread_history.c.run_id == result["id"],
+                thread_history.c.kind == "run_status",
+            )
         )
     ).mappings().first()
     assert run["status"] == "failed"
@@ -132,7 +133,9 @@ async def test_a2a_can_never_bypass_a_paused_run_even_with_a_resume_flag(client,
 
     still_one_run = (
         await session.execute(
-            text("SELECT count(*) FROM thread_history WHERE kind = 'run_status'")
+            select(func.count()).select_from(thread_history).where(
+                thread_history.c.kind == "run_status"
+            )
         )
     ).scalar()
     assert still_one_run == 1

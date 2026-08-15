@@ -7,7 +7,11 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0",
-    "psycopg[binary,pool]>=3.2",
+    # SQLite is souk's zero-config default backend (see souk/config.py's
+    # database_url), so its async driver is a core dependency — a plain
+    # `pip install souk` runs out of the box. Postgres is opt-in via the
+    # `postgres` extra below.
+    "aiosqlite>=0.20",
     "pydantic-settings>=2.6",
     "grpcio>=1.66",
     # Same reasoning as souk-agent-sdk's own pyproject.toml: the
@@ -24,17 +28,32 @@ dependencies = [
     "alembic>=1.13",
 ]
 
+[project.optional-dependencies]
+# The Postgres backend: `pip install souk[postgres]`, then point
+# SOUK_DATABASE_URL at a `postgresql+psycopg://…` DSN. Needed for any real
+# multi-writer gateway deployment (SQLite's single-writer locking is fine
+# for dev/CI/single-node but not a busy gateway — see souk/config.py).
+postgres = ["psycopg[binary,pool]>=3.2"]
+
 [project.scripts]
 souk-server = "souk.server:main"
 
 # grpcio-tools to regenerate souk/grpc_gen from proto/souk.proto — see
 # scripts/gen_proto.sh and this package's Dockerfile. Not a runtime
 # dependency (souk only needs grpcio itself, above, once stubs exist).
-# pytest/pytest-asyncio/httpx are for souk/tests/ — see CONTRIBUTING.md
-# for how to point them at a real Postgres (no ORM/sqlite substitute;
-# the schema uses Postgres-specific SQL like JSONB and ON CONFLICT).
+# pytest/pytest-asyncio/httpx are for souk/tests/. The suite runs against
+# SQLite out of the box; set SOUK_DATABASE_URL to a Postgres DSN (and
+# install the `postgres` extra) to run it against Postgres too — see
+# CONTRIBUTING.md. psycopg is pulled into the dev group so the Postgres
+# path is always testable locally without the extra.
 [dependency-groups]
-dev = ["grpcio-tools>=1.66", "pytest>=8.3", "pytest-asyncio>=0.24", "httpx>=0.27"]
+dev = [
+    "grpcio-tools>=1.66",
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.27",
+    "psycopg[binary,pool]>=3.2",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

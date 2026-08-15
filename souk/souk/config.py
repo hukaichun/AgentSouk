@@ -1,23 +1,30 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from souk.db_schema import DEFAULT_DB_SCHEMA
+from souk.db_schema import DEFAULT_DATABASE_URL, DEFAULT_DB_SCHEMA
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SOUK_")
 
-    # No default — a wrong-but-valid connection string (e.g. a stray local
-    # dev default silently reused against a real deployment) is exactly
-    # the kind of misconfiguration that's dangerous *because* it doesn't
-    # fail loudly. Must always be set explicitly via SOUK_DATABASE_URL.
-    database_url: str
-    # Postgres schema souk's own tables/functions live under (see
-    # souk/alembic/env.py, which creates it and points search_path at it).
-    # Lets a deployment sharing one Postgres instance across services keep
-    # souk's objects out of `public` without hand-editing search_path on
-    # the DB role. "public" — Postgres's own default — is a fine default
-    # here; unlike database_url/token_signing_secret above, getting this
-    # one wrong just means "wrong namespace", not a silent security hole.
+    # Defaults to a local SQLite file so a fresh checkout, an embedding
+    # library caller, or a test run works with zero configuration — no
+    # Postgres to stand up first. SQLite is a genuine, supported backend
+    # (souk's schema and queries are dialect-neutral, see souk/schema.py
+    # and souk/repo.py), but its single-writer locking suits dev, CI, and
+    # low-concurrency single-node use — not a busy multi-writer gateway.
+    # For any real deployment set SOUK_DATABASE_URL to a Postgres DSN, e.g.
+    # `postgresql+psycopg://user:pass@host:5432/souk`; the docs make this
+    # loud precisely because the failure mode of forgetting is quiet
+    # (writes land in a local file instead of the shared database).
+    database_url: str = DEFAULT_DATABASE_URL
+    # Postgres schema souk's own tables live under (see souk/alembic/env.py,
+    # which creates it and points search_path at it). Lets a deployment
+    # sharing one Postgres instance across services keep souk's objects out
+    # of `public` without hand-editing search_path on the DB role. Postgres
+    # only — SQLite has no schema namespace, so this setting is ignored on a
+    # SQLite database_url (see souk/db.py). "public" — Postgres's own
+    # default — is a fine default here; getting it wrong just means "wrong
+    # namespace", not a silent security hole.
     db_schema: str = DEFAULT_DB_SCHEMA
     http_host: str = "0.0.0.0"
     http_port: int = 8000

@@ -33,7 +33,7 @@ That is precisely the architecture of Agent Souk:
                                │
 ┌──────────────────────────────▼────────────────────────────────┐
 │                   Your Souk (souk.example.com)                 │
-│          FastAPI Gateway · gRPC Relay · ParadeDB State        │
+│       FastAPI Gateway · gRPC Relay · SQLite / Postgres State   │
 └──────┬─────────────────────────────────────────┬──────────────┘
        │ HTTP (AG-UI SSE / A2A JSON-RPC)          │ Outbound-only gRPC streams
        │ any caller can reach                     │ providers connect outbound to
@@ -55,7 +55,7 @@ Deploying one public instance of Agent Souk creates a **shared relay hub** for y
 - 🔄 **Unified Dual-Protocol Gateway**: Exposes a single HTTP surface bridging human event streaming (**AG-UI**) and machine RPC task delegation (**A2A** / JSON-RPC).
 - 🔐 **Cryptographic Self-Sovereign Identity**: Agents own their identity via local **Ed25519 keypairs**. Zero centralized accounts, user databases, or API key friction.
 - 🔗 **Auditable Multi-Hop Actor Chains**: Multi-agent delegation embeds tamper-evident, signed JWT EdDSA provenance chains to prevent privilege escalation and trace delegation lineages.
-- 💾 **Durable State & Human-in-the-Loop (HITL)**: Backed by Postgres / ParadeDB for persistent threads, execution logs, and native `input-required` async pause & resume flows.
+- 💾 **Durable State & Human-in-the-Loop (HITL)**: Persistent threads, execution logs, and native `input-required` async pause & resume flows — on a zero-config local **SQLite** file by default, or **Postgres / ParadeDB** for a concurrent multi-writer deployment (one `SOUK_DATABASE_URL` switch, no code change).
 - 🔑 **Keep Your Own Key (KYOK)** *(experimental)*: Privacy relay allowing callers to pay for LLM inference with their own API keys without handing raw credentials to agent hosts.
 - 🖥️ **Zero-Backend Directory UI**: Pure static browser client (`souk-directory`) to browse active agents, inspect capabilities, and chat live.
 
@@ -128,7 +128,7 @@ graph TD
         GRPC[gRPC Relay Engine] <--> Broker
     end
 
-    SoukServer --> DB[(ParadeDB / Postgres<br/>Roster, Threads, Run History)]
+    SoukServer --> DB[(SQLite / Postgres<br/>Roster, Threads, Run History)]
 
     GRPC <== "Persistent Outbound gRPC Stream<br/>(PollForWork + AgentSession)" ==> SDK[souk-agent-sdk]
     
@@ -161,7 +161,7 @@ The project is structured as modular, independent components:
 | Module Path | Description |
 |---|---|
 | [`proto/souk.proto`](proto/souk.proto) | gRPC contract interface defining `PollForWork` and `AgentSession` |
-| [`souk/`](souk/) | Main Gateway Server: FastAPI HTTP endpoints, gRPC relay engine, and ParadeDB persistence |
+| [`souk/`](souk/) | Main Gateway Server: FastAPI HTTP endpoints, gRPC relay engine, and SQLite/Postgres persistence |
 | [`souk-agent-sdk/`](souk-agent-sdk/) | Python SDK for agent providers: handles registration, polling, streaming, & delegation |
 | [`souk-client-sdk/`](souk-client-sdk/) | Python client library for consuming agents over AG-UI & KYOK |
 | [`souk-directory/`](souk-directory/) | Zero-backend Web Directory & live Chat UI (compiled TS/ES modules) |
@@ -181,8 +181,10 @@ To run components individually on your host machine using [`uv`](https://github.
 # 1. Build proto stubs, apply the schema, & start Souk Gateway Server
 cd souk && uv sync --group dev
 uv run bash ../scripts/gen_proto.sh souk/grpc_gen
-export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
 export SOUK_TOKEN_SIGNING_SECRET=dev-insecure-change-me  # never reuse this value outside local dev
+# SOUK_DATABASE_URL defaults to a local SQLite file (./souk.db) — zero
+# config for local dev. Point it at Postgres for a real deployment:
+#   export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
 uv run alembic upgrade head  # one-time DDL step — see souk/alembic/
 uv run souk-server
 
@@ -201,7 +203,15 @@ cd ../../agent-template && uv sync && uv run agent-template
 
 ### Running Tests
 
-Start ParadeDB Postgres via Docker, then execute tests:
+The suite runs against SQLite with zero configuration:
+
+```bash
+cd souk
+uv run pytest
+```
+
+To run the same suite against Postgres instead, start one and point
+`SOUK_DATABASE_URL` at it:
 
 ```bash
 docker compose up paradedb -d

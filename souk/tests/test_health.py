@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import text
+from sqlalchemy import update
 
 from souk import repo
+from souk.schema import agents, thread_history
 
 
 async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error(session, new_identity):
@@ -28,12 +29,14 @@ async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error
     # Simulate: target went offline, and this run has sat queued past the
     # timeout — both conditions fail_unclaimed_runs requires.
     await session.execute(
-        text("UPDATE agents SET last_seen_at = :ts WHERE agent_id = :id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "id": agent_id},
+        update(agents)
+        .where(agents.c.agent_id == agent_id)
+        .values(last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.execute(
-        text("UPDATE thread_history SET created_at = :ts WHERE run_id = :run_id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "run_id": run_id},
+        update(thread_history)
+        .where(thread_history.c.run_id == run_id)
+        .values(created_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()
 
@@ -66,8 +69,9 @@ async def _make_paused_run(session, agent_id, thread_id, seconds_stale: int) -> 
     run_id = created["run_id"]
     await repo.mark_run_status(session, run_id, "input-required", metadata={"interrupts": []})
     await session.execute(
-        text("UPDATE thread_history SET last_activity_at = :ts WHERE run_id = :run_id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=seconds_stale), "run_id": run_id},
+        update(thread_history)
+        .where(thread_history.c.run_id == run_id)
+        .values(last_activity_at=datetime.now(timezone.utc) - timedelta(seconds=seconds_stale))
     )
     await session.commit()
     return run_id
@@ -111,8 +115,9 @@ async def test_fail_stale_paused_runs_ignores_running_and_queued(session, new_id
 
     created = await repo.create_run(session, thread_id, agent_id, "ag-ui", {"messages": []})
     await session.execute(
-        text("UPDATE thread_history SET last_activity_at = :ts WHERE run_id = :run_id"),
-        {"ts": datetime.now(timezone.utc) - timedelta(seconds=120), "run_id": created["run_id"]},
+        update(thread_history)
+        .where(thread_history.c.run_id == created["run_id"])
+        .values(last_activity_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()
 
