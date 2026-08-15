@@ -42,6 +42,22 @@ if TYPE_CHECKING:
 METHOD_NOT_FOUND = -32601
 TASK_NOT_FOUND = -32001
 
+# The current spec's method names, plus the ones souk shipped first. A2A
+# renamed these when sending a message stopped being modelled as creating a
+# task: `message/send` may answer with a Message *or* a Task, and the task id
+# moved onto the message. souk keeps answering with a Task either way — that
+# is a real answer under both spellings — so the old names cost one set
+# lookup and keep every already-deployed caller working. There is no
+# deprecation clock here; when one is wanted it belongs in the agent card's
+# advertised capabilities, not in a silent removal.
+SEND = frozenset({"message/send", "tasks/send"})
+STREAM = frozenset({"message/stream", "tasks/sendSubscribe"})
+
+# What the agent card advertises. Stated in one place because it is a claim
+# about this file's behaviour, not decoration — if the shapes below stop
+# matching it, one of the two is wrong.
+PROTOCOL_VERSION = "0.3.0"
+
 
 @dataclass
 class A2AStream:
@@ -93,6 +109,15 @@ class A2AAdapter:
             "description": card.get("description", ""),
             "url": f"{base}/rpc",
             "version": "0.1.0",
+            # Which spec this endpoint speaks, which is the whole point of a
+            # card: a client reading it knows to call `message/send` rather
+            # than probing for a method and getting -32601. Required for the
+            # same reason the rename went unnoticed for so long — nothing
+            # else here states a version.
+            "protocolVersion": PROTOCOL_VERSION,
+            "preferredTransport": "JSONRPC",
+            "defaultInputModes": ["text/plain"],
+            "defaultOutputModes": ["text/plain"],
             "capabilities": {"streaming": True},
             "skills": card.get("skills", []),
         }
@@ -111,16 +136,35 @@ class A2AAdapter:
         params = payload.get("params", {})
         rpc_id = payload.get("id")
 
-        if method == "tasks/send":
-            return _result(rpc_id, await self.send_task(agent_id, **_send_args(params)))
-        if method == "tasks/sendSubscribe":
-            stream = await self.send_task_streaming(agent_id, **_send_args(params))
-            return A2AStream(_wrap(rpc_id, stream))
+        if method in SEND:
+            return await self._envelope(rpc_id, self.send_task(agent_id, **_send_args(params)))
+        if method in STREAM:
+            return await self._envelope_stream(rpc_id, params, agent_id)
         if method == "tasks/get":
             return await self._envelope(rpc_id, self.get_task(agent_id, params.get("id")))
         if method == "tasks/cancel":
             return await self._envelope(rpc_id, self.cancel_task(agent_id, params.get("id")))
+        if method == "tasks/resubscribe":
+            return await self._envelope_resubscribe(rpc_id, params, agent_id)
         return _error(rpc_id, METHOD_NOT_FOUND, f"method not found: {method}")
+
+    async def _envelope_stream(
+        self, rpc_id: Any, params: dict[str, Any], agent_id: str
+    ) -> dict[str, Any] | A2AStream:
+        try:
+            stream = await self.send_task_streaming(agent_id, **_send_args(params))
+        except RunNotFound:
+            return _error(rpc_id, TASK_NOT_FOUND, "task not found")
+        return A2AStream(_wrap(rpc_id, stream))
+
+    async def _envelope_resubscribe(
+        self, rpc_id: Any, params: dict[str, Any], agent_id: str
+    ) -> dict[str, Any] | A2AStream:
+        try:
+            stream = await self.resubscribe_task(agent_id, params.get("id"))
+        except RunNotFound:
+            return _error(rpc_id, TASK_NOT_FOUND, "task not found")
+        return A2AStream(_wrap(rpc_id, stream))
 
     async def _envelope(self, rpc_id: Any, coro) -> dict[str, Any]:
         """RunNotFound is A2A's "task not found" error rather than an
@@ -139,19 +183,23 @@ class A2AAdapter:
         message: dict[str, Any],
         *,
         context_id: str | None = None,
+        task_id: str | None = None,
         reference_task_ids: list[str] | None = None,
         actor_chain: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a task to completion and return the resulting A2A Task.
 
-        `context_id` continues an existing conversation; `reference_task_ids`
-        records lineage back to the caller's own task; `actor_chain` carries
-        caller identity forward (see souk.identity.extend_actor_chain — a hop
-        that doesn't extend it is where provenance stops).
+        `context_id` continues an existing conversation; `task_id` continues
+        a specific task (its context is looked up, so a caller holding only a
+        task id doesn't have to have kept the contextId too);
+        `reference_task_ids` records lineage back to the caller's own task;
+        `actor_chain` carries caller identity forward (see
+        souk.identity.extend_actor_chain — a hop that doesn't extend it is
+        where provenance stops).
         """
         run_id, thread_id, is_live = await self._start_run(
-            agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
+            agent_id, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
         live = is_live and self._souk.broker.get(run_id) is not None
         if live:
@@ -178,6 +226,7 @@ class A2AAdapter:
         message: dict[str, Any],
         *,
         context_id: str | None = None,
+        task_id: str | None = None,
         reference_task_ids: list[str] | None = None,
         actor_chain: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -185,7 +234,7 @@ class A2AAdapter:
         """Same as send_task, but yields A2A status/artifact updates as they
         arrive instead of waiting for the task to finish."""
         run_id, thread_id, is_live = await self._start_run(
-            agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
+            agent_id, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
         live = is_live and self._souk.broker.get(run_id) is not None
         # Subscribed before `results` is iterated, for the same reason as
@@ -212,6 +261,33 @@ class A2AAdapter:
             stored = await self._souk.get_run(run_id)
             if stored is not None and stored["status"] != "completed":
                 yield status_update_for_run_status(run_id, thread_id, stored["status"])
+
+        return results()
+
+    async def resubscribe_task(self, agent_id: str, task_id: str) -> AsyncIterator[dict[str, Any]]:
+        """`tasks/resubscribe`: rejoin a task's stream after losing the
+        connection it was started on.
+
+        Only what happens *from now on*: the spec's own framing is resuming a
+        stream, and souk has `tasks/get` for the whole story so far — a
+        reconnecting caller that also wants the backlog asks for it. A task
+        that is no longer live gets one final status update rather than an
+        empty stream, so a caller reconnecting a moment too late still learns
+        the outcome instead of watching nothing.
+        """
+        run = await self._run_of(agent_id, task_id)
+        thread_id = run["thread_id"]
+        events = self._souk.broker.subscribe(task_id) if self._souk.broker.get(task_id) else None
+
+        async def results() -> AsyncIterator[dict[str, Any]]:
+            if events is None:
+                yield status_update_for_run_status(task_id, thread_id, run["status"])
+                return
+            async for item in events:
+                yield agui_event_to_a2a_update(item, task_id, thread_id)
+            stored = await self._souk.get_run(task_id)
+            if stored is not None and stored["status"] != "completed":
+                yield status_update_for_run_status(task_id, thread_id, stored["status"])
 
         return results()
 
@@ -287,6 +363,7 @@ class A2AAdapter:
 
             metadata = params.get("metadata", {})
             parent_thread_id = await _lineage_parent(session, params)
+            context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
 
             # Opt-in caller identity, same mechanism as AG-UI's: unsigned
             # calls are allowed, but a chain that is present and fails to
@@ -311,7 +388,7 @@ class A2AAdapter:
             # is optional, so omitting it still yields a fresh thread, but
             # supplying an unrecognized one is a caller error (ThreadNotFound).
             thread_id = await repo.ensure_thread(
-                session, agent_id, params.get("contextId"), parent_thread_id, metadata=metadata
+                session, agent_id, context_id, parent_thread_id, metadata=metadata
             )
 
             active = await repo.get_active_run_for_thread(session, thread_id)
@@ -367,6 +444,24 @@ class A2AAdapter:
         return run_id, thread_id, True
 
 
+async def _context_of_task(session, task_id: str | None) -> str | None:
+    """`Message.taskId` — the current spec's way to say "this message
+    continues that task". A2A's Task.id *is* souk's run_id, so the task's
+    context is simply its run's thread.
+
+    Unlike `referenceTaskIds` (informational, so an unknown id is ignored),
+    this one is a claim about where the message belongs: an id souk doesn't
+    know is a caller error, and quietly opening a fresh thread instead would
+    strand the conversation the caller thought it was continuing.
+    """
+    if not task_id:
+        return None
+    run = await repo.get_run(session, task_id)
+    if run is None:
+        raise RunNotFound(f"no task '{task_id}'")
+    return run["thread_id"]
+
+
 async def _lineage_parent(session, params: dict) -> str | None:
     """Real A2A `Message.referenceTaskIds` — "other task IDs this message
     references for additional context" — not a souk invention. A caller
@@ -385,13 +480,25 @@ async def _lineage_parent(session, params: dict) -> str | None:
 
 
 def _send_args(params: dict[str, Any]) -> dict[str, Any]:
-    """JSON-RPC params to the semantic methods' keyword arguments. `params.id`
-    is accepted as part of the wire shape and ignored — souk mints task ids."""
+    """JSON-RPC params to the semantic methods' keyword arguments.
+
+    `contextId` and `taskId` live on the *message* in the current spec
+    (MessageSendParams is `{message, configuration?, metadata?}` — nothing
+    else). souk's first A2A implementation read `contextId` from the top
+    level and took a caller-assigned `id` there too, so both are still
+    read, message first.
+
+    A caller-assigned task id remains ignored as an *identifier* — souk mints
+    those — but `taskId` naming an existing task is not the same thing: that
+    is a caller continuing a task, and it is honoured by resolving the task's
+    thread (see `_start_run`).
+    """
     message = params.get("message", {})
     metadata = params.get("metadata", {}) or {}
     return {
         "message": message,
-        "context_id": params.get("contextId"),
+        "context_id": message.get("contextId") or params.get("contextId"),
+        "task_id": message.get("taskId"),
         "reference_task_ids": message.get("referenceTaskIds") or None,
         "actor_chain": metadata.get("actorChain"),
         "metadata": {k: v for k, v in metadata.items() if k != "actorChain"} or None,
@@ -401,6 +508,7 @@ def _send_args(params: dict[str, Any]) -> dict[str, Any]:
 def _params(
     message: dict[str, Any],
     context_id: str | None,
+    task_id: str | None,
     reference_task_ids: list[str] | None,
     actor_chain: list[str] | None,
     metadata: dict[str, Any] | None,
@@ -413,7 +521,7 @@ def _params(
     combined = dict(metadata or {})
     if actor_chain:
         combined["actorChain"] = actor_chain
-    return {"message": message, "contextId": context_id, "metadata": combined}
+    return {"message": message, "contextId": context_id, "taskId": task_id, "metadata": combined}
 
 
 async def _wrap(rpc_id: Any, stream: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:

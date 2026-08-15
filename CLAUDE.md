@@ -37,6 +37,9 @@ times over.
 - one provider attached to two agents couldn't tell its runs apart
 - AG-UI has no cancelled event or outcome — checked against the installed
   package before designing around it, which changed the design
+- `docker compose up` didn't start, a provider failure reached callers as an
+  empty 200, and A2A answered `-32601` to every spec-current client. All
+  three were live the whole time 204 tests were green — see Testing below
 
 When you catch yourself about to write "this should work" or "X is
 transport-specific", write eight lines that prove it instead.
@@ -52,6 +55,18 @@ transport-specific", write eight lines that prove it instead.
   build the app: `create_app(Souk())`.
 - `tests/test_core_is_network_free.py` is a hard constraint, not a
   suggestion. If it fails, the fix is almost never to widen its allow-list.
+- **Every test provider is a stub, so nothing here proves souk works.** The
+  suite has never called a model. `docker compose up` with a real key in
+  `.env` is the check that does, and the first time it was run it found three
+  defects in a row: the stack wouldn't start (host `.venv` copied into the
+  image, so `uv` re-downloaded everything at container start), a failing
+  provider reached callers as a 200 with zero events, and A2A only answered
+  to method names the spec had renamed. Run it after touching the wire.
+- **A protocol souk hand-writes will silently rot.** AG-UI comes from
+  `ag-ui-protocol`, so its shapes track the spec; A2A is string literals.
+  When changing either, read the shapes off the published package
+  (`a2a-sdk`'s models, `ag_ui.core`) rather than from memory or from what
+  the neighbouring code already does.
 
 ## Design invariants
 

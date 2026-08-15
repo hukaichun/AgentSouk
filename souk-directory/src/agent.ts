@@ -195,7 +195,10 @@ function handleAguiEvent(event: any): void {
     clearTyping();
     const value = event.value || {};
     const subAgent = value.sub_agent || "sub-agent";
-    const taskId = value.id || subAgent;
+    // `taskId` is where the current A2A spec carries it on a status/artifact
+    // update; `id` was the original spelling, kept as a fallback so this UI
+    // still groups correctly against an older souk.
+    const taskId = value.taskId || value.id || subAgent;
     const state = value.status?.state;
 
     if (state === "completed" || state === "failed") {
@@ -204,7 +207,9 @@ function handleAguiEvent(event: any): void {
       return;
     }
 
-    const textParts = (value.artifact?.parts || []).filter((p: any) => p.type === "text" && p.text);
+    const textParts = (value.artifact?.parts || []).filter(
+      (p: any) => (p.kind || p.type) === "text" && p.text,
+    );
     if (textParts.length === 0) {
       // A status-only tick (e.g. the initial "working") — show a
       // placeholder once so the delegation is visible before any text

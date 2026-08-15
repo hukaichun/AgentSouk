@@ -201,6 +201,13 @@ class Run:
     # stream simply stopped. Absence is the only "it didn't finish" signal
     # AG-UI has — there is no cancelled event or outcome in the protocol.
     saw_run_finished: bool = False
+    # Likewise for RUN_ERROR, which is a *different* question: RUN_FINISHED
+    # decides the outcome, this one only records that the caller has already
+    # been told something went wrong. _handle_finish emits a terminal
+    # RUN_ERROR of its own when a run ends failed and nothing said so — this
+    # is what keeps it from saying it twice for an agent that reported its
+    # own failure properly.
+    saw_run_error: bool = False
     in_queue: asyncio.Queue[Command] = field(default_factory=asyncio.Queue)
     out_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
 

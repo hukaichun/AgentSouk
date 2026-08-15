@@ -1,11 +1,16 @@
-"""Minimal streaming A2A client: calls another agent's `tasks/sendSubscribe`
+"""Minimal streaming A2A client: calls another agent's `message/stream`
 and yields each TaskStatusUpdateEvent/TaskArtifactUpdateEvent as it
 arrives. Used by agent-template's sub-agent-calling tool so a "main agent"
 can watch a sub-agent's progress live instead of only seeing its final
 result.
 
-Per the A2A protocol, the caller (not the callee) assigns the task id —
-that's what lets the caller later call tasks/get with the same id.
+`message/stream` is the current spec's name for what was `tasks/sendSubscribe`,
+and `contextId`/`taskId` now travel on the message rather than beside it.
+The task id is no longer the caller's to assign either: the callee's Task
+comes back with its own id, which is what a later `tasks/get` uses. This
+client sent the original spelling for a long time, and nothing here noticed —
+A2A is hand-written on both sides of this repo (see souk/protocols/a2a.py),
+so there is no dependency whose upgrade would have said so.
 """
 
 from __future__ import annotations
@@ -19,15 +24,19 @@ import httpx
 from httpx_sse import aconnect_sse
 
 
-def new_task_id() -> str:
-    return f"task_{secrets.token_hex(12)}"
+def new_request_id() -> str:
+    """A JSON-RPC request id, which is all this is. It used to mint a *task*
+    id, back when the caller assigned one; the current spec has nowhere on
+    the wire to put a caller-chosen task id, so the name was a leftover
+    claiming something no longer true."""
+    return f"req_{secrets.token_hex(12)}"
 
 
 async def call_agent_streaming(
     a2a_rpc_url: str,
     message_text: str,
     *,
-    task_id: str | None = None,
+    request_id: str | None = None,
     context_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     actor_chain: list[str] | None = None,
@@ -63,22 +72,22 @@ async def call_agent_streaming(
     lineage by default. This is purely informational per the A2A spec —
     it never implies session continuity; use `context_id` for that.
     """
-    task_id = task_id or new_task_id()
+    request_id = request_id or new_request_id()
     metadata = dict(metadata) if metadata else {}
     if actor_chain is not None:
         metadata["actorChain"] = actor_chain
 
-    message: dict[str, Any] = {"role": "user", "parts": [{"type": "text", "text": message_text}]}
+    message: dict[str, Any] = {"role": "user", "parts": [{"kind": "text", "text": message_text}]}
     if reference_task_ids:
         message["referenceTaskIds"] = reference_task_ids
-
-    params: dict[str, Any] = {"id": task_id, "message": message}
     if context_id:
-        params["contextId"] = context_id
+        message["contextId"] = context_id
+
+    params: dict[str, Any] = {"message": message}
     if metadata:
         params["metadata"] = metadata
 
-    body = {"jsonrpc": "2.0", "id": task_id, "method": "tasks/sendSubscribe", "params": params}
+    body = {"jsonrpc": "2.0", "id": request_id, "method": "message/stream", "params": params}
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with aconnect_sse(client, "POST", a2a_rpc_url, json=body) as event_source:

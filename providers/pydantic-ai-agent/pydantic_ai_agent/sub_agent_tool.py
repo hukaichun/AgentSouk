@@ -107,7 +107,10 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
             artifact = update.get("artifact")
             if artifact:
                 for part in artifact.get("parts", []):
-                    if part.get("type") == "text":
+                    # `kind` is the current A2A discriminator; `type` was the
+                    # original one, still read so this tool keeps working
+                    # against a souk that hasn't been updated yet.
+                    if (part.get("kind") or part.get("type")) == "text":
                         final_text += part["text"]
         if failed:
             return f"({sub.name} is currently unavailable — the call failed or timed out)"

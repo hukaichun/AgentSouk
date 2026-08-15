@@ -296,6 +296,19 @@ the gRPC provider, and still deadlocked — cancelling a task before its first
 scheduling turn means its `finally` never runs, so the run never terminated.
 All of it disappeared once souk stopped deciding on the provider's behalf.
 
+The mirror-image mistake is staying quiet about a verdict souk *has* reached.
+Row four — `failed` — was recorded and never told to anyone: a provider whose
+`run_stream` raised produced an HTTP 200 whose event stream closed in 0.1s
+having emitted nothing, which a client cannot tell from an agent with nothing
+to say. souk now emits a terminal `RUN_ERROR` in exactly that case, persisted
+as well as relayed so a reconnecting caller reads the same account. It is not
+a deviation and not a decision on anyone's behalf: `RUN_ERROR` is AG-UI's own
+terminal event, the verdict is already souk's and already in the database,
+and an agent that reported its own failure is left alone (`Run.saw_run_error`
+is what prevents saying it twice). `cancelled` still gets nothing — there is
+no cancelled event to send, and the only party who would read it is the one
+who asked.
+
 ### Typed data, and where typing stops
 
 souk's own data is modeled, not passed around as bare `dict`. Today it is
@@ -468,9 +481,9 @@ handle.cancel()
 a run has to be addressable three different ways at once and an iterator
 only covers one of them:
 
-- **Streaming** — AG-UI, and A2A's `tasks/sendSubscribe`, consume events as
+- **Streaming** — AG-UI, and A2A's `message/stream`, consume events as
   they arrive.
-- **Collect-and-return** — A2A's `tasks/send` drains the whole run and
+- **Collect-and-return** — A2A's `message/send` drains the whole run and
   answers with one `Task` object. Not streaming, but still needs every event.
 - **Address it later by id** — A2A's `tasks/get` and `tasks/cancel` come back
   to a run long after the call that started it. `Task.id` *is* the `run_id`,
@@ -479,8 +492,8 @@ only covers one of them:
 `is_live` marks a call that resolved to a run with nothing live to consume —
 already paused, already finished, or fast-failed because the target was
 offline. The answer has to be reconstructed from persisted state instead, and
-the two A2A methods reconstruct it *differently* (`tasks/send` replays stored
-events; `tasks/sendSubscribe` emits one status update and closes), so the
+the two A2A methods reconstruct it *differently* (`message/send` replays
+stored events; `message/stream` emits one status update and closes), so the
 condition is exposed rather than papered over.
 
 State queries, which is what makes souk usable as an embedded component
@@ -774,7 +787,7 @@ async for data in result.encode(): ...
 
 Publishing only the middle rung made in-process delegation absurd: one agent
 calling another inside the same process had to construct
-`{"jsonrpc": "2.0", "method": "tasks/send", ...}` to talk to itself, because
+`{"jsonrpc": "2.0", "method": "message/send", ...}` to talk to itself, because
 the envelope was the only way in. The envelope exists for transmission.
 `handle_rpc` is now a thin wrapper over the semantic methods — not a second
 implementation, which a test pins directly, since otherwise a remote caller
@@ -811,6 +824,42 @@ A2A client never has to deviate from its own spec to talk to souk.
 `tasks/cancel` reports the run's real state rather than hardcoding
 `cancelled`, for the same reason the database does — see the cancellation
 section above.
+
+### The A2A side has no library, and it showed
+
+AG-UI arrives as a dependency: souk requires `ag-ui-protocol`, so
+`RunAgentInput` and the event types come from the spec's own package and an
+upgrade is a version bump. A2A is hand-written here — method names are string
+literals in `souk/protocols/a2a.py`. Nothing tells you the spec moved.
+
+It had moved. `tasks/send` / `tasks/sendSubscribe` became `message/send` /
+`message/stream` when sending a message stopped being modelled as creating a
+task, `contextId` and `taskId` moved onto the message, parts changed their
+discriminator from `type` to `kind`, update events gained `kind` and renamed
+`id` to `taskId`, and artifacts gained a required `artifactId`. souk emitted
+and accepted none of it, so a client built against the published schema got
+`-32601 method not found` on its first call — found by pointing a real client
+at it, not by reading anything.
+
+What is there now:
+
+- both spellings accepted inbound, current spelling emitted. Old callers keep
+  working for a set lookup; new ones work at all.
+- `Message.taskId` resolves to that task's thread, and an unknown one is
+  `-32001`, not a quietly-fresh conversation.
+- `tasks/resubscribe`, which souk never had.
+- the agent card states `protocolVersion`, so the next client discovers the
+  method set instead of probing for it.
+- `tests/test_a2a_translate.py` compares whole dicts against shapes read off
+  `a2a-sdk`'s published models. That file is the substitute for the
+  dependency souk doesn't have.
+
+The dependency itself stays out: `a2a-sdk`'s types are import-clean pydantic,
+but installing it pulls `httpx`, `requests`, `protobuf` and `google-api-core`
+into core — precisely the transport weight packaging is used here to keep out
+(see "What `souk-server` is"). Re-check that trade if the SDK ever splits its
+types out; the reason to want it is that this whole section describes a
+rename nobody noticed for months.
 
 ## What `souk-server` is
 

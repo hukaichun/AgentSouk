@@ -65,7 +65,9 @@ Souk implements the A2A protocol but deliberately deviates from the spec in a fe
 
 ### 1. `params.id` (Caller-Chosen Task ID) is Accepted But Ignored
 
-The A2A spec's `tasks/send` and `tasks/sendSubscribe` accept a caller-supplied `params.id` as the canonical task identifier. Souk accepts this field to avoid rejecting spec-compliant clients, but **does not use it as the task/run identifier**. The canonical identifier is always Souk's own database-generated `run_id`.
+A2A's original `tasks/send` / `tasks/sendSubscribe` accepted a caller-supplied `params.id` as the canonical task identifier. Souk accepts this field to avoid rejecting clients written against that version, but **does not use it as the task/run identifier**. The canonical identifier is always Souk's own database-generated `run_id`.
+
+This deviation has mostly dissolved on the spec's side rather than souk's: the current methods are `message/send` / `message/stream`, whose `MessageSendParams` has nowhere to put a caller-chosen task id at all. `Message.taskId` is a reference to an *existing* task, not a request to create one under that name, and souk honours it as such (see `souk/protocols/a2a.py`'s `_context_of_task`).
 
 **Practical impact**: A caller that stores `params.id` and later calls `tasks/get` or `tasks/cancel` using that value will get a 404. It must use the `run_id` Souk returns in the response instead.
 
