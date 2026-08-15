@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from souk import api_a2a, api_agui, api_llm_bridge, api_registry, repo
 from souk.config import CoreSettings, ServingSettings
 from souk.core import Souk
+from souk.deps import install_error_handlers
 from souk.grpc_server import create_grpc_server
 from souk.health import run_health_sweeps_forever
 
@@ -68,6 +69,7 @@ def create_app(souk: Souk, serving: ServingSettings | None = None) -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    install_error_handlers(app)
     app.include_router(api_registry.router)
     app.include_router(api_agui.router)
     app.include_router(api_a2a.router)
