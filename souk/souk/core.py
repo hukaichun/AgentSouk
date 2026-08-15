@@ -33,11 +33,26 @@ from souk import repo
 from souk.broker import Claim, Run, RunBroker, drain_run, request_cancel
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
+from souk.errors import AgentNotFound, InvalidRegistration
 from souk.handlers import make_handlers
+from souk.identity import (
+    is_timestamp_fresh,
+    issue_session_token,
+    registration_signing_payload,
+    verify_signature,
+)
 from souk.kyok import KyokBridge
 from souk.providers import AgentProvider
 
 logger = logging.getLogger("souk.core")
+
+
+@dataclass
+class Registration:
+    """What a provider gets back for proving who it is."""
+
+    agent_ids: dict[str, str]
+    session_token: str
 
 
 @dataclass
@@ -110,6 +125,7 @@ class Souk:
         self.kyok_bridge = KyokBridge()
         # Agents running in this process, by agent_id (see attach_provider).
         self._providers: dict[str, AgentProvider] = {}
+        self._heartbeat: asyncio.Task | None = None
         # Every background task this souk started — see spawn().
         self._tasks: set[asyncio.Task] = set()
 
@@ -161,21 +177,97 @@ class Souk:
 
     # ---- Agents
 
-    def attach_provider(self, agent_id: str, provider: AgentProvider) -> None:
-        """Register an agent that runs in this process.
+    async def register_agents(
+        self,
+        sdk_client_id: str,
+        public_key: str,
+        signature: str,
+        timestamp: int,
+        agents: list[dict[str, Any]],
+        provider_name: str | None = None,
+    ) -> Registration:
+        """Prove an identity holds its key, then record what it offers.
 
-        Its runs are claimed the moment they're enqueued rather than waiting
-        for anyone to poll — an in-process agent is by definition already
-        there. A remote agent claims its own work instead (PollForWork), so
-        nothing is attached here for it.
+        Domain, not HTTP: the same act whether the provider is across a
+        network or in this process. A provider's identity *is* its Ed25519
+        keypair, and the signature is what ties this batch to it; the
+        timestamp bounds how long an observed-but-valid signature could be
+        replayed for.
+        """
+        if not is_timestamp_fresh(timestamp):
+            raise InvalidRegistration("registration timestamp too far from souk's clock")
+        payload = registration_signing_payload(
+            sdk_client_id, [a["name"] for a in agents], timestamp
+        )
+        if not verify_signature(public_key, signature, payload):
+            raise InvalidRegistration("invalid registration signature")
+
+        async with self.session() as session:
+            agent_ids = await repo.register_agents(
+                session, sdk_client_id, public_key, agents, provider_name=provider_name
+            )
+        return Registration(
+            agent_ids=agent_ids,
+            session_token=issue_session_token(sdk_client_id, self.settings.token_signing_secret),
+        )
+
+    async def attach_provider(self, agent_id: str, provider: AgentProvider) -> None:
+        """Run an agent in this process.
+
+        Deliberately *not* a shortcut past registration. An in-process
+        provider proves who it is exactly like a remote one — by having
+        registered (see register_agents), which is why this refuses an
+        agent_id souk has never issued. Sharing a process with souk is not
+        a reason to be trusted.
+
+        Liveness works the same way too. A remote provider says "I'm still
+        here" by polling; an attached one is kept fresh by souk's own
+        heartbeat, on the same last_seen_at that the roster and the
+        offline fast-fail read. That matters in both directions: an
+        attached provider shows as genuinely online, and if this process
+        wedges the heartbeat stops and it correctly stops looking available.
 
         `provider` only has to have the AG-UI agent shape; see
         souk/providers.py. There is no wrapper class to construct.
         """
+        if await self.get_agent(agent_id) is None:
+            raise AgentNotFound(
+                f"agent '{agent_id}' is not registered — a provider must register "
+                "before it can be attached, in-process or not"
+            )
         self._providers[agent_id] = provider
+        await self._touch_attached()
+        if self._heartbeat is None or self._heartbeat.done():
+            self._heartbeat = self.spawn(self._heartbeat_forever(), name="provider-heartbeat")
 
-    def detach_provider(self, agent_id: str) -> None:
-        self._providers.pop(agent_id, None)
+    async def detach_provider(self, agent_id: str) -> None:
+        """This provider is gone. Unlike a remote one — whose absence souk
+        can only infer once it stops polling — this is a departure souk
+        actually witnessed, so the agent is marked offline immediately
+        rather than left to age out of the window."""
+        if self._providers.pop(agent_id, None) is None:
+            return
+        async with self.session() as session:
+            await repo.mark_agent_offline(session, agent_id, self.settings.online_window_seconds)
+
+    async def _touch_attached(self) -> None:
+        if not self._providers:
+            return
+        async with self.session() as session:
+            for agent_id in list(self._providers):
+                await repo.touch_agent(session, agent_id)
+
+    async def _heartbeat_forever(self) -> None:
+        """Keeps attached agents' last_seen_at fresh, the same signal a
+        remote provider refreshes by polling. Half the online window, so a
+        single missed beat never makes a live agent look offline."""
+        interval = max(1, self.settings.online_window_seconds // 2)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await self._touch_attached()
+            except Exception:
+                logger.exception("provider heartbeat failed")
 
     async def list_agents(self) -> list[dict[str, Any]]:
         """The roster, with this souk's own online/staleness policy applied."""

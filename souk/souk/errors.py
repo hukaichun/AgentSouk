@@ -16,6 +16,7 @@ from souk.repo import ThreadNotFound, ThreadOwnershipMismatch
 
 __all__ = [
     "AgentNotFound",
+    "InvalidRegistration",
     "AmbiguousAgentName",
     "InvalidRunInput",
     "RunNotFound",
@@ -45,6 +46,13 @@ class AmbiguousAgentName(SoukError):
         super().__init__(f"agent name '{name}' matches {len(candidates)} agents")
         self.name = name
         self.candidates = candidates
+
+
+class InvalidRegistration(SoukError):
+    """A registration didn't prove it holds the key it claims — a bad
+    signature, or a timestamp too far from souk's clock to rule out a
+    replay. Applies identically to a provider in this process and one
+    across a network: being in-process is not a reason to be trusted."""
 
 
 class RunNotFound(SoukError):

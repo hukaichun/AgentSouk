@@ -188,6 +188,21 @@ async def touch_agent(session: AsyncSession, agent_id: str) -> None:
     await session.commit()
 
 
+async def mark_agent_offline(session: AsyncSession, agent_id: str, online_window_seconds: int) -> None:
+    """Backdate last_seen_at past the online window, so an agent whose
+    provider has genuinely gone shows as offline immediately instead of
+    lingering until the window expires. Used when a provider detaches — a
+    departure souk actually witnessed, unlike a remote provider that simply
+    stops polling and has to be inferred.
+    """
+    await session.execute(
+        update(agents)
+        .where(agents.c.agent_id == agent_id)
+        .values(last_seen_at=_utcnow() - timedelta(seconds=online_window_seconds + 1))
+    )
+    await session.commit()
+
+
 async def get_agent_by_id(session: AsyncSession, agent_id: str) -> dict[str, Any] | None:
     """Direct, always-unambiguous lookup by the canonical key — a delisted
     agent is treated as not found, same as one that never existed."""
