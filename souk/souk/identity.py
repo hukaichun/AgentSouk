@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 import jwt
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 
 SESSION_TOKEN_TTL_SECONDS = 3600
@@ -60,6 +60,63 @@ def is_timestamp_fresh(timestamp: int) -> bool:
 
 def registration_signing_payload(sdk_client_id: str, agent_names: list[str], timestamp: int) -> bytes:
     return f"{sdk_client_id}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+
+
+# How long one freshly-signed hop stays usable. Only the last hop's expiry
+# is enforced (see verify_actor_chain), so this bounds "who is using this
+# chain right now", not how long the provenance it records stays readable.
+ACTOR_CHAIN_TTL_SECONDS = 300
+
+
+def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | None) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "subject": subject,
+            "actorPublicKey": private_key.public_key().public_bytes_raw().hex(),
+            "prevHash": _hop_hash(prev_token) if prev_token is not None else None,
+            "iat": now,
+            "exp": now + ACTOR_CHAIN_TTL_SECONDS,
+        },
+        private_key,
+        algorithm="EdDSA",
+    )
+
+
+def new_actor_chain(private_key: Ed25519PrivateKey, subject: dict) -> list[str]:
+    """Start a chain. `subject` is who it is fundamentally about.
+
+    An agent calling on its own behalf passes itself
+    (`{"type": "agent", "publicKey": ...}`). One that authenticated a human
+    by its own means — SSO, an internal login, whatever souk has no view of
+    — passes that instead (`{"type": "user", "id": "employee_x"}`). souk
+    never verifies that claim, because it cannot: how a user proved
+    themselves to the first agent is between them. What souk verifies is
+    that every actor signing a hop really holds the key it claims, and that
+    the chain has not been altered since.
+    """
+    return [_sign_hop(private_key, subject, None)]
+
+
+def extend_actor_chain(private_key: Ed25519PrivateKey, prev_chain: list[str]) -> list[str]:
+    """Add this actor's hop to a chain it received and is relaying onward.
+
+    This is what makes provenance survive a delegation. Without it a hop is
+    a dead end: whoever receives the call can be told who is calling *now*,
+    but not on whose behalf, and nothing ties the two together. souk keeps
+    this in core precisely so that an agent running inside souk can carry a
+    chain forward exactly as a remote one does — an in-process hop must not
+    be the place a chain quietly stops.
+
+    The subject is copied from the last hop as-is and not verified here;
+    souk checks the whole chain's integrity when it is used.
+    """
+    if not prev_chain:
+        raise ValueError(
+            "extend_actor_chain requires a non-empty prev_chain — use new_actor_chain to originate one"
+        )
+    subject = jwt.decode(prev_chain[-1], options={"verify_signature": False})["subject"]
+    return [*prev_chain, _sign_hop(private_key, subject, prev_chain[-1])]
 
 
 @dataclass
