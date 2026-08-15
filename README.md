@@ -2,10 +2,10 @@
 
 [![CI](https://github.com/hukaichun/AgentSouk/actions/workflows/ci.yml/badge.svg)](https://github.com/hukaichun/AgentSouk/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Protocol: AG-UI & A2A](https://img.shields.io/badge/Protocols-AG--UI%20%7C%20A2A-blue.svg)](proto/souk.proto)
+[![Protocol: AG-UI & A2A](https://img.shields.io/badge/Protocols-AG--UI%20%7C%20A2A-blue.svg)](docs/library-architecture.md)
 
-> **The Zero-Config Open Agent Relay Gateway & Shared Protocol Bridge.**  
-> Instantly expose AI agents running anywhere — locally, behind NAT, or in private VPCs — over **AG-UI** (human streaming) and **A2A** (agent-to-agent JSON-RPC) protocols **without public IPs, open ports, tunneling setups (ngrok), or cloud vendor lock-in.**
+> **The Open Agent Relay: a network-free core library, and the SDKs that speak to it.**  
+> Instantly expose AI agents running anywhere — locally, behind NAT, or in private VPCs — over **AG-UI** (human streaming) and **A2A** (agent-to-agent JSON-RPC) **without public IPs, open ports, tunneling setups (ngrok), or cloud vendor lock-in.**
 
 ---
 
@@ -24,18 +24,35 @@ What Souk explicitly does *not* provide is a central reputation layer or quality
 
 **Souk provides mechanism; whoever hosts an instance decides policy.** Open-by-default is Souk's own stance, not a constraint it imposes on every deployment — an operator who wants an invite-only or allowlisted registry puts their own logic in front of Souk's `/agents/register` endpoint rather than Souk deciding on their behalf (see [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md)). Souk itself never takes a side between "open" and "curated" — it stays out of that decision either way.
 
-This makes Agent Souk the right infrastructure for teams, communities, or open ecosystems that want to connect agents across organizational boundaries without ceding control to a single platform — open registry or curated, that choice belongs to whoever hosts it, not to Souk.
+---
 
-That is precisely the architecture of Agent Souk:
+## 🧭 Two Repositories, One Boundary
+
+The same mechanism/policy split runs through the codebase itself, as a hard line between two repos:
+
+| | **AgentSouk** (this repo) | **[AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)** |
+|---|---|---|
+| **Owns** | The domain: agents, threads, runs, identity, persistence, protocol *translation* | The network: ports, transports, TLS, CORS, endpoints, wire framing, admin surface |
+| **Ships** | `souk` (the network-free core library) + the provider/caller SDKs | The reference gateway — one HTTP port serving callers and relaying to providers |
+| **May it bind a socket?** | ❌ Never. `souk` cannot even *import* a transport — enforced by packaging and by `souk/tests/test_core_is_network_free.py` | ✅ That is its entire job |
+
+Three consequences, recorded in [AgentSouk#27](https://github.com/hukaichun/AgentSouk/issues/27) and load-bearing:
+
+- **No network design originates here.** When a need looks network-shaped, it becomes a core mechanism *plus* a serving decision made downstream — never a new endpoint, transport, or subproject in this repo.
+- **The wire contract is authored downstream.** AgentSoukServer's [`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md) is the spec of record (single HTTP port; WebSocket relays for providers and KYOK bridges). The SDKs here *implement* that contract; they do not define it.
+- **Core's own vocabulary is transport-neutral.** A worker "claims work and reports events" — whether a gRPC stream, a WebSocket, or an in-process call carries that is not core's business, and `websockets` sits in the forbidden-imports list ahead of anything importing it.
+
+That is precisely the runtime architecture:
 
 ```
                            Public Internet
                                │
 ┌──────────────────────────────▼────────────────────────────────┐
-│                   Your Souk (souk.example.com)                 │
-│       FastAPI Gateway · gRPC Relay · SQLite / Postgres State   │
+│              Your Souk gateway (AgentSoukServer)               │
+│        one HTTP surface · relay engine · souk core inside      │
+│                SQLite / Postgres durable state                 │
 └──────┬─────────────────────────────────────────┬──────────────┘
-       │ HTTP (AG-UI SSE / A2A JSON-RPC)          │ Outbound-only gRPC streams
+       │ HTTP (AG-UI SSE / A2A JSON-RPC)          │ Outbound-only persistent streams
        │ any caller can reach                     │ providers connect outbound to
        ▼                                          ▼
  ┌─────────────┐   ┌───────────────┐   ┌──────────────┐   ┌────────────────────┐
@@ -44,15 +61,10 @@ That is precisely the architecture of Agent Souk:
  └─────────────┘   └───────────────┘   └──────────────┘   └────────────────────┘
 ```
 
-Deploying one public instance of Agent Souk creates a **shared relay hub** for your team, organization, or community:
-- **For Providers**: AI agents on laptops, local GPUs, edge devices, or private VPCs initiate **outbound-only gRPC persistent streams** to Souk. No open ports, reverse tunnels, or public IP addresses are required.
-- **For Callers**: Humans (via the built-in static Web Directory UI or AG-UI clients) and other agents (via A2A RPC) talk directly to Souk's public HTTP surface. Souk routes traffic seamlessly to the connected provider.
-- **Zero Lock-in & Independent Host**: Providers execute 100% of their agent logic locally without handing credentials or code to a third-party cloud platform.
-
 ### Key Value Propositions
 
-- 🌐 **Zero-Config Ingress & NAT Traversal**: Agents connect *out* to Souk. Zero open ingress ports, static public IPs, or third-party tunnels needed.
-- 🔄 **Unified Dual-Protocol Gateway**: Exposes a single HTTP surface bridging human event streaming (**AG-UI**) and machine RPC task delegation (**A2A** / JSON-RPC).
+- 🌐 **Zero-Config Ingress & NAT Traversal**: Agents connect *out* to a souk. Zero open ingress ports, static public IPs, or third-party tunnels needed.
+- 🔄 **Unified Dual-Protocol Gateway**: One HTTP surface bridging human event streaming (**AG-UI**) and machine RPC task delegation (**A2A v1.0**, shapes taken from the official `a2a-sdk` rather than hand-written).
 - 🔐 **Cryptographic Self-Sovereign Identity**: Agents own their identity via local **Ed25519 keypairs**. Zero centralized accounts, user databases, or API key friction.
 - 🔗 **Auditable Multi-Hop Actor Chains**: Multi-agent delegation embeds tamper-evident, signed JWT EdDSA provenance chains to prevent privilege escalation and trace delegation lineages.
 - 💾 **Durable State & Human-in-the-Loop (HITL)**: Persistent threads, execution logs, and native `input-required` async pause & resume flows — on a zero-config local **SQLite** file by default, or **Postgres / ParadeDB** for a concurrent multi-writer deployment (one `SOUK_DATABASE_URL` switch, no code change).
@@ -61,58 +73,22 @@ Deploying one public instance of Agent Souk creates a **shared relay hub** for y
 
 ---
 
-## ⚡ Quick Start in 60 Seconds
+## ⚡ Quick Start
 
-### Option A: Local Development & Exploration
-
-Spin up the complete stack locally—including the Souk relay gateway, ParadeDB, pre-configured example AI agents (`souk-guide`, `summarizer`, `translator`), and the static Web Directory UI:
+**Running a gateway is [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)'s quick start, not this repo's** — deployment, Docker, TLS, and configuration guidance all live there. What starts *here* is a provider or a caller against a souk that is already running:
 
 ```bash
-# 1. Clone the repository
-git clone https://github.com/hukaichun/AgentSouk.git
-cd AgentSouk
-
-# 2. Configure environment variables
-cp .env.example .env
-# Edit .env to add your LLM credentials (LLM_BASE_URL, LLM_API_KEY, LLM_MODEL_NAME or ANTHROPIC_API_KEY)
-
-# 3. Spin up with Docker Compose
-docker compose up --build
-```
-
-#### Access Services
-- 🌐 **Web Directory & Chat UI**: [`http://localhost:8080`](http://localhost:8080)
-- ⚡ **HTTP Gateway / Swagger Docs**: [`http://localhost:8000/docs`](http://localhost:8000/docs)
-- 🔌 **gRPC Relay Server**: `localhost:50051`
-
----
-
-### Option B: Deploying a Public Shared Souk
-
-Deploy Souk to any public server (e.g. `souk.example.com`). Once running, **any provider anywhere in the world** can register an agent using `souk-agent-sdk` without touching their firewall:
-
-```bash
-# 1. On your public server (Deploy Gateway & Directory UI):
-SOUK_PUBLIC_HTTP_URL=https://souk.example.com \
-SOUK_DATABASE_URL=postgresql+psycopg://souk:secret@db:5432/souk \
-SOUK_TOKEN_SIGNING_SECRET=$(python3 -c "import secrets; print(secrets.token_hex(32))") \
-SOUK_DB_SCHEMA=souk \
-docker compose up -d souk paradedb souk-directory
-# `souk` depends on `souk-migrate` completing first (see docker-compose.yml)
-# — that's the only step that runs DDL (souk/alembic/), so it's the one
-# place to point a DDL-capable DB role; `souk` itself only ever needs DML.
-# SOUK_DATABASE_URL and SOUK_TOKEN_SIGNING_SECRET have no built-in default
-# — souk.config requires both explicitly, on purpose (see souk/souk/config.py).
-# SOUK_DB_SCHEMA is optional (defaults to `public`) — set it to keep souk's
-# tables out of `public` when sharing one Postgres instance across services.
-
-# 2. On any remote provider machine (Behind NAT / Firewall):
+# A provider, from behind any NAT — no firewall change, no public IP:
+cd agent-template && uv sync
 SOUK_HTTP_URL=https://souk.example.com \
 SOUK_GRPC_URL=souk.example.com:50051 \
-uv run python -m my_agent
+uv run agent-template
+
+# A caller, from anywhere:
+curl https://souk.example.com/agents
 ```
 
-Remote agents connect outbound to your Souk hub, and visitors to `https://souk.example.com:8080` can immediately discover and chat with all active agents!
+The in-tree `docker compose up --build` still assembles a full local demo stack (gateway + database + example agents + directory UI) while `souk-server/` remains in this tree — see its row in the structure table below.
 
 ---
 
@@ -120,21 +96,23 @@ Remote agents connect outbound to your Souk hub, and visitors to `https://souk.e
 
 ```mermaid
 graph TD
-    User([Human User / Web Directory]) -->|"POST /agui/{agent} (SSE)"| HTTP[FastAPI HTTP Surface]
+    User([Human User / Web Directory]) -->|"POST /agui/{agent} (SSE)"| HTTP[Gateway HTTP Surface]
     CallerAgent([External Agent / Client]) -->|"POST /a2a/{agent}/rpc (JSON-RPC)"| HTTP
 
-    subgraph SoukServer ["Souk Gateway (Single Process)"]
-        HTTP --> Broker[In-Process asyncio Broker]
-        GRPC[gRPC Relay Engine] <--> Broker
+    subgraph Gateway ["Souk gateway (AgentSoukServer)"]
+        HTTP --> Core["souk core<br/>(broker, handlers, protocol adapters)"]
+        Relay["Relay engine<br/>(outbound persistent streams)"] <--> Core
     end
 
-    SoukServer --> DB[(SQLite / Postgres<br/>Roster, Threads, Run History)]
+    Gateway --> DB[(SQLite / Postgres<br/>Roster, Threads, Run History)]
 
-    GRPC <== "Persistent Outbound gRPC Stream<br/>(PollForWork + AgentSession)" ==> SDK[souk-agent-sdk]
-    
+    Relay <== "claim work / report events / finish<br/>+ cancel back the other way" ==> SDK[souk-agent-sdk]
+
     SDK --> AgentA["Local Agent A<br/>(Laptop / Behind NAT)"]
     SDK --> AgentB["Enterprise VPC Agent B<br/>(Private Subnet)"]
 ```
+
+The relay channel's contract is core's worker port — `claim_work` / `report_event` / `finish_run` plus a cancel notification — and is deliberately transport-neutral. Today's carrier is a gRPC stream; the base server mode moves it to a WebSocket on the gateway's one HTTP port (spec: AgentSoukServer's `docs/server-mode.md`). Core is untouched by that change, which is the test of whether this boundary is real.
 
 ---
 
@@ -142,7 +120,7 @@ graph TD
 
 | Feature / Dimension | **Agent Souk** | **a2a-relay** | **agentgateway.dev** | **Cloudflare AI Gateway** | **Google Bedrock / Vertex** |
 |---|---|---|---|---|---|
-| **NAT Traversal / No Public IP** | ✅ Outbound gRPC stream | ✅ Outbound WebSocket | ❌ Requires reachable backends | ❌ Edge proxy only | ❌ Cloud-hosted backends |
+| **NAT Traversal / No Public IP** | ✅ Outbound persistent stream | ✅ Outbound WebSocket | ❌ Requires reachable backends | ❌ Edge proxy only | ❌ Cloud-hosted backends |
 | **Protocol Support** | ✅ Dual AG-UI + A2A | ❌ A2A only | ✅ MCP + A2A + HTTP | ❌ LLM proxy only | ❌ Proprietary / A2A |
 | **Identity Model** | 🔐 Ed25519 Keypair | ⚠️ Relay-wide secret token | 🔑 Central OAuth / Cedar RBAC | 🔑 API keys / JWT | 🔒 Cloud IAM / ARNs |
 | **Multi-Agent Provenance** | 🔗 Auditable EdDSA Actor Chains | ❌ None | ❌ None | ❌ None | ⚠️ Cloud Audit Logs |
@@ -156,81 +134,52 @@ graph TD
 
 ## 📦 Repository Structure
 
-The project is structured as modular, independent components:
+Modular, independent distributions — no shared workspace, each stands alone:
 
 | Module Path | Description |
 |---|---|
-| [`proto/souk.proto`](proto/souk.proto) | gRPC contract interface defining `PollForWork` and `AgentSession` |
-| [`souk/`](souk/) | The core library: agents, threads, runs, the AG-UI/A2A adapters, and SQLite/Postgres persistence. Network-free — it depends on no web framework or gRPC at all |
-| [`souk-server/`](souk-server/) | The reference gateway: FastAPI HTTP endpoints, the gRPC relay engine, and the process bootstrap. Depends on `souk`; nothing depends on it |
-| [`souk-agent-sdk/`](souk-agent-sdk/) | Python SDK for agent providers: handles registration, polling, streaming, & delegation |
-| [`souk-client-sdk/`](souk-client-sdk/) | Python client library for consuming agents over AG-UI & KYOK |
-| [`souk-directory/`](souk-directory/) | Zero-backend Web Directory & live Chat UI (compiled TS/ES modules) |
-| [`agent-template/`](agent-template/) | Minimal reference agent implementation without LLM dependencies |
-| [`providers/`](providers/) | Production-ready examples (Pydantic-AI agent with MCP tools & sub-agent delegation) |
-| [`docs/`](docs/) | Deep-dive architectural specs: [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`prior-art.md`](docs/prior-art.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), and [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md) |
+| [`souk/`](souk/) | **The core library.** Agents, threads, runs, identity, the AG-UI/A2A/KYOK adapters, and SQLite/Postgres persistence. Network-free: it depends on no web framework, no gRPC, no WebSocket library — and cannot, by packaging and by test |
+| [`souk-agent-sdk/`](souk-agent-sdk/) | Python SDK for agent providers: registration, claiming, streaming, delegation. Implements the wire contract authored in AgentSoukServer |
+| [`souk-client-sdk/`](souk-client-sdk/) | Python client library for consuming agents over AG-UI, and the caller-side KYOK bridge |
+| [`agent-template/`](agent-template/) | Minimal reference provider — the smallest complete thing that registers and serves an agent, no LLM dependency |
+| [`providers/`](providers/) | Fuller provider examples (Pydantic-AI agent with MCP tools & sub-agent delegation) |
+| [`proto/souk.proto`](proto/souk.proto) | The current gRPC relay's wire contract, kept as the record of the worker-channel semantics the WebSocket framing re-encodes |
+| [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
+| [`souk-server/`](souk-server/) | ⚠️ **Extracted.** The reference gateway now lives in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer) and evolves there; this in-tree copy remains only until its removal lands, so the compose demo keeps working meanwhile. New serving work does not happen here |
 
 ---
 
 ## 🛠️ Local Development & Testing
 
-### Direct Host Execution
-
-To run components individually on your host machine using [`uv`](https://github.com/astral-sh/uv):
+Library development needs no gateway at all — `souk`'s suite runs against the core directly:
 
 ```bash
-# 1. Apply the schema (it belongs to souk, the library that owns the tables)
 cd souk && uv sync --group dev
-export SOUK_TOKEN_SIGNING_SECRET=dev-insecure-change-me  # never reuse this value outside local dev
-# SOUK_DATABASE_URL defaults to a local SQLite file (./souk.db) — zero
-# config for local dev. Point it at Postgres for a real deployment:
-#   export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
-uv run alembic upgrade head  # one-time DDL step — see souk/alembic/
-
-# 2. Build proto stubs & start the gateway (souk-server path-depends on souk)
-cd ../souk-server && uv sync --group dev
-uv run bash ../scripts/gen_proto.sh souk_server/grpc_gen
-uv run souk-server
-
-# 3. Run Example Pydantic-AI Provider
-cd ../providers/pydantic-ai-agent && uv sync
-AGENT_TEMPLATE_CONFIG=config.example.yaml uv run --env-file ../../.env python -m pydantic_ai_agent.main
-
-# Or run the minimal reference provider (no LLM key required):
-cd ../../agent-template && uv sync && uv run agent-template
+uv run pytest                      # SQLite, zero configuration
 ```
 
-> **Note**: For local dev, make sure `souk-agent-sdk` stubs are generated:
-> ```bash
-> cd souk-agent-sdk && uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
-> ```
-
-### Running Tests
-
-Two suites, one per distribution — `souk/tests/` covers the library,
-`souk-server/tests/` covers the HTTP and gRPC surfaces. Both run against
-SQLite with zero configuration:
-
-```bash
-(cd souk && uv run pytest)
-(cd souk-server && uv run pytest)
-```
-
-To run the same suites against Postgres instead, start one and point
-`SOUK_DATABASE_URL` at it:
+The same suite runs against Postgres by pointing at one (dialect bugs only ever appear on one side — run both before merging):
 
 ```bash
 docker compose up paradedb -d
-export SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk"
-(cd souk && uv run pytest)
-(cd souk-server && uv run pytest)
+SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk" uv run pytest
 ```
+
+SDK development mirrors it (`cd souk-agent-sdk && uv sync --group dev && uv run pytest`), with gRPC stubs generated once per checkout:
+
+```bash
+cd souk-agent-sdk && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+```
+
+Schema changes are Alembic revisions under [`souk/alembic/`](souk/alembic/) — `uv run alembic upgrade head` is a deploy-time DDL step, deliberately separate from anything a running gateway does (see `CONTRIBUTING.md`).
+
+To see code running against a real gateway, use the in-tree compose stack (while it lasts) or a checkout of AgentSoukServer.
 
 ---
 
 ## 🧪 API Usage Examples
 
-Once Souk is running, interact directly via `curl`:
+Against any running souk gateway:
 
 ```bash
 # 1. Roster discovery: List active registered agents
@@ -241,7 +190,8 @@ curl -N -X POST http://localhost:8000/agui/souk-guide \
   -H 'content-type: application/json' \
   -d '{"messages":[{"id":"m1","role":"user","content":"Hello, what agents are available?"}]}'
 
-# 3. A2A: Inspect Agent Card (.well-known metadata)
+# 3. A2A: Inspect Agent Card (the v1.0 well-known path — the only one served;
+#    a pre-v1 client would get a v1.0 body it cannot read, so the old path 404s)
 curl http://localhost:8000/a2a/translator/.well-known/agent-card.json
 
 # 4. A2A: Trigger JSON-RPC task delegation
@@ -256,15 +206,16 @@ curl -N -X POST http://localhost:8000/a2a/translator/rpc \
 
 - **Self-Sovereign Identity**: Agent identity is bound to an **Ed25519 keypair** generated automatically by `souk-agent-sdk`. `/agents/register` verifies cryptographic ownership before issuing short-lived HMAC session bearer tokens.
 - **Actor Chain Provenance**: Delegation across multiple agents embeds an **EdDSA signed JWT chain**. Each hop cryptographically binds to the previous hop's SHA-256 hash, preventing token splicing, replay attacks, or impersonation.
-- **TLS Security**: Production deployments should enable TLS (supported via `grpc_tls_*` and `http_tls_*` configuration keys in `souk.config`).
+- **Transport security is the gateway's job**: what core guarantees is signing and verification (registration signatures, session tokens, actor chains, KYOK's two-part authorization) — all bounded by a 60s freshness window that only helps on an encrypted path. TLS termination, and why it is mandatory off localhost, is documented in AgentSoukServer's README.
 
 ---
 
 ## 🔮 Roadmap
 
+- 🔌 **WebSocket relay base mode**: one gateway port for callers *and* providers. The spec and serving implementation live in AgentSoukServer ([`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)); this repo's share is the SDK transports that implement it, and eventually retiring `proto/souk.proto` alongside the gRPC carrier it describes.
 - 🌐 **Cross-Souk Discovery**: `@souk` addressing (`agent@souk.example.com`) with client-side resolution and a `.well-known/souk-federation.json` discovery document — no inter-souk server-to-server proxying needed. See [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md).
 - 💳 **Native Monetization & Payments**: Integration with micro-payment rails like [x402](https://www.x402.org/) for agent-to-agent transactions and directory-listing economics.
-- 📈 **Horizontal Gateway Scaling**: Distributing broker state via Redis / Postgres LISTEN-NOTIFY for multi-replica enterprise deployments.
+- 📈 **Horizontal Gateway Scaling**: Distributing broker state via Redis / Postgres LISTEN-NOTIFY for multi-replica deployments — see `docs/library-architecture.md`'s "What this leaves open" for what two replicas actually do today.
 - 🔑 **Public Key Revocation**: A `revoked_keys` blocklist checked at registration and actor-chain verification, so a leaked provider/caller Ed25519 key can be shut out immediately instead of waiting for its holder to stop using it. Written to only by whoever already has direct DB access — no new admin/auth surface inside souk itself, consistent with souk having no account system at all.
 
 *Directions, not commitments — the federation/anti-abuse items above are
