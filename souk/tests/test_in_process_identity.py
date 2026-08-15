@@ -23,7 +23,7 @@ from souk.identity import registration_signing_payload
 
 
 class Agent:
-    async def start(self, run_input: dict):
+    async def start(self, agent_id: str, run_input: dict):
         return self._events(run_input)
 
     async def cancel(self, run_id: str) -> None:

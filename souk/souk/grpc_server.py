@@ -82,17 +82,11 @@ class GrpcProvider:
         self._runs: dict[str, asyncio.Queue] = {}
         self._agent_ids: dict[str, str] = {}
 
-    def bind_run(self, run_id: str, agent_id: str) -> None:
-        """Record which agent a claimed run belongs to. Transport
-        bookkeeping, not part of the port: envelopes carry an agent_id but
-        RunAgentInput doesn't, and the port must not grow a parameter just
-        to carry a field one wire format happens to have.
-        """
-        self._agent_ids[run_id] = agent_id
-
-    async def start(self, run_input: dict) -> AsyncIterator[Any]:
+    async def start(self, agent_id: str, run_input: dict) -> AsyncIterator[Any]:
         run_id = run_input["runId"]
-        agent_id = self._agent_ids.get(run_id, "")
+        # Kept only so this run's cancel frame can carry it: envelopes have an
+        # agent_id field, and cancel arrives with just a run_id.
+        self._agent_ids[run_id] = agent_id
         queue: asyncio.Queue = asyncio.Queue()
         self._runs[run_id] = queue
         await self.outbound.put(
@@ -189,7 +183,6 @@ class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
                 if not envelope.json_payload and not envelope.end_of_stream:
                     # A claim. Recording who took the run is core's call; all
                     # this file knows is that a claim frame arrived.
-                    provider.bind_run(run_id, envelope.agent_id)
                     if not souk.assign_provider(run_id, provider):
                         logger.warning("AgentSession: claim for unknown/finished run_id=%s", run_id)
                 elif envelope.end_of_stream:

@@ -59,11 +59,18 @@ class AgentProvider(Protocol):
     three lines:
 
         class Local:
-            async def start(self, run_input):
+            async def start(self, agent_id, run_input):
                 return agent.run_stream(run_input)
+
+    `agent_id` is passed because one provider may serve several agents — a
+    single process hosting a translator and a summarizer is ordinary, not a
+    special case — and AG-UI's RunAgentInput carries no agent identity, only
+    thread and run ids. Without it a provider cannot tell which of its agents
+    a run is for, which made in-process providers effectively single-agent
+    while the gRPC one papered over it with its own side-table.
     """
 
-    async def start(self, run_input: dict) -> AsyncIterator[AgentEvent]: ...
+    async def start(self, agent_id: str, run_input: dict) -> AsyncIterator[AgentEvent]: ...
 
     async def cancel(self, run_id: str) -> None:
         """Ask the agent to stop. A request, not a command.

@@ -19,7 +19,7 @@ from souk import repo
 class EchoAgent:
     """An in-process agent, in the shape AG-UI already defines."""
 
-    async def start(self, run_input: dict):
+    async def start(self, agent_id: str, run_input: dict):
         return self._events(run_input)
 
     async def cancel(self, run_id: str) -> None:
@@ -40,7 +40,7 @@ class NeverFinishesAgent:
     def __init__(self) -> None:
         self._stop = asyncio.Event()
 
-    async def start(self, run_input: dict):
+    async def start(self, agent_id: str, run_input: dict):
         return self._events(run_input)
 
     async def cancel(self, run_id: str) -> None:
@@ -61,7 +61,7 @@ class IgnoresCancelAgent:
         self.cancel_seen = False
         self._release = asyncio.Event()
 
-    async def start(self, run_input: dict):
+    async def start(self, agent_id: str, run_input: dict):
         return self._events(run_input)
 
     async def cancel(self, run_id: str) -> None:

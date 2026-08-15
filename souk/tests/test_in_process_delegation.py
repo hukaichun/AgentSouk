@@ -37,7 +37,7 @@ class Callee:
     def __init__(self) -> None:
         self.seen_caller: dict | None = None
 
-    async def start(self, run_input: dict):
+    async def start(self, agent_id: str, run_input: dict):
         self.seen_caller = (run_input.get("forwardedProps") or {}).get("caller")
         return self._events(run_input)
 

@@ -83,7 +83,7 @@ async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
         await repo.mark_run_status(session, run.run_id, "running")
     # `start` returning means the agent really has its input — for a remote
     # one, that the frame is on the wire.
-    stream = await cmd.provider.start(run.input_json)
+    stream = await cmd.provider.start(run.agent_id, run.input_json)
     run.pump_task = souk.spawn(_pump(souk, run, stream), name=f"pump:{run.run_id}")
 
 

@@ -29,7 +29,7 @@ class LocalAgent:
         self._reply = reply
         self.seen_input: dict | None = None
 
-    async def start(self, run_input: dict):
+    async def start(self, agent_id: str, run_input: dict):
         self.seen_input = run_input
         return self._events(run_input)
 
