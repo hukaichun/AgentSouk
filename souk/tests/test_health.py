@@ -19,7 +19,7 @@ from souk.schema import agents, thread_history
 
 async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error(session, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
 
     thread_id = await repo.create_thread(session, agent_id)
@@ -50,7 +50,7 @@ async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error
 
 async def test_fail_unclaimed_runs_leaves_recent_or_online_runs_alone(session, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
 
     thread_id = await repo.create_thread(session, agent_id)
@@ -79,7 +79,7 @@ async def _make_paused_run(session, agent_id, thread_id, seconds_stale: int) -> 
 
 async def test_fail_stale_paused_runs_fails_runs_past_timeout(session, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
     thread_id = await repo.create_thread(session, agent_id)
 
@@ -95,7 +95,7 @@ async def test_fail_stale_paused_runs_fails_runs_past_timeout(session, new_ident
 
 async def test_fail_stale_paused_runs_leaves_recent_pauses_alone(session, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
     thread_id = await repo.create_thread(session, agent_id)
 
@@ -109,7 +109,7 @@ async def test_fail_stale_paused_runs_leaves_recent_pauses_alone(session, new_id
 
 async def test_fail_stale_paused_runs_ignores_running_and_queued(session, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
     thread_id = await repo.create_thread(session, agent_id)
 
@@ -136,7 +136,7 @@ async def test_sweep_once_skips_paused_sweep_when_unconfigured(session, souk, ne
     assert souk.settings.paused_timeout_seconds is None
 
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
+    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     agent_id = agent_ids["translator"]
     thread_id = await repo.create_thread(session, agent_id)
     run_id = await _make_paused_run(session, agent_id, thread_id, seconds_stale=10**6)

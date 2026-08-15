@@ -99,7 +99,7 @@ def _status_update(
 def build_task(
     task_id: str, context_id: str, agent_name: str, run_status: str, run_events: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """`task_id` here is just souk's own run_id (see api_a2a._start_run —
+    """`task_id` here is just souk's own run_id (see protocols.a2a's _start_run —
     there's no separate task_id concept); `context_id` is souk's real,
     database-generated thread_id (see repo.ensure_thread). Both are
     echoed back here (A2A's own `Task.id`/`Task.contextId` fields)

@@ -16,8 +16,8 @@ from souk import repo
 from souk.schema import agents
 
 
-async def _register(client, identity, sdk_client_id, name, **extra):
-    body = identity.register_body(sdk_client_id, [{"name": name, **extra}])
+async def _register(client, identity, name, **extra):
+    body = identity.register_body([{"name": name, **extra}])
     resp = await client.post("/agents/register", json=body)
     assert resp.status_code == 201, resp.text
     return resp.json()["agent_ids"][name]
@@ -65,7 +65,7 @@ def _run_started_run_id(sse_body: str) -> str:
 
 async def test_create_thread_by_name_and_by_id_return_real_thread_ids(client, new_identity):
     identity = new_identity()
-    agent_id = await _register(client, identity, "sdk_1", "greeter")
+    agent_id = await _register(client, identity, "greeter")
 
     by_name = await client.post("/threads/greeter")
     assert by_name.status_code == 200, by_name.text
@@ -90,7 +90,7 @@ async def test_agui_run_mints_a_fresh_thread_for_an_unrecognized_thread_id(clien
     unrelated to what this test actually checks (the minted thread_id).
     """
     identity = new_identity()
-    agent_id = await _register(client, identity, "sdk_1", "greeter")
+    agent_id = await _register(client, identity, "greeter")
     await session.execute(
         update(agents)
         .where(agents.c.agent_id == agent_id)
@@ -107,7 +107,7 @@ async def test_agui_run_mints_a_fresh_thread_for_an_unrecognized_thread_id(clien
 
 async def test_agui_run_against_an_offline_agent_fails_fast(client, new_identity, session):
     identity = new_identity()
-    agent_id = await _register(client, identity, "sdk_1", "translator")
+    agent_id = await _register(client, identity, "translator")
 
     await session.execute(
         update(agents)
@@ -147,7 +147,7 @@ async def _offline_run_with_metadata(client, session, name, agent_id, metadata):
 
 async def test_agui_run_with_valid_actor_chain_stores_verified_chain(client, session, new_identity):
     caller, agent_id_registrant = new_identity(), new_identity()
-    agent_id = await _register(client, agent_id_registrant, "sdk_1", "greeter")
+    agent_id = await _register(client, agent_id_registrant, "greeter")
     subject = {"type": "user", "id": "employee_x"}
     chain = [caller.sign_chain_hop(subject)]
 
@@ -166,7 +166,7 @@ async def test_agui_run_with_valid_actor_chain_stores_verified_chain(client, ses
 
 async def test_agui_run_with_invalid_actor_chain_401s(client, new_identity):
     agent_id_registrant = new_identity()
-    await _register(client, agent_id_registrant, "sdk_1", "greeter")
+    await _register(client, agent_id_registrant, "greeter")
 
     body = _run_input("thread_made_up")
     body["metadata"] = {"actorChain": ["not-a-real-jwt"]}
@@ -177,7 +177,7 @@ async def test_agui_run_with_invalid_actor_chain_401s(client, new_identity):
 
 async def test_agui_run_without_actor_chain_is_unaffected(client, session, new_identity):
     agent_id_registrant = new_identity()
-    agent_id = await _register(client, agent_id_registrant, "sdk_1", "greeter")
+    agent_id = await _register(client, agent_id_registrant, "greeter")
 
     resp = await _offline_run_with_metadata(client, session, "greeter", agent_id, {})
     assert resp.status_code == 200, resp.text

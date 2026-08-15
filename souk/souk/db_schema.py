@@ -1,6 +1,6 @@
 """Shared, dependency-free values needed by more than one souk entrypoint.
 
-souk/souk/db.py (the running app) and souk/alembic/env.py (migrations) both
+souk/souk/core.py (the running app) and souk/alembic/env.py (migrations) both
 need to know the target Postgres schema and quote it the same way when
 building search_path — but they can't both import souk.config.Settings:
 env.py deliberately avoids it, since that would pull in unrelated required

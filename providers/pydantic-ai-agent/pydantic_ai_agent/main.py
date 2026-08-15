@@ -19,7 +19,7 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.ui.ag_ui import AGUIAdapter
-from souk_agent_sdk import AgentHandle, KyokSigningAuth, SoukAgentClient
+from souk_agent_sdk import AgentHandle, KyokSigningAuth, SoukProvider
 from souk_agent_sdk.identity import load_or_create_identity, new_actor_chain, public_key_hex
 
 from pydantic_ai_agent.config import AgentConfig, load_config
@@ -157,9 +157,9 @@ async def main() -> None:
     config_path = os.environ.get("AGENT_TEMPLATE_CONFIG", "config.yaml")
     cfg = load_config(config_path)
 
-    # Loaded once up front (not inside SoukAgentClient) so the exact same
+    # Loaded once up front (not inside SoukProvider) so the exact same
     # identity is available here for signing sub-agent actor chains (see
-    # sub_agent_tool.AgentDeps.actor_chain) — SoukAgentClient loads the
+    # sub_agent_tool.AgentDeps.actor_chain) — SoukProvider loads the
     # same on-disk key itself for registration, so both end up with
     # identical keys without this being passed between them.
     identity_key_path = os.environ.get("SOUK_IDENTITY_KEY_PATH", "souk_identity.key")
@@ -179,14 +179,14 @@ async def main() -> None:
         )
         logger.info("built pydantic-ai agent '%s' (model=%s)", agent_cfg.name, agent_cfg.model)
 
-    client = SoukAgentClient(
+    provider = SoukProvider(
         cfg.souk_http_url,
         cfg.souk_grpc_url,
         handles,
         identity_key_path=identity_key_path,
         provider_name=cfg.provider_name,
     )
-    await client.run_forever()
+    await provider.run_forever()
 
 
 def run() -> None:

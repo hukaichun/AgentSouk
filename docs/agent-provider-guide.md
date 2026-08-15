@@ -83,12 +83,27 @@ repo as a regression fixture, not a live demo):
   shared callee ends up with two unrelated threads, one per caller — no
   cross-talk, even though it's the same `agent_id` on both branches.
 - **Cycles** (agent A delegates to B, and B's own logic calls back into
-  A): safe from deadlock — a callback lands on a fresh thread (no
+  A): no *scheduling* deadlock — a callback lands on a fresh thread (no
   `context_id` reuse means it's a brand-new call from souk's point of
   view), and souk's own event loop is never blocked by your `run_stream`
-  awaiting an outbound A2A call. **What souk does *not* do: stop you from
-  looping forever.** There's no depth limit, no cycle detection — if your
-  own logic unconditionally delegates back on every message, you've built
+  awaiting an outbound A2A call.
+
+  **Capacity is a different matter, and it is yours to get right.** If a
+  provider delegates to an agent *it hosts itself* — including back to the
+  same agent — the outer run is holding one of that provider's slots while
+  it waits, and the inner run needs the same provider to claim it. With
+  `max_claim=1` (in-process) or `max_concurrent_runs=1` (remote) that never
+  happens: the outer run sits `running` until the stall sweep gives up on
+  it, about two minutes later by default. Measured in-process; the remote
+  knob is the same number reaching the same queue. So a provider that
+  delegates to its own agents needs capacity for the whole chain, and one
+  that recurses should stay on the default (unlimited). Delegating to a
+  *different* provider is unaffected — it has its own budget, and a caller
+  capped at 1 is fine.
+
+  **What souk does *not* do: stop you from looping forever.** There's no
+  depth limit, no cycle detection — if your own logic unconditionally
+  delegates back on every message, you've built
   an infinite loop, and souk will happily keep running it (each hop
   eventually fails on its own `httpx` timeout, but only after real work
   and real LLM spend). Design your own base case, the same way you'd
@@ -132,9 +147,11 @@ the first place. Worth knowing rather than assuming cancellation
 uniformly "just works" for every caller.
 
 When it does happen (A2A `tasks/cancel`), souk sends a `cancel=true`
-envelope on the run's gRPC stream; the SDK's `_handle_run` races your
-`run_stream` against watching for it and calls `.cancel()` on the actual
-task running your generator the moment it arrives — delivering
+envelope on your current gRPC stream — a *request*, not a command: souk
+keeps persisting and relaying whatever your run emits afterwards, and if
+you finish normally anyway the run is recorded `completed`. The SDK
+complies on your behalf: its read loop calls `.cancel()` on the task
+running your generator the moment the frame arrives — delivering
 `CancelledError` into whatever it's currently awaiting, an in-flight LLM
 call included, not just at your next `yield`. `asyncio.CancelledError` is
 a `BaseException`, not an `Exception`, since Python 3.8 — an ordinary
@@ -170,7 +187,7 @@ other credential — back it up, never commit it.
 Both the gRPC and HTTP sides support TLS, and **neither is on by
 default** — plaintext is fine same-host (e.g. `docker compose up`), not
 for anything reachable over a real network. Pass
-`SoukAgentClient(ca_cert_path=...)` to verify the souk you're connecting
+`SoukProvider(ca_cert_path=...)` to verify the souk you're connecting
 to against a specific CA/self-signed cert rather than the system trust
 store — this is what actually confirms you're talking to *this* souk and
 not an impostor on the network; skipping it means you can't tell the

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Regenerate gRPC stubs from proto/souk.proto.
 #
-# With no args: regenerates both souk/souk/grpc_gen and
-# souk-agent-sdk/souk_agent_sdk/grpc_gen — the convenience path for local
+# With no args: regenerates both souk-server/souk_server/grpc_gen and
+# souk-agent-sdk/souk_agent_sdk/grpc_gen — the two sides of the wire, and
+# the convenience path for local
 # dev after editing proto/souk.proto (run from the repo root: `uv sync
 # --group dev && ./scripts/gen_proto.sh`).
 #
@@ -19,7 +20,7 @@ if [ "$#" -gt 0 ]; then
     OUTS=("$@")
 else
     ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-    OUTS=("$ROOT/souk/souk/grpc_gen" "$ROOT/souk-agent-sdk/souk_agent_sdk/grpc_gen")
+    OUTS=("$ROOT/souk-server/souk_server/grpc_gen" "$ROOT/souk-agent-sdk/souk_agent_sdk/grpc_gen")
 fi
 
 for OUT in "${OUTS[@]}"; do

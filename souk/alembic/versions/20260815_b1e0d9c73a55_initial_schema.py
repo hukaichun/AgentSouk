@@ -1,8 +1,8 @@
 """initial schema
 
-Revision ID: 9fc9cba7cf67
+Revision ID: b1e0d9c73a55
 Revises:
-Create Date: 2026-08-12 22:28:22.899182
+Create Date: 2026-08-15 18:10:00.000000
 
 souk's baseline schema, built with dialect-neutral SQLAlchemy Core ops so
 it renders correctly on both SQLite (souk's zero-config default) and
@@ -16,6 +16,18 @@ DB extension or DB-side id function to create here anymore.
 This file is intentionally self-contained (it does not import souk.schema):
 it is a frozen snapshot of the schema at this revision. Later schema changes
 are new migrations, not edits to this file.
+
+It replaces a four-revision chain — the original baseline plus three changes
+made within days of it: a `cancelling` run status, dropping the
+`sdk_client_id` column, and giving `providers` a fingerprint. souk has never
+been released and no database has ever run those migrations outside a
+developer's machine, so the history was worth less than the confusion of a
+baseline that creates a column a later revision deletes. *Why* each change
+happened is in the commits and in docs/library-architecture.md, which is
+where reasons belong; a migration chain only has to produce the schema.
+
+Anyone holding a database created by the old chain should recreate it — its
+alembic_version names a revision that no longer exists.
 """
 
 from typing import Sequence, Union
@@ -25,7 +37,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "9fc9cba7cf67"
+revision: str = "b1e0d9c73a55"
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -43,15 +55,21 @@ def upgrade() -> None:
     op.create_table(
         "providers",
         sa.Column("public_key", sa.String(), primary_key=True),
-        sa.Column("display_name", sa.String(), nullable=False),
+        # Derived from public_key (souk.identity.provider_fingerprint), and
+        # UNIQUE: it is an address, and two identities may not share one.
+        sa.Column("fingerprint", sa.String(), nullable=False),
+        # NULL means this identity never named itself, which is ordinary —
+        # the row exists because the identity registered, not because it
+        # chose a label.
+        sa.Column("display_name", sa.String(), nullable=True),
         sa.Column("updated_at", _TS, nullable=False),
+        sa.UniqueConstraint("fingerprint", name="uq_providers_fingerprint"),
     )
 
     op.create_table(
         "agents",
         sa.Column("agent_id", sa.String(), primary_key=True),
         sa.Column("name", sa.String(), nullable=False),
-        sa.Column("sdk_client_id", sa.String(), nullable=False),
         sa.Column("public_key", sa.String(), nullable=False),
         sa.Column("agent_card", _JSON, nullable=False),
         sa.Column("metadata", _JSON, nullable=False),
@@ -92,7 +110,8 @@ def upgrade() -> None:
         sa.CheckConstraint("kind IN ('message', 'run_status')", name="ck_thread_history_kind"),
         sa.CheckConstraint("protocol IN ('ag-ui', 'a2a')", name="ck_thread_history_protocol"),
         sa.CheckConstraint(
-            "status IN ('queued', 'running', 'input-required', 'resumed', 'completed', 'failed', 'cancelled')",
+            "status IN ('queued', 'running', 'input-required', 'resumed', 'cancelling', "
+            "'completed', 'failed', 'cancelled')",
             name="ck_thread_history_status",
         ),
         sa.UniqueConstraint("thread_id", "message_id", name="uq_thread_history_thread_message"),

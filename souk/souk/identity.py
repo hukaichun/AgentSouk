@@ -21,8 +21,15 @@ Two independent checks, at two different points:
   2. Every gRPC call (PollForWork/AgentSession): must present a bearer
      token issued by step 1 (see issue_session_token/verify_session_token).
      Cheap (HMAC verify), stateless (no session store — the token itself
-     carries sdk_client_id + an expiry, signed so it can't be forged
+     carries the public_key + an expiry, signed so it can't be forged
      without token_signing_secret).
+
+The token carries the *public key* because that is the only identity a
+provider has. It used to carry a self-declared `sdk_client_id` instead, and
+that was a real hole rather than a naming quibble: two unrelated keypairs
+could register under the same string and each claim the other's work
+(measured). Whatever a provider calls itself is not something souk verified;
+the key is.
 """
 
 from __future__ import annotations
@@ -54,12 +61,47 @@ SESSION_TOKEN_TTL_SECONDS = 3600
 SIGNATURE_FRESHNESS_WINDOW_SECONDS = 60
 
 
+# A short, stable stand-in for a provider's public key, for places a
+# 64-character hex string is unusable — chiefly an address a human reads or
+# types (see docs/library-architecture.md on addressing). Derived, never
+# minted: anyone holding the key can compute it, it is the same on every
+# souk, and there is nothing to store on the provider's side or hand out.
+#
+# 16 hex is 64 bits. That is not about accidental collisions (those would
+# need ~2^32 providers) but deliberate ones: grinding keypairs until one
+# matches a chosen provider's fingerprint costs ~2^64, out of reach. souk
+# also refuses a registration whose fingerprint already belongs to another
+# key (see repo.ensure_provider), so even a found collision blocks a
+# registration rather than impersonating anyone.
+FINGERPRINT_HEX_LENGTH = 16
+
+
+def provider_fingerprint(public_key: str) -> str:
+    """SHA-256 of the key's raw bytes, truncated. The bytes rather than the
+    hex text, so the answer does not depend on how the hex was cased."""
+    return hashlib.sha256(bytes.fromhex(public_key)).hexdigest()[:FINGERPRINT_HEX_LENGTH]
+
+
+def is_fingerprint(value: str) -> bool:
+    """Whether this is a fingerprint rather than a full public key. The two
+    are distinguishable by length — 16 hex against 64 — so one parameter can
+    accept either without ambiguity."""
+    return len(value) == FINGERPRINT_HEX_LENGTH
+
+
 def is_timestamp_fresh(timestamp: int) -> bool:
     return abs(time.time() - timestamp) <= SIGNATURE_FRESHNESS_WINDOW_SECONDS
 
 
-def registration_signing_payload(sdk_client_id: str, agent_names: list[str], timestamp: int) -> bytes:
-    return f"{sdk_client_id}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
+    """What a registration signs: which names are being claimed, and when.
+
+    The identity itself is not in here and does not need to be — the
+    signature is verified against the public_key presented alongside, so a
+    captured payload cannot be re-presented under a different key. What must
+    be covered is what the request *claims* (the names) and its freshness.
+    """
+    return f"{','.join(sorted(agent_names))}:{timestamp}".encode()
 
 
 # How long one freshly-signed hop stays usable. Only the last hop's expiry
@@ -139,7 +181,7 @@ def _hop_hash(token: str) -> str:
 def verify_actor_chain(chain: list[str]) -> ChainResult:
     """Verifies a caller-supplied identity chain — see
     souk_agent_sdk.identity.new_actor_chain/extend_actor_chain for how one
-    is built, and api_a2a._start_run for where this is called.
+    is built, and protocols.a2a's _start_run for where this is called.
 
     Each entry in `chain` is a standard compact JWT (alg=EdDSA), signed by
     whoever performed that hop, so any off-the-shelf JWT library can
@@ -240,18 +282,22 @@ def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) ->
         return False
 
 
-def issue_session_token(sdk_client_id: str, signing_secret: str) -> str:
+def issue_session_token(public_key: str, signing_secret: str) -> str:
     body = base64.urlsafe_b64encode(
-        json.dumps({"sdk_client_id": sdk_client_id, "exp": int(time.time()) + SESSION_TOKEN_TTL_SECONDS}).encode()
+        json.dumps({"public_key": public_key, "exp": int(time.time()) + SESSION_TOKEN_TTL_SECONDS}).encode()
     ).decode()
     signature = hmac.new(signing_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
     return f"{body}.{signature}"
 
 
 def verify_session_token(token: str, signing_secret: str) -> str | None:
-    """Returns the token's sdk_client_id if valid (correct signature, not
-    expired), else None. Called on every PollForWork/AgentSession — see
-    souk.grpc_server.
+    """Returns the public_key this token was issued to if it is valid
+    (correct signature, not expired), else None. Called on every
+    PollForWork/AgentSession — see souk_server.grpc_server — and by every worker
+    before it claims (see souk.worker).
+
+    That returned key *is* the provider: what it may claim, and which runs it
+    may report events for, are both decided from it.
     """
     try:
         body, signature = token.split(".", 1)
@@ -266,5 +312,5 @@ def verify_session_token(token: str, signing_secret: str) -> str | None:
         return None
     if payload.get("exp", 0) < time.time():
         return None
-    sdk_client_id = payload.get("sdk_client_id")
-    return sdk_client_id if isinstance(sdk_client_id, str) else None
+    public_key = payload.get("public_key")
+    return public_key if isinstance(public_key, str) else None

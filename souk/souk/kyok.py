@@ -3,7 +3,7 @@ OpenAI-compatible LLM bridge (see api_llm_bridge.py and
 docs/keep-your-own-key.md for the full picture).
 
 A KYOK token binds one run_id to the caller's bridge session_id (souk.
-api_llm_bridge's live registry) — the only thing /kyok/v1/chat/completions
+souk.kyok's KyokBridge) — the only thing /kyok/v1/chat/completions
 needs from the "api_key" a provider sends it is "which session should
 this be relayed to". Same signing mechanism as souk.identity.
 issue_session_token/verify_session_token (HMAC over a base64 JSON body,
@@ -16,7 +16,7 @@ Also carries `agent_id` — souk already knows, at the moment it mints this
 token (souk.api_agui._build_forwarded_props, called with the run's own
 agent_id), exactly which provider identity this run belongs to; the
 token says so explicitly rather than leaving that implicit. See
-api_llm_bridge.chat_completions for where this gets checked against
+protocols.kyok's KyokAdapter.complete for where this gets checked against
 souk.broker's live view of who's actually running run_id right now — a
 provider's identity is real (its Ed25519 keypair, souk_agent_sdk.
 identity) even though this HTTP endpoint itself, unlike PollForWork/

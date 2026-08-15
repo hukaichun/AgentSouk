@@ -16,16 +16,11 @@ import pytest
 from souk import repo
 
 
-class EchoAgent:
-    """An in-process agent, in the shape AG-UI already defines."""
+class EchoProvider:
+    """An in-process provider, in the shape souk's port asks for: told which
+    agent each run is for, streaming AG-UI events back."""
 
-    async def start(self, run_input: dict):
-        return self._events(run_input)
-
-    async def cancel(self, run_id: str) -> None:
-        pass
-
-    async def _events(self, run_input: dict):
+    async def run_stream(self, agent_id: str, run_input: dict):
         text = run_input["messages"][-1]["content"] if run_input.get("messages") else ""
         yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
@@ -34,50 +29,29 @@ class EchoAgent:
         yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
-class NeverFinishesAgent:
-    """Honours a cancel: stops producing when asked, and ends its stream."""
+class NeverFinishesProvider:
+    """Starts, then waits forever. Ends without RUN_FINISHED when its worker
+    stops it — the only way AG-UI can express "stopped without finishing"
+    (see handlers._handle_finish)."""
 
-    def __init__(self) -> None:
-        self._stop = asyncio.Event()
-
-    async def start(self, run_input: dict):
-        return self._events(run_input)
-
-    async def cancel(self, run_id: str) -> None:
-        self._stop.set()
-
-    async def _events(self, run_input: dict):
+    async def run_stream(self, agent_id: str, run_input: dict):
         yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
-        await self._stop.wait()
-        # Ends without RUN_FINISHED — the only way AG-UI can express
-        # "stopped without finishing" (see handlers._handle_finish).
-
-
-class IgnoresCancelAgent:
-    """Ignores the request and finishes anyway — which is its right, and
-    means the honest outcome is `completed`, not `cancelled`."""
-
-    def __init__(self) -> None:
-        self.cancel_seen = False
-        self._release = asyncio.Event()
-
-    async def start(self, run_input: dict):
-        return self._events(run_input)
-
-    async def cancel(self, run_id: str) -> None:
-        self.cancel_seen = True
-        self._release.set()
-
-    async def _events(self, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
-        await self._release.wait()
-        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        await asyncio.Event().wait()
 
 
 async def _register(souk, name: str, identity) -> str:
     async with souk.session() as session:
-        agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": name}])
+        agent_ids = await repo.register_agents(session, identity.public_key, [{"name": name}])
     return agent_ids[name]
+
+
+async def _register_with_token(souk, name: str, identity):
+    """Registration through souk's own door, which is the only one that
+    hands back a session token — what a worker needs to claim with."""
+    body = identity.register_body([{"name": name}])
+    return await souk.register_agents(
+        body["public_key"], body["signature"], body["timestamp"], body["agents"]
+    )
 
 
 async def _until(predicate, timeout: float = 1.0) -> None:
@@ -87,8 +61,9 @@ async def _until(predicate, timeout: float = 1.0) -> None:
 
 
 async def test_attach_start_and_read_back(souk, new_identity):
-    agent_id = await _register(souk, "echo", new_identity())
-    await souk.attach_provider(agent_id, EchoAgent())
+    identity = new_identity()
+    agent_id = await _register(souk, "echo", identity)
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "hi"}]})
 
@@ -128,11 +103,12 @@ async def test_roster_and_agent_lookup(souk, new_identity):
 
 
 async def test_cancel_a_running_agent(souk, new_identity):
-    agent_id = await _register(souk, "slow", new_identity())
-    await souk.attach_provider(agent_id, NeverFinishesAgent())
+    identity = new_identity()
+    agent_id = await _register(souk, "slow", identity)
+    await souk.attach_provider(identity.public_key, NeverFinishesProvider(), [agent_id])
 
     handle = await souk.start_run(agent_id, {"messages": []})
-    # Read the agent's first event before cancelling, so the provider
+    # Read the agent's first event before cancelling, so a worker
     # demonstrably has the run — otherwise this races the claim and would
     # silently exercise the never-handed-over path instead (which
     # test_a_cancel_before_any_provider_takes_the_run covers on purpose).
@@ -150,23 +126,38 @@ async def test_cancel_a_running_agent(souk, new_identity):
     assert souk.cancel_run(handle.run_id) is False
 
 
-async def test_a_provider_that_ignores_the_cancel_still_completes(souk, new_identity):
+async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identity):
     """souk asks; it does not compel. If the agent finishes anyway, the run
     completed — recording `cancelled` there would be souk claiming something
-    it never verified, and the run's own output would contradict it."""
-    agent_id = await _register(souk, "stubborn", new_identity())
-    agent = IgnoresCancelAgent()
-    await souk.attach_provider(agent_id, agent)
+    it never verified, and the run's own output would contradict it.
+
+    Driven through the claim/report methods rather than through souk's own
+    worker, because complying is a *worker's* decision (souk's in-process
+    one cancels the agent's task, as the reference SDK does remotely) and
+    this is about what core does with a worker that decides otherwise.
+    """
+    identity = new_identity()
+    registration = await _register_with_token(souk, "stubborn", identity)
+    agent_id = registration.agent_ids["stubborn"]
+    # This "worker" is the identity that claimed — its key, nothing else.
 
     handle = await souk.start_run(agent_id, {"messages": []})
-    stream = handle.events()
-    assert (await anext(stream))["type"] == "RUN_STARTED"
-    assert souk.cancel_run(handle.run_id) is True
+    claimed = await souk.claim_work(registration.session_token, [agent_id])
+    assert [c.run_id for c in claimed] == [handle.run_id]
 
-    events = [e async for e in stream]
+    souk.cancel_run(handle.run_id)
+    # Cancel requested, and this worker carries on regardless — souk keeps
+    # persisting and relaying what it produces, because that is real output.
+    souk.report_event(
+        handle.run_id,
+        {"type": "RUN_FINISHED", "threadId": handle.thread_id, "runId": handle.run_id},
+        claimed_by=identity.public_key,
+    )
+    souk.finish_run(handle.run_id, claimed_by=identity.public_key)
+
+    events = [e async for e in handle.events()]
     await _until(lambda: handle.run_id not in souk.active_runs())
 
-    assert agent.cancel_seen  # the request really was delivered
     assert events[-1]["type"] == "RUN_FINISHED"
     assert (await souk.get_run(handle.run_id))["status"] == "completed"
 
@@ -205,8 +196,9 @@ async def test_thread_lineage(souk, new_identity):
 
 
 async def test_start_run_reuses_an_existing_thread(souk, new_identity):
-    agent_id = await _register(souk, "echo", new_identity())
-    await souk.attach_provider(agent_id, EchoAgent())
+    identity = new_identity()
+    agent_id = await _register(souk, "echo", identity)
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
 
     thread_id = await souk.create_thread(agent_id)
     first = await souk.start_run(agent_id, {"messages": []}, thread_id=thread_id)
@@ -220,8 +212,9 @@ async def test_resume_keeps_the_same_run_id(souk, new_identity):
     """A run's identity is stable across pause/resume rounds — that is what
     lets a caller's task id keep pointing at the same task for its whole
     life instead of chasing a chain of new ids."""
-    agent_id = await _register(souk, "echo", new_identity())
-    await souk.attach_provider(agent_id, EchoAgent())
+    identity = new_identity()
+    agent_id = await _register(souk, "echo", identity)
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "one"}]})
     first_round = [e async for e in handle.events()]

@@ -26,11 +26,10 @@ from typing import TYPE_CHECKING, Any
 
 from souk import repo
 from souk.agui import build_run_agent_input
-from souk.broker import drain_run
 from souk.errors import AgentNotFound, AmbiguousAgentName, InvalidRunInput, RunNotFound
 from souk.identity import verify_actor_chain
 from souk.pause import is_resuming
-from souk.translate_a2a import (
+from souk.protocols.a2a_translate import (
     a2a_message_to_agui_messages,
     agui_event_to_a2a_update,
     build_task,
@@ -154,11 +153,11 @@ class A2AAdapter:
         run_id, thread_id, is_live = await self._start_run(
             agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
         )
-        run = self._souk.broker.get(run_id) if is_live else None
-        if run is not None:
+        live = is_live and self._souk.broker.get(run_id) is not None
+        if live:
             # No cleanup on early exit, deliberately: a caller disconnecting
             # mid-wait does not cancel the run.
-            events = [item async for item in drain_run(run)]
+            events = [item async for item in self._souk.broker.subscribe(run_id)]
         else:
             # Nothing live to wait on — already paused/finished, already
             # failed fast, or a duplicate call racing a live run. Report its
@@ -188,10 +187,14 @@ class A2AAdapter:
         run_id, thread_id, is_live = await self._start_run(
             agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
         )
-        run = self._souk.broker.get(run_id) if is_live else None
+        live = is_live and self._souk.broker.get(run_id) is not None
+        # Subscribed before `results` is iterated, for the same reason as
+        # AGUIAdapter's relay: a short run can finish before the caller
+        # starts reading, and a subscription taken then would be empty.
+        events = self._souk.broker.subscribe(run_id) if live else None
 
         async def results() -> AsyncIterator[dict[str, Any]]:
-            if run is None:
+            if not live:
                 # Same "nothing live" situation as tasks/send, but streaming:
                 # one status update reflecting the current persisted state,
                 # then close.
@@ -199,7 +202,7 @@ class A2AAdapter:
                 status = stored["status"] if stored else "completed"
                 yield status_update_for_run_status(run_id, thread_id, status)
                 return
-            async for item in drain_run(run):
+            async for item in events:
                 yield agui_event_to_a2a_update(item, run_id, thread_id)
             # Corrects the record: the loop above already sent whatever the
             # raw RUN_FINISHED translated to (always "completed", see

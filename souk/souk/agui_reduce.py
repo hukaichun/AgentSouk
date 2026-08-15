@@ -9,7 +9,7 @@ module docstrings for the same "works for any AG-UI agent" principle).
 This is what makes `thread_history` (and therefore `GET /threads/
 {thread_id}`) an actual source of truth for the full conversation,
 including tool calls — not just caller-side messages, which is all it
-persisted before (see grpc_server._handle_finish, the one caller of
+persisted before (see handlers._handle_finish, the one caller of
 this).
 """
 

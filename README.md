@@ -161,7 +161,8 @@ The project is structured as modular, independent components:
 | Module Path | Description |
 |---|---|
 | [`proto/souk.proto`](proto/souk.proto) | gRPC contract interface defining `PollForWork` and `AgentSession` |
-| [`souk/`](souk/) | Main Gateway Server: FastAPI HTTP endpoints, gRPC relay engine, and SQLite/Postgres persistence |
+| [`souk/`](souk/) | The core library: agents, threads, runs, the AG-UI/A2A adapters, and SQLite/Postgres persistence. Network-free — it depends on no web framework or gRPC at all |
+| [`souk-server/`](souk-server/) | The reference gateway: FastAPI HTTP endpoints, the gRPC relay engine, and the process bootstrap. Depends on `souk`; nothing depends on it |
 | [`souk-agent-sdk/`](souk-agent-sdk/) | Python SDK for agent providers: handles registration, polling, streaming, & delegation |
 | [`souk-client-sdk/`](souk-client-sdk/) | Python client library for consuming agents over AG-UI & KYOK |
 | [`souk-directory/`](souk-directory/) | Zero-backend Web Directory & live Chat UI (compiled TS/ES modules) |
@@ -178,17 +179,20 @@ The project is structured as modular, independent components:
 To run components individually on your host machine using [`uv`](https://github.com/astral-sh/uv):
 
 ```bash
-# 1. Build proto stubs, apply the schema, & start Souk Gateway Server
+# 1. Apply the schema (it belongs to souk, the library that owns the tables)
 cd souk && uv sync --group dev
-uv run bash ../scripts/gen_proto.sh souk/grpc_gen
 export SOUK_TOKEN_SIGNING_SECRET=dev-insecure-change-me  # never reuse this value outside local dev
 # SOUK_DATABASE_URL defaults to a local SQLite file (./souk.db) — zero
 # config for local dev. Point it at Postgres for a real deployment:
 #   export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
 uv run alembic upgrade head  # one-time DDL step — see souk/alembic/
+
+# 2. Build proto stubs & start the gateway (souk-server path-depends on souk)
+cd ../souk-server && uv sync --group dev
+uv run bash ../scripts/gen_proto.sh souk_server/grpc_gen
 uv run souk-server
 
-# 2. Run Example Pydantic-AI Provider
+# 3. Run Example Pydantic-AI Provider
 cd ../providers/pydantic-ai-agent && uv sync
 AGENT_TEMPLATE_CONFIG=config.example.yaml uv run --env-file ../../.env python -m pydantic_ai_agent.main
 
@@ -203,20 +207,23 @@ cd ../../agent-template && uv sync && uv run agent-template
 
 ### Running Tests
 
-The suite runs against SQLite with zero configuration:
+Two suites, one per distribution — `souk/tests/` covers the library,
+`souk-server/tests/` covers the HTTP and gRPC surfaces. Both run against
+SQLite with zero configuration:
 
 ```bash
-cd souk
-uv run pytest
+(cd souk && uv run pytest)
+(cd souk-server && uv run pytest)
 ```
 
-To run the same suite against Postgres instead, start one and point
+To run the same suites against Postgres instead, start one and point
 `SOUK_DATABASE_URL` at it:
 
 ```bash
 docker compose up paradedb -d
-cd souk
-SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk" uv run pytest
+export SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk"
+(cd souk && uv run pytest)
+(cd souk-server && uv run pytest)
 ```
 
 ---

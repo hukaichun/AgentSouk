@@ -1,22 +1,33 @@
-"""The port an agent reaches souk through.
+"""The port a provider reaches souk through.
 
-This is deliberately *the AG-UI agent shape* — a run input in, a stream of
-events out — rather than an interface of souk's own invention. AG-UI already
-defines an agent that way, and it is what `pydantic_ai.ui.ag_ui.AGUIAdapter`
-and `souk_agent_sdk`'s own `run_stream` already produce, so souk asks for the
-thing that already exists instead of a parallel one (see
-souk-no-forced-protocol-deviation, and docs/library-architecture.md for the
-earlier four-method draft this replaces).
+A **provider** is one identity offering one or more agents. That is what
+souk has always meant by the word — registration is per provider and carries
+a batch of agents (see `Souk.register_agents`), the roster groups by it, and
+`souk-agent-sdk` is one process holding several `AgentHandle`s. This port is
+the same thing for a provider that happens to live in souk's own process.
 
-Nothing here is network-shaped. A provider may be a local Python agent with
-no socket anywhere, a gRPC-connected remote agent, or — later — a peer souk
-node holding that agent's connection; core cannot tell the difference, which
-is the whole point.
+An **agent** is still exactly what AG-UI says it is: a run input in, a stream
+of events out. The only thing added is which agent a run is for:
 
-Connection strategy is deliberately *not* part of this contract. `start` is
-called once per run, but that says nothing about connections: a transport is
-free to multiplex every run of every agent over one connection, which is
-exactly what the gRPC implementation does.
+    async def run_stream(self, agent_id: str, run_input: dict) -> AsyncIterator[AgentEvent]
+
+`agent_id` is on the method, not smuggled into the input, because AG-UI's
+RunAgentInput carries thread and run ids and no agent identity, and souk does
+not widen someone else's schema. Without it a provider serving a translator
+and a summarizer cannot tell which of them a run is for — which made
+in-process providers effectively single-agent, while the gRPC one papered
+over the same gap with a private side-table.
+
+Nothing here is network-shaped. A provider may be a local Python object with
+no socket anywhere, or — over a wire — whatever `souk-agent-sdk` hosts; core
+cannot tell the difference, which is the point.
+
+What *drives* a provider is a worker loop (see souk/worker.py): it claims
+runs and pushes their events back. Core never calls a provider itself. That
+is the one thing the earlier version of this port got wrong — it had core
+call `start()` and pull a generator per run, which cost an extra queue, an
+extra routing table, and left an in-process provider with no way to say how
+much work it could take.
 """
 
 from __future__ import annotations
@@ -41,37 +52,29 @@ AgentEvent = Any
 
 
 @runtime_checkable
-class AgentProvider(Protocol):
-    """Anything that can run an agent and stream back AG-UI events.
+class Provider(Protocol):
+    """Anything that can run this identity's agents and stream AG-UI events.
 
-    Starting a run is an explicit act — `start` returns only once the run has
-    genuinely been handed over — and consuming its events is a separate one.
-    That split matters because it is what actually happens: an agent behind a
-    wire begins working the moment it receives its input and pushes events at
-    its own pace, whether or not souk is reading. Modelling the handover as
-    "iterate a lazy generator" would fuse the two and describe a pull that
-    isn't real; it also means the input goes out only if and when somebody
-    iterates, which leaves a cancel arriving first able to strand an agent
-    waiting for input that was never sent.
-
-    Structural, so there is nothing to subclass. A local AG-UI agent — whose
-    own `run_stream(run_input)` is already an async generator — is wrapped in
-    three lines:
+    Structural, so there is nothing to subclass. A provider hosting one agent
+    whose own `run_stream(run_input)` is already an async generator — what
+    `pydantic_ai.ui.ag_ui.AGUIAdapter` and `souk_agent_sdk`'s `AgentHandle`
+    produce — is a couple of lines:
 
         class Local:
-            async def start(self, run_input):
-                return agent.run_stream(run_input)
+            async def run_stream(self, agent_id, run_input):
+                async for event in my_agent.run_stream(run_input):
+                    yield event
+
+    An async generator function, called and iterated directly — the same
+    shape and the same call the SDK makes on the far side of a wire, so an
+    agent moving between in-process and remote is the same object either way.
+
+    Cancellation is deliberately not a method here. souk asks a *worker* to
+    stop a run and the worker decides what that means (souk's own cancels the
+    task running this generator, delivering CancelledError into whatever it
+    is awaiting); a provider that wants to ignore the request and finish
+    normally can, and souk records `completed` because that is what it
+    observed. See docs/library-architecture.md on cancellation.
     """
 
-    async def start(self, run_input: dict) -> AsyncIterator[AgentEvent]: ...
-
-    async def cancel(self, run_id: str) -> None:
-        """Ask the agent to stop. A request, not a command.
-
-        souk does not enforce it and must not pretend to: the provider may
-        honour it immediately, take a while, or ignore it and run to
-        completion. Whatever it emits meanwhile is real output. What
-        actually happened is read off the stream's ending, not assumed here
-        — see souk.handlers._handle_finish.
-        """
-        ...
+    def run_stream(self, agent_id: str, run_input: dict) -> AsyncIterator[AgentEvent]: ...

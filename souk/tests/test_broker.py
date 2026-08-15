@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from souk.broker import Claim, Fail, FinishStream, RelayEvent, RequestCancel, RunBroker, request_cancel
+from souk.broker import Claim, Fail, FinishStream, RelayEvent, RequestCancel, RunBroker
 
 
 async def _until(predicate, timeout: float = 1.0) -> None:
@@ -75,7 +75,7 @@ async def test_pipeline_dispatches_commands_to_the_right_handler_in_order():
 
     handlers = {Claim: on_claim, RelayEvent: on_relay, FinishStream: on_finish}
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui", handlers)
-    run.in_queue.put_nowait(Claim(provider=object()))
+    run.in_queue.put_nowait(Claim())
     run.in_queue.put_nowait(RelayEvent({}))
     run.in_queue.put_nowait(FinishStream())
 
@@ -108,7 +108,7 @@ async def test_pipeline_terminates_immediately_on_cancel_before_any_claim():
         seen.append("cancel")
 
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui", {RequestCancel: on_cancel})
-    assert run.provider is None
+    assert run.claimed_by is None
     run.in_queue.put_nowait(RequestCancel())
 
     await _until(lambda: broker.get("run_1") is None)
@@ -128,7 +128,7 @@ async def test_pipeline_stays_alive_after_cancel_once_claimed_waiting_for_finish
     seen: list[str] = []
 
     async def on_claim(run, cmd):
-        run.provider = cmd.provider
+        pass
 
     async def on_cancel(run, cmd):
         seen.append("cancel")
@@ -138,7 +138,7 @@ async def test_pipeline_stays_alive_after_cancel_once_claimed_waiting_for_finish
 
     handlers = {Claim: on_claim, RequestCancel: on_cancel, FinishStream: on_finish}
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui", handlers)
-    run.in_queue.put_nowait(Claim(provider=object()))
+    broker.claim(["agent_1"], claimed_by="sdk_1")
     run.in_queue.put_nowait(RequestCancel())
 
     await _until(lambda: seen == ["cancel"])
@@ -161,24 +161,51 @@ def test_request_cancel_marks_the_run_synchronously_before_any_pipeline_processi
     broker = RunBroker()
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
     assert not run.cancel_requested
-    request_cancel(run)
+    broker.request_cancel("run_1")
     assert run.cancel_requested
     assert run.in_queue.qsize() == 1
 
 
-def test_poll_skips_a_run_cancelled_before_any_agent_claimed_it():
+def test_claim_skips_a_run_cancelled_before_any_worker_claimed_it():
     broker = RunBroker()
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
-    request_cancel(run)
-    assert broker.poll(["agent_1"]) == []
+    broker.request_cancel(run.run_id)
+    assert broker.claim(["agent_1"], claimed_by="sdk_1") == []
 
 
-def test_poll_does_not_let_a_cancelled_run_block_a_healthy_one_behind_it():
+def test_claim_does_not_let_a_cancelled_run_block_a_healthy_one_behind_it():
     broker = RunBroker()
     cancelled = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
-    request_cancel(cancelled)
+    broker.request_cancel(cancelled.run_id)
     healthy = broker.enqueue_run("run_2", "agent_1", "thread_1", {}, "ag-ui")
-    assert broker.poll(["agent_1"]) == [healthy]
+    assert broker.claim(["agent_1"], claimed_by="sdk_1") == [healthy]
+
+
+def test_claiming_records_the_claimer_and_queues_the_claim_in_one_step():
+    """The window the old pull model had to work around: a run was handed
+    out, and only later — over a wire, on another call — did the claimer say
+    it had taken it. Anything arriving in between saw a run nobody held.
+    Here the two happen with no await in between, so there is no such
+    moment: `claimed_by` is set and Claim is queued before this returns.
+    """
+    broker = RunBroker()
+    run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
+
+    assert broker.claim(["agent_1"], claimed_by="sdk_1", cancel_notify=None) == [run]
+
+    assert run.claimed_by == "sdk_1"
+    assert isinstance(run.in_queue.get_nowait(), Claim)
+
+
+def test_a_second_claim_finds_nothing_left_to_take():
+    """What makes max_claim a real budget rather than advice: a claimed run
+    is gone from the pending queue, so another worker (or the same one
+    polling again) cannot pick it up a second time."""
+    broker = RunBroker()
+    broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
+
+    assert [r.run_id for r in broker.claim(["agent_1"], claimed_by="sdk_1")] == ["run_1"]
+    assert broker.claim(["agent_1"], claimed_by="sdk_2") == []
 
 
 @pytest.mark.asyncio

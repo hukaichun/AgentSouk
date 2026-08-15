@@ -33,14 +33,12 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import CoreSettings
 from souk.core import Souk
 from souk.identity import registration_signing_payload
-from souk.server import create_app
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -103,16 +101,9 @@ async def session(souk: Souk) -> AsyncIterator[AsyncSession]:
         yield s
 
 
-@pytest.fixture
-async def client(souk: Souk) -> AsyncIterator[AsyncClient]:
-    transport = ASGITransport(app=create_app(souk))
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
-        yield c
-
-
 class Identity:
     """A throwaway Ed25519 keypair plus a helper to build a signed
-    /agents/register body — mirrors souk_agent_sdk.identity's
+    registration — mirrors souk_agent_sdk.identity's
     sign/public_key_hex/registration_signing_payload exactly (souk doesn't
     depend on souk_agent_sdk, so this is reimplemented directly against
     `cryptography` rather than pulled in as a cross-project test-only
@@ -141,12 +132,10 @@ class Identity:
         }
         return jwt.encode(payload, self._key, algorithm="EdDSA")
 
-    def register_body(self, sdk_client_id: str, agents: list[dict]) -> dict:
+    def register_body(self, agents: list[dict]) -> dict:
         timestamp = int(time.time())
-        names = [a["name"] for a in agents]
-        payload = registration_signing_payload(sdk_client_id, names, timestamp)
+        payload = registration_signing_payload([a["name"] for a in agents], timestamp)
         return {
-            "sdk_client_id": sdk_client_id,
             "public_key": self.public_key,
             "signature": self._key.sign(payload).hex(),
             "timestamp": timestamp,

@@ -3,6 +3,13 @@ name = "pydantic-ai-agent"
 version = "0.1.0"
 description = "Example souk provider: config (system prompt + MCP servers + sub-agents) in, souk-connected AG-UI agent out, built on pydantic-ai. One of several provider examples under providers/ — see providers/README.md."
 requires-python = ">=3.12"
+# Not for an index. This package depends on a sibling in this repo by bare
+# name (souk-agent-sdk), resolvable only through the [tool.uv.sources] path below —
+# uploaded anywhere, that name would resolve to whatever a stranger has
+# published under it. PyPI refuses an unrecognised classifier, which is what
+# makes this line a guard rather than a comment. Remove it when souk-agent-sdk is
+# genuinely published and this can name a real version.
+classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "souk-agent-sdk",
     "pydantic-ai[ag-ui]>=0.0.49",

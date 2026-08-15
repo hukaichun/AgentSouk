@@ -25,11 +25,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from souk.identity import provider_fingerprint
 from souk.ids import new_id
 from souk.schema import agents, providers, run_events, thread_history, threads
 
@@ -51,6 +53,15 @@ def _upsert(session: AsyncSession, table):
     return (pg_insert if is_postgres else sqlite_insert)(table)
 
 
+class ProviderFingerprintTaken(Exception):
+    """A different key already holds this key's fingerprint — its short
+    address (see souk.identity.provider_fingerprint). Refused rather than
+    allowed, because two identities sharing an address is the one thing an
+    address may not do. Raised from the UNIQUE constraint rather than from a
+    check, so two colliding registrations arriving together cannot both pass.
+    """
+
+
 class ThreadNotFound(Exception):
     """Raised by ensure_thread when a caller-supplied thread_id doesn't
     exist — a caller error (referencing an id souk never issued, or one
@@ -67,25 +78,52 @@ class ThreadOwnershipMismatch(Exception):
     """
 
 
-async def upsert_provider_name(session: AsyncSession, public_key: str, display_name: str) -> None:
-    """Sets/updates this public_key's storefront label — see
-    souk/schema.py's providers table notes. Only called when a registration
-    batch actually includes `provider_name`; register_agents leaves any
-    existing label untouched otherwise (a registration that doesn't
-    happen to pass one isn't "no name", it's "didn't say").
+async def ensure_provider(session: AsyncSession, public_key: str) -> None:
+    """Record this identity, so it has a row whether or not it ever names
+    itself — that row is what a short address resolves through (see
+    souk/schema.py's providers table).
+
+    Raises `ProviderFingerprintTaken` if another key already holds this
+    key's fingerprint. The check is the UNIQUE index doing it, not a
+    read-then-write here: two colliding registrations arriving together
+    would both pass a check and one would still have to lose, and only the
+    database can decide that without a race.
     """
     now = _utcnow()
-    stmt = _upsert(session, providers).values(public_key=public_key, display_name=display_name, updated_at=now)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[providers.c.public_key],
-        set_={"display_name": stmt.excluded.display_name, "updated_at": now},
+    stmt = _upsert(session, providers).values(
+        public_key=public_key,
+        fingerprint=provider_fingerprint(public_key),
+        updated_at=now,
     )
-    await session.execute(stmt)
+    # Nothing to update: both columns here are derived from the key, so a
+    # second registration by the same identity has nothing new to say.
+    stmt = stmt.on_conflict_do_nothing(index_elements=[providers.c.public_key])
+    try:
+        await session.execute(stmt)
+    except IntegrityError as e:
+        await session.rollback()
+        raise ProviderFingerprintTaken(
+            f"another provider already holds fingerprint {provider_fingerprint(public_key)}"
+        ) from e
+
+
+async def set_provider_name(session: AsyncSession, public_key: str, display_name: str) -> None:
+    """Sets this identity's storefront label — see souk/schema.py's providers
+    table notes. Only called when a registration batch actually includes
+    `provider_name`; register_agents leaves any existing label untouched
+    otherwise (a registration that doesn't happen to pass one isn't "no
+    name", it's "didn't say"). The row itself is ensured separately, since
+    an identity exists whether or not it is named.
+    """
+    await session.execute(
+        update(providers)
+        .where(providers.c.public_key == public_key)
+        .values(display_name=display_name, updated_at=_utcnow())
+    )
 
 
 async def register_agents(
     session: AsyncSession,
-    sdk_client_id: str,
     public_key: str,
     agents_batch: list[dict[str, Any]],
     provider_name: str | None = None,
@@ -105,8 +143,9 @@ async def register_agents(
 
     Returns {name: agent_id} for this batch.
     """
+    await ensure_provider(session, public_key)
     if provider_name is not None:
-        await upsert_provider_name(session, public_key, provider_name)
+        await set_provider_name(session, public_key, provider_name)
 
     names = [agent["name"] for agent in agents_batch]
     existing = (
@@ -135,7 +174,6 @@ async def register_agents(
         stmt = _upsert(session, agents).values(
             agent_id=agent_id,
             name=name,
-            sdk_client_id=sdk_client_id,
             public_key=public_key,
             agent_card=card,
             metadata=agent.get("metadata", {}),
@@ -147,7 +185,6 @@ async def register_agents(
         stmt = stmt.on_conflict_do_update(
             index_elements=[agents.c.agent_id],
             set_={
-                "sdk_client_id": stmt.excluded.sdk_client_id,
                 "agent_card": stmt.excluded.agent_card,
                 "metadata": stmt.excluded.metadata,
                 "last_seen_at": now,
@@ -170,13 +207,18 @@ async def register_agents(
     return agent_ids
 
 
-async def get_agent_ids_for_sdk_client(session: AsyncSession, sdk_client_id: str) -> set[str]:
-    """Which agent_ids this token's holder actually owns — used to stop a
-    valid token for one provider being used to poll for another provider's
-    agent ids in souk.grpc_server.PollForWork.
+async def get_agent_ids_for_public_key(session: AsyncSession, public_key: str) -> set[str]:
+    """Which agent_ids this key actually owns — what stops a valid token for
+    one provider being used to claim another's work (see Souk.claim_work).
+
+    By public_key because that is what ownership *is* here: agent_id is
+    assigned per (public_key, name) and de-listing sweeps by public_key. This
+    used to filter on a self-declared `sdk_client_id` instead, which two
+    unrelated keypairs could pick the same value for — and then each could
+    claim the other's runs, measured, not theorised.
     """
     rows = (
-        await session.execute(select(agents.c.agent_id).where(agents.c.sdk_client_id == sdk_client_id))
+        await session.execute(select(agents.c.agent_id).where(agents.c.public_key == public_key))
     ).scalars().all()
     return set(rows)
 
@@ -222,7 +264,7 @@ async def get_agent_by_id(session: AsyncSession, agent_id: str) -> dict[str, Any
 
 
 async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | None:
-    """Just the identity half of get_agent_by_id — see souk.api_llm_bridge.
+    """Just the identity half of get_agent_by_id — see souk.protocols.kyok.
     chat_completions, which needs this to verify a KyokSigningAuth
     signature (souk_agent_sdk.kyok_auth) against the actual key this
     agent_id registered with, without pulling the whole agent_card/
@@ -236,6 +278,46 @@ async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | No
             )
         )
     ).scalars().first()
+
+
+async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict[str, Any] | None:
+    """The agent this identity registered under this name, or None.
+
+    `provider` is the identity's public key or its fingerprint — the two are
+    different lengths (64 hex against 16), so one parameter takes either
+    without ambiguity and neither can be mistaken for the other.
+
+    Addressing an agent by *whose* it is and what they called it, which is
+    what an agent's identity has been all along: `UNIQUE(public_key, name)`
+    is the natural key an agent_id is assigned per, and de-listing sweeps by
+    public_key. So unlike resolve_agents_by_name this can never be
+    ambiguous — the pair is either registered or it is not — and callers
+    have nothing to disambiguate and no 409 to surface.
+
+    A delisted agent is not found, same as get_agent_by_id.
+    """
+    row = (
+        await session.execute(
+            select(
+                agents.c.agent_id,
+                agents.c.name,
+                agents.c.public_key,
+                agents.c.agent_card,
+                agents.c.metadata,
+                agents.c.joined_at,
+                agents.c.last_seen_at,
+            )
+            # Outer, so addressing by the full key still works for an agent
+            # whose identity somehow has no providers row.
+            .select_from(agents.outerjoin(providers, providers.c.public_key == agents.c.public_key))
+            .where(
+                or_(agents.c.public_key == provider, providers.c.fingerprint == provider),
+                agents.c.name == name,
+                agents.c.delisted_at.is_(None),
+            )
+        )
+    ).mappings().first()
+    return dict(row) if row else None
 
 
 async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[str, Any]]:
@@ -312,7 +394,7 @@ async def list_agents(
 
 async def get_agent_name_for_public_key(session: AsyncSession, public_key: str) -> str | None:
     """Resolves a verified caller's public key (see souk.identity's
-    a2a_call_signing_payload / api_a2a._start_run) back to one of its
+    a2a_call_signing_payload / protocols.a2a's _start_run) back to one of its
     registered agent names, purely for audit/display — if the key owns
     several names this just picks one, since the point is establishing
     "this is a known, registered identity", not which specific name.
@@ -342,7 +424,7 @@ async def create_thread(
 ) -> str:
     """Always mints a genuinely fresh thread_id (souk.ids.new_id('thread'))
     and stores it. Callers: the optional `POST /threads` endpoint
-    (api_agui.create_thread), and `ensure_thread` itself — both its
+    (Souk.create_thread), and `ensure_thread` itself — both its
     `parent_thread_id` case (no existing child thread for that pairing yet)
     and its no-id-at-all/unrecognized-id fallback (see that function's
     docstring and souk-no-forced-protocol-deviation: a standard AG-UI/A2A
@@ -400,7 +482,7 @@ async def ensure_thread(
        when processing a Message that does not include one"), not an
        error. This holds even when `parent_thread_id` is given (a
        sub-agent call carrying `Message.referenceTaskIds` — see
-       api_a2a._start_run): lineage recording and session continuity are
+       protocols.a2a's _start_run): lineage recording and session continuity are
        deliberately orthogonal (A2A's own `referenceTaskIds` is
        explicitly informational-only, not a session-grouping primitive
        — see souk-no-forced-protocol-deviation). souk still stores
@@ -431,11 +513,11 @@ async def ensure_thread(
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
     """Direct children of `thread_id` (see threads.parent_thread_id) —
-    walked recursively by the caller (api_agui.get_thread_tree) to build a
+    walked recursively by the caller (Souk.get_thread_tree) to build a
     full lineage tree. souk is the one party that actually sees every A2A
     hop, so this is data it can own outright; it only gets populated when
     a caller sets Message.referenceTaskIds though (real A2A, see
-    api_a2a._start_run), so it's only as complete as callers choose to
+    protocols.a2a's _start_run), so it's only as complete as callers choose to
     make it.
     """
     rows = (
@@ -504,7 +586,7 @@ async def create_run(
     # run_id is minted in Python (souk.ids.new_id('run')). message_id is set
     # explicitly to NULL — that column carries a real id only on 'message'
     # rows, and a 'run_status' row must not pick one up. A2A's Task.id is
-    # just this run_id (see api_a2a._start_run) — no separate task_id.
+    # just this run_id (see protocols.a2a's _start_run) — no separate task_id.
     run_id = new_id("run")
     await session.execute(
         insert(thread_history).values(
@@ -550,7 +632,7 @@ async def reopen_run(
     its *same* run_id, instead of minting a new one via create_run — see
     souk/pause.py's module docstring: a stable identity across however
     many pause/resume rounds a run goes through (HITL approval) is what
-    lets a caller's A2A Task.id (== this run_id, see api_a2a._start_run)
+    lets a caller's A2A Task.id (== this run_id, see protocols.a2a's _start_run)
     keep pointing at the same task for its whole life (see api_a2a.py's
     tasks/get, tasks/cancel) instead of needing to chase a resume chain.
 
@@ -610,8 +692,8 @@ async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> di
     """The thread's run that's still 'open' in some sense — not yet
     completed/failed/cancelled. Used to enforce a single active run per
     thread: while one exists, a new call on the same thread must not
-    start a second, concurrent one (see api_agui.run_agent /
-    api_a2a._start_run) — that would fork the thread's otherwise linear
+    start a second, concurrent one (see protocols.agui's AGUIAdapter.run /
+    protocols.a2a's _start_run) — that would fork the thread's otherwise linear
     history with no clean way to merge it back.
     """
     row = (
@@ -647,7 +729,7 @@ async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str
 
 async def touch_run_activity(session: AsyncSession, run_id: str) -> None:
     """Called whenever an event is relayed for a run — see
-    souk.grpc_server._relay_event — so a run that's producing output
+    souk_server's AgentSession relay — so a run that's producing output
     doesn't look stalled even without a status change.
     """
     await session.execute(
@@ -767,7 +849,7 @@ async def fail_unclaimed_runs(
     ambiguously so) when the call was made, got queued, then went dark
     before ever polling for it. The common "target already known offline
     at call time" case is handled synchronously instead (see
-    api_a2a._start_run/api_agui.run_agent's fast-fail path) — this sweep is
+    protocols.a2a's _start_run/protocols.agui's AGUIAdapter.run's fast-fail path) — this sweep is
     only the fallback for the race, not the primary mechanism, so it's
     deliberately not firing on every provider that's simply throttling
     itself via PollRequest.max_claim (see fail_stalled_runs's docstring on
@@ -830,7 +912,7 @@ async def append_run_event(session: AsyncSession, run_id: str, seq: int, event_j
 async def get_run_events(session: AsyncSession, run_id: str, since_seq: int = 0) -> list[dict[str, Any]]:
     """`since_seq` (exclusive) restricts this to one pause/resume round's
     own events — see broker.Run.round_starting_seq's docstring for why
-    that matters to grpc_server._handle_finish.
+    that matters to handlers._handle_finish.
     """
     rows = (
         await session.execute(

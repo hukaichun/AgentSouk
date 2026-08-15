@@ -19,7 +19,7 @@ so ids minted before and after this change are indistinguishable.
 Callers that never touch a database row still use this too: a
 provider-generated messageId gets remapped in souk.agui.rewrite_message_ids
 (an assistant reply is relayed live, never stored as a thread_history row),
-and souk.api_llm_bridge's in-memory KYOK request tracking.
+and souk.protocols.kyok's in-memory KYOK request tracking.
 """
 
 import secrets

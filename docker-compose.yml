@@ -17,7 +17,7 @@ services:
 
   # One-shot: applies souk/alembic/ (DDL) against paradedb, then exits.
   # Split out from the `souk` service below on purpose — souk itself never
-  # runs DDL at startup (see souk/server.py's startup()), so a real
+  # runs DDL at startup (see souk-server's server.py startup()), so a real
   # deployment runs this step separately with DDL-capable credentials and
   # gives the running server a DML-only role instead. Local dev reuses the
   # same `souk` Postgres user for both here, for simplicity only.
@@ -27,7 +27,10 @@ services:
     image: agentsouk-souk
     build:
       context: .
-      dockerfile: souk/Dockerfile
+      dockerfile: souk-server/Dockerfile
+    # The schema belongs to souk (the library owns its tables), so this runs
+    # alembic from there rather than from souk-server; the image carries both.
+    working_dir: /app/souk
     command: ["uv", "run", "alembic", "upgrade", "head"]
     depends_on:
       paradedb:
@@ -44,7 +47,7 @@ services:
     image: agentsouk-souk
     build:
       context: .
-      dockerfile: souk/Dockerfile
+      dockerfile: souk-server/Dockerfile
     ports:
       - "8000:8000"
       - "50051:50051"

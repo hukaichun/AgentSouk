@@ -14,6 +14,7 @@ independently:
 
 ```bash
 cd souk && uv sync --group dev
+cd souk-server && uv sync --group dev   # path-depends on souk
 cd souk-agent-sdk && uv sync --group dev
 cd agent-template && uv sync   # path-depends on souk-agent-sdk
 ```
@@ -29,18 +30,27 @@ uv run bash scripts/gen_proto.sh
 
 ## Running the tests
 
-`souk/` is the only subproject with a test suite so far (`souk/tests/`) —
-it holds nearly all of the actual business logic (registration/identity,
-routing, offline handling). It runs against **SQLite by default**, with no
-database to stand up first — souk's schema and queries are dialect-neutral
-(see `souk/schema.py` and `souk/repo.py`), so the same suite exercises the
-same semantics on either backend.
+Two subprojects have suites. `souk/tests/` holds nearly all of the business
+logic (registration/identity, claiming, routing, offline handling) and needs
+no stubs and no web framework — souk depends on neither. `souk-server/tests/`
+covers what only exists once there is a socket: the HTTP surfaces, the gRPC
+servicer, and the KYOK endpoints.
+
+Both run against **SQLite by default**, with no database to stand up first —
+souk's schema and queries are dialect-neutral (see `souk/schema.py` and
+`souk/repo.py`), so the same suites exercise the same semantics on either
+backend. The schema itself is applied by `souk`'s alembic either way, which
+is why souk-server's tests reach across to `souk/alembic.ini`.
 
 ```bash
 cd souk
 uv sync --group dev
-uv run bash ../scripts/gen_proto.sh souk/grpc_gen
 uv run pytest -v                 # SQLite, zero config
+
+cd ../souk-server
+uv sync --group dev
+uv run bash ../scripts/gen_proto.sh souk_server/grpc_gen
+uv run pytest -v
 ```
 
 To run the exact same suite against Postgres, export a DSN first (the
@@ -48,8 +58,9 @@ To run the exact same suite against Postgres, export a DSN first (the
 
 ```bash
 docker compose up paradedb -d    # or point at any local Postgres
-SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk \
-uv run pytest -v
+export SOUK_DATABASE_URL=postgresql+psycopg://souk:souk@localhost:5433/souk
+(cd souk && uv run pytest -v)
+(cd souk-server && uv run pytest -v)
 ```
 
 `conftest.py` supplies a throwaway SQLite file and a test signing secret

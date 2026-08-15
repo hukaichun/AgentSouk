@@ -5,20 +5,24 @@ someone else" without knowing whether anyone is listening over HTTP, so it
 raises these instead of an `HTTPException`. Mapping them onto status codes is
 the serving layer's job — the only layer that knows what a status code is.
 
-`repo` keeps its own ThreadNotFound / ThreadOwnershipMismatch, which predate
-this module and are equally part of the vocabulary; they are re-exported here
-so a caller has one place to import from.
+`repo` keeps its own ThreadNotFound / ThreadOwnershipMismatch /
+ProviderFingerprintTaken — the first two predate this module and the third is
+raised by a database constraint rather than by a decision, which is where it
+belongs. All are equally part of the vocabulary and are re-exported here so a
+caller has one place to import from.
 """
 
 from __future__ import annotations
 
-from souk.repo import ThreadNotFound, ThreadOwnershipMismatch
+from souk.repo import ProviderFingerprintTaken, ThreadNotFound, ThreadOwnershipMismatch
 
 __all__ = [
     "AgentNotFound",
     "InvalidRegistration",
+    "KyokRejected",
     "AmbiguousAgentName",
     "InvalidRunInput",
+    "ProviderFingerprintTaken",
     "RunNotFound",
     "SoukError",
     "ThreadNotFound",
@@ -53,6 +57,19 @@ class InvalidRegistration(SoukError):
     signature, or a timestamp too far from souk's clock to rule out a
     replay. Applies identically to a provider in this process and one
     across a network: being in-process is not a reason to be trusted."""
+
+
+class KyokRejected(SoukError):
+    """A KYOK completion was refused. Carries the status a caller should be
+    told, because the reasons differ in kind — an unusable token (401), a run
+    that is no longer live or an agent that isn't registered (403), and nobody
+    claiming the completion in time (502) — and flattening them would lose
+    information the caller needs to know whether to retry.
+    """
+
+    def __init__(self, message: str, *, status: int) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 class RunNotFound(SoukError):

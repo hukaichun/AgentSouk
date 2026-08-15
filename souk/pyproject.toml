@@ -1,11 +1,13 @@
 [project]
 name = "souk"
 version = "0.1.0"
-description = "Agent Souk gateway server — AG-UI + A2A HTTP gateway and gRPC relay to agent-side SDKs"
+description = "Agent Souk core — the network-free library: agents, threads, runs, and the protocol adapters"
 requires-python = ">=3.12"
+# No fastapi, uvicorn, sse-starlette or grpcio here, and that is the point:
+# core knows a database and nothing else, so it cannot import a transport
+# even by accident (see docs/library-architecture.md). Serving lives in the
+# sibling `souk-server` distribution, which depends on this one.
 dependencies = [
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
     "sqlalchemy[asyncio]>=2.0",
     # SQLite is souk's zero-config default backend (see souk/config.py's
     # database_url), so its async driver is a core dependency — a plain
@@ -13,11 +15,6 @@ dependencies = [
     # `postgres` extra below.
     "aiosqlite>=0.20",
     "pydantic-settings>=2.6",
-    "grpcio>=1.66",
-    # Same reasoning as souk-agent-sdk's own pyproject.toml: the
-    # generated grpc_gen/*_pb2.py stubs import google.protobuf directly.
-    "protobuf>=5.26",
-    "sse-starlette>=2.1",
     "ag-ui-protocol>=0.1.19",
     "cryptography>=42.0",
     "pyjwt>=2.9",
@@ -35,23 +32,18 @@ dependencies = [
 # for dev/CI/single-node but not a busy gateway — see souk/config.py).
 postgres = ["psycopg[binary,pool]>=3.2"]
 
-[project.scripts]
-souk-server = "souk.server:main"
-
-# grpcio-tools to regenerate souk/grpc_gen from proto/souk.proto — see
-# scripts/gen_proto.sh and this package's Dockerfile. Not a runtime
-# dependency (souk only needs grpcio itself, above, once stubs exist).
-# pytest/pytest-asyncio/httpx are for souk/tests/. The suite runs against
-# SQLite out of the box; set SOUK_DATABASE_URL to a Postgres DSN (and
-# install the `postgres` extra) to run it against Postgres too — see
-# CONTRIBUTING.md. psycopg is pulled into the dev group so the Postgres
-# path is always testable locally without the extra.
+# pytest/pytest-asyncio are for souk/tests/. The suite runs against SQLite
+# out of the box; set SOUK_DATABASE_URL to a Postgres DSN (and install the
+# `postgres` extra) to run it against Postgres too — see CONTRIBUTING.md.
+# psycopg is pulled into the dev group so the Postgres path is always
+# testable locally without the extra. No httpx or grpcio-tools: nothing here
+# speaks a protocol, and the test that enforces that (tests/
+# test_core_is_network_free.py) would have nothing to catch if a transport
+# were installed alongside anyway.
 [dependency-groups]
 dev = [
-    "grpcio-tools>=1.66",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "httpx>=0.27",
     "psycopg[binary,pool]>=3.2",
 ]
 

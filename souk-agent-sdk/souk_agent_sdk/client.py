@@ -1,10 +1,27 @@
-"""Agent-side SDK: registers a batch of AG-UI-shaped agents with a souk,
-long-polls for work while idle, and — only once there's actually work to
-do — opens one persistent, multiplexed gRPC AgentSession stream shared by
-every run currently in flight, not reopened per run (see proto/souk.proto).
-The stream closes again once no more work is queued, so an idle provider
-holds no persistent stream at all, just a periodic long-polling PollForWork
-call (see _run_connection/_active_session).
+"""A souk provider: one identity, several agents, and the loop that serves
+them.
+
+`SoukProvider` is named for what it *is* in souk's own vocabulary — a
+provider is one keypair offering a batch of agents, which is exactly what
+this object holds. It is a client of souk's API, and it contains a worker
+loop, and it routes by agent_id; those are things it does. souk's in-process
+port is the same noun with the same method (`souk/providers.py`), so an agent
+moving between here and inside souk stays the same shape.
+
+The loop is the whole thing, and it is the one souk runs for a provider
+hosted in its own process (souk/worker.py) — this SDK is that loop with a
+wire in the middle:
+
+    claim runs (with their input)  ->  run each one  ->  push its events back
+
+Registers a batch of AG-UI-shaped agents, long-polls for work while idle,
+and — only once there's actually work to do — opens one persistent,
+multiplexed gRPC AgentSession stream shared by every run currently in
+flight, not reopened per run (see proto/souk.proto). The stream carries this
+worker's output; the runs themselves were already claimed, with their input,
+over PollForWork. It closes again once no more work is queued and nothing is
+left to report, so an idle provider holds no persistent stream at all, just
+a periodic long-polling PollForWork call (see _run_connection/_active_session).
 
 This SDK is a convenience client, not the protocol itself — anything that
 speaks proto/souk.proto's gRPC contract directly (in any language) is an
@@ -19,10 +36,8 @@ adapter already produces.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
-import secrets
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -47,13 +62,23 @@ class AgentHandle:
     agent_card_extra: dict[str, Any] = field(default_factory=dict)
 
 
-class SoukAgentClient:
+class SoukProvider:
+    """Satisfies souk's Provider port (`run_stream(agent_id, run_input)`) by
+    routing to whichever `AgentHandle` owns that agent_id — so an agent is
+    still declared the way AG-UI defines one, and the routing every provider
+    serving several agents needs is done once, here, rather than in each
+    agent.
+
+    Override `run_stream` to route differently (dynamic agents, a shared
+    model pool, a dispatch table of your own); everything else — claiming,
+    concurrency, reporting, cancellation — is unchanged by that.
+    """
+
     def __init__(
         self,
         souk_http_url: str,
         souk_grpc_url: str,
         agents: list[AgentHandle],
-        sdk_client_id: str | None = None,
         poll_interval: float = 2.0,
         long_poll_seconds: float = 25.0,
         reconnect_delay: float = 2.0,
@@ -87,7 +112,6 @@ class SoukAgentClient:
         # (see souk/db.py's UNIQUE(public_key, name)). Empty until the
         # first successful registration.
         self._handle_by_id: dict[str, AgentHandle] = {}
-        self.sdk_client_id = sdk_client_id or f"sdk_{secrets.token_hex(8)}"
         # How often to re-check for more work while already actively
         # processing runs on an open AgentSession stream (see
         # _active_session) — a plain sleep between top-up checks, not a
@@ -115,24 +139,37 @@ class SoukAgentClient:
         # Set this to your real concurrency limit so souk knows to leave
         # the rest queued instead of dumping more than you can actually
         # process; see PollRequest.max_claim.
+        #
+        # If one of your agents delegates (A2A) to another agent *this same
+        # provider* hosts, leave room for the whole chain: the delegating
+        # run holds a slot while it waits, and the delegated run needs a
+        # free one before anything claims it. A provider that recurses into
+        # itself should leave this unlimited. Delegating to a different
+        # provider is unaffected — it has its own budget.
         self.max_concurrent_runs = max_concurrent_runs
 
-        # All of these belong to the *current* connection attempt and are
-        # replaced wholesale by _run_connection() on every (re)connect.
+        # Belongs to the *current* connection attempt, replaced by
+        # _active_session() on every (re)connect.
         self._session_call = None
+        # Frames waiting to go out. Deliberately *not* per connection: a run
+        # is addressed by run_id rather than by the stream it arrived on, so
+        # events (and the end_of_stream) of a run cut short by a dropped
+        # connection are still worth sending, and go out on the next one.
         self._outbound: asyncio.Queue = asyncio.Queue()
-        self._inboxes: dict[str, asyncio.Queue] = {}
-        self._in_flight: set[asyncio.Task] = set()
+        # Runs currently being executed, by run_id. This is the worker's own
+        # bookkeeping — what it has in flight (for max_claim) and what to
+        # stop when souk asks. It replaces a queue-per-run inbox that existed
+        # only to deliver each run its input; claiming carries that now.
+        self._in_flight: dict[str, asyncio.Task] = {}
 
     async def register(self) -> None:
         names = [a.name for a in self.agents.values()]
         timestamp = int(time.time())
-        payload = registration_signing_payload(self.sdk_client_id, names, timestamp)
+        payload = registration_signing_payload(names, timestamp)
         async with httpx.AsyncClient(verify=self.ca_cert_path or True) as client:
             resp = await client.post(
                 f"{self.souk_http_url}/agents/register",
                 json={
-                    "sdk_client_id": self.sdk_client_id,
                     "public_key": public_key_hex(self._identity),
                     "signature": sign(self._identity, payload),
                     "timestamp": timestamp,
@@ -154,7 +191,9 @@ class SoukAgentClient:
         self._handle_by_id = {
             agent_ids[name]: handle for name, handle in self.agents.items() if name in agent_ids
         }
-        logger.info("registered %d agent(s) as sdk_client_id=%s", len(self.agents), self.sdk_client_id)
+        logger.info(
+            "registered %d agent(s) as provider %s", len(self.agents), public_key_hex(self._identity)
+        )
 
     async def run_forever(self) -> None:
         """Keeps a connection to souk alive indefinitely — reconnecting
@@ -198,7 +237,13 @@ class SoukAgentClient:
         try:
             while True:
                 pending = await self._poll_for_work(stub, wait_seconds=self.long_poll_seconds)
-                if pending:
+                # An empty outbound queue is not a given even with no work:
+                # a run cut short by a previous connection dropping still
+                # has its end_of_stream to deliver, and souk keeps that run
+                # 'running' until it arrives (it records no outcome it
+                # hasn't observed). Open a stream to flush it rather than
+                # sitting on it until the next run happens to come along.
+                if pending or not self._outbound.empty():
                     await self._active_session(stub, pending)
         finally:
             await channel.close()
@@ -229,17 +274,14 @@ class SoukAgentClient:
     async def _active_session(
         self, stub: souk_pb2_grpc.SoukAgentGatewayStub, initial_pending: list[Any]
     ) -> None:
-        """Opens AgentSession, claims/processes `initial_pending`, and
-        keeps checking for more work as capacity frees up — closing the
-        stream (returning to the caller's idle long-poll loop) only once a
-        check comes back empty, rather than tearing the stream down and
-        making souk wait for a fresh connection when there's already more
-        queued for this provider.
+        """Opens AgentSession, runs `initial_pending`, and keeps checking for
+        more work as capacity frees up — closing the stream (returning to the
+        caller's idle long-poll loop) only once a check comes back empty,
+        rather than tearing the stream down and making souk wait for a fresh
+        connection when there's already more queued for this provider.
         """
         auth_metadata = (("authorization", self._session_token),)
         self._session_call = stub.AgentSession(metadata=auth_metadata)
-        self._outbound = asyncio.Queue()
-        self._inboxes = {}
 
         writer = asyncio.create_task(self._write_loop())
         reader = asyncio.create_task(self._read_loop())
@@ -259,6 +301,13 @@ class SoukAgentClient:
                     # up this stream.
                     more = await self._poll_for_work(stub)
                     if not more:
+                        # Everything queued has to be *written*, not merely
+                        # queued, before this stream goes away: closing with
+                        # a frame still in the writer's hands loses it, and
+                        # the frame most likely to be sitting there is a
+                        # run's end_of_stream — the one souk is waiting on
+                        # to decide that run's outcome.
+                        await self._flush_outbound(writer)
                         return
                     self._dispatch(more)
                     continue
@@ -269,89 +318,109 @@ class SoukAgentClient:
         finally:
             writer.cancel()
             reader.cancel()
-            # This stream is going away — any run still waiting on it can
-            # never receive its input again. Cancel them rather
-            # than let them hang forever; _handle_run's cleanup is
-            # bounded (see its finally block) regardless of why it woke up.
-            for task in list(self._in_flight):
+            # This stream is going away, so nothing this provider produces
+            # can reach souk until a new one is open. Stop the runs rather
+            # than let them keep spending on an LLM whose output is going
+            # nowhere; their end_of_stream frames queue on the (connection-
+            # independent) outbound queue and go out on the next stream, so
+            # souk still hears how they ended.
+            for task in list(self._in_flight.values()):
                 task.cancel()
 
     def _dispatch(self, pending: list[Any]) -> None:
         for p in pending:
-            task = asyncio.create_task(self._handle_run(p.run_id, p.agent_id))
-            self._in_flight.add(task)
-            task.add_done_callback(self._in_flight.discard)
+            task = asyncio.create_task(
+                self._handle_run(p.run_id, p.agent_id, json.loads(p.json_payload))
+            )
+            self._in_flight[p.run_id] = task
+            task.add_done_callback(
+                lambda _task, run_id=p.run_id: self._in_flight.pop(run_id, None)
+            )
 
     async def _write_loop(self) -> None:
         # Single writer serializing all outbound envelopes onto the one
         # shared AgentSession stream, since concurrent runs each queue
         # writes here rather than writing to the stream directly.
+        #
+        # task_done in a finally is what makes _flush_outbound's join() mean
+        # "actually written" rather than "handed to the writer". A frame
+        # whose write raised is gone (this stream is dead by then, and there
+        # is no acknowledgement to retry against — see proto/souk.proto's
+        # reserved field 5); anything still queued behind it survives, in
+        # order, and goes out on the next connection.
         while True:
             envelope = await self._outbound.get()
-            await self._session_call.write(envelope)
+            try:
+                await self._session_call.write(envelope)
+            finally:
+                self._outbound.task_done()
+
+    async def _flush_outbound(self, writer: asyncio.Task) -> None:
+        """Wait for the writer to work through everything queued — or for
+        the writer to die, whichever happens first. Waiting on the queue
+        alone would hang forever on a broken stream."""
+        drained = asyncio.create_task(self._outbound.join())
+        done, _pending = await asyncio.wait({drained, writer}, return_when=asyncio.FIRST_COMPLETED)
+        if drained not in done:
+            drained.cancel()
 
     async def _read_loop(self) -> None:
-        # Demultiplexes inbound envelopes (RunAgentInput deliveries and
-        # cancels) by run_id into each in-flight run's inbox.
+        # souk sends exactly one kind of frame: "please stop this run". This
+        # worker complies, by cancelling that run's task — which delivers
+        # CancelledError into run_stream's *current* await, not merely
+        # between yields, so an in-flight LLM or tool call is really
+        # interrupted rather than paid for and discarded.
+        #
+        # Complying is this worker's choice. souk asked; it did not decide.
+        # Whatever the run emits between now and its end_of_stream is real
+        # output that souk persists and relays like any other, and a worker
+        # that ignored this and finished normally would have its run
+        # recorded as completed (see proto/souk.proto's `cancel`).
         async for envelope in self._session_call:
-            inbox = self._inboxes.get(envelope.run_id)
-            if inbox is not None:
-                await inbox.put(envelope)
+            task = self._in_flight.get(envelope.run_id)
+            if task is None:
+                # A run that finished while the request was in flight.
+                logger.debug("AgentSession: frame for unknown/finished run_id=%s", envelope.run_id)
+            elif envelope.cancel:
+                logger.info("run %s: souk asked it to stop", envelope.run_id)
+                task.cancel()
             else:
-                logger.warning("AgentSession: frame for unknown/finished run_id=%s", envelope.run_id)
+                logger.warning("run %s: unexpected frame from souk, ignoring", envelope.run_id)
 
-    async def _handle_run(self, run_id: str, agent_id: str) -> None:
-        handle = self._handle_by_id.get(agent_id)
-        if handle is None:
+    def run_stream(self, agent_id: str, run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]:
+        """The provider port itself: which of this identity's agents a run is
+        for, and its input. Routes to that agent's own `run_stream`, which
+        stays exactly the AG-UI shape (`run_input` in, events out) — the
+        agent_id belongs to the provider, not to the agent.
+
+        Raises KeyError for an agent_id this provider does not host; the
+        caller (`_handle_run`) turns that into a warning and ends the run,
+        rather than leaving souk holding one nobody will serve.
+        """
+        return self._handle_by_id[agent_id].run_stream(run_input)
+
+    async def _handle_run(self, run_id: str, agent_id: str, run_input: dict[str, Any]) -> None:
+        """One claimed run: feed the input to the agent, push every event
+        back. The input arrived with the claim, so there is nothing to wait
+        for here — under the old contract this had to announce itself and
+        block on souk sending the input back, which is what a cancel
+        arriving first could strand.
+        """
+        if agent_id not in self._handle_by_id:
             logger.warning("PollForWork returned run for unknown local agent_id '%s'", agent_id)
             return
 
-        inbox: asyncio.Queue = asyncio.Queue()
-        self._inboxes[run_id] = inbox
         outbound = self._outbound
         try:
-            await outbound.put(souk_pb2.AgentEventEnvelope(run_id=run_id, agent_id=agent_id))
-            first = await inbox.get()
-            run_input = json.loads(first.json_payload)
-
-            async def consume() -> None:
-                async for event in handle.run_stream(run_input):
-                    await outbound.put(
-                        souk_pb2.AgentEventEnvelope(
-                            run_id=run_id, agent_id=agent_id, json_payload=json.dumps(event)
-                        )
+            async for event in self.run_stream(agent_id, run_input):
+                await outbound.put(
+                    souk_pb2.AgentEventEnvelope(
+                        run_id=run_id, agent_id=agent_id, json_payload=json.dumps(event)
                     )
-
-            async def watch_cancel() -> None:
-                # souk's cancel envelope is the only thing that ever shows
-                # up here: the run's input already arrived before this
-                # watcher started, and souk sends nothing after a run's
-                # end_of_stream (see proto/souk.proto's reserved field 5).
-                while True:
-                    envelope = await inbox.get()
-                    if envelope.cancel:
-                        return
-                    logger.warning("run %s: unexpected frame while running, ignoring", run_id)
-
-            consumer = asyncio.create_task(consume())
-            watcher = asyncio.create_task(watch_cancel())
-            done, _pending = await asyncio.wait({consumer, watcher}, return_when=asyncio.FIRST_COMPLETED)
-            if consumer in done:
-                watcher.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await watcher
-                consumer.result()
-            else:
-                # souk will never read another event for this run (its
-                # consumer disconnected) — stop running run_stream instead
-                # of paying for an LLM call/tool loop nobody will see.
-                # Cancelling the task delivers CancelledError into
-                # run_stream's *current* await, not just between yields,
-                # so an in-flight LLM/tool call is actually interrupted.
-                logger.info("run %s: cancelled by souk (consumer gone)", run_id)
-                consumer.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await consumer
+                )
+        except asyncio.CancelledError:
+            logger.info("run %s: stopped", run_id)
+            raise
         except Exception:
             logger.exception("run %s for agent_id '%s' failed", run_id, agent_id)
         finally:
@@ -364,13 +433,12 @@ class SoukAgentClient:
             # failed persist could only be logged, never retried — while the
             # wait cost a round trip on every run, and a full 5s stall plus
             # a misleading "connection likely lost" warning whenever the
-            # frame went astray (which it reliably did, until the inbox
-            # teardown below was moved after the wait).
-            try:
-                await outbound.put(
-                    souk_pb2.AgentEventEnvelope(
-                        run_id=run_id, agent_id=agent_id, end_of_stream=True
-                    )
-                )
-            finally:
-                self._inboxes.pop(run_id, None)
+            # frame went astray.
+            #
+            # put_nowait, not await put: this also runs while unwinding a
+            # cancellation, and an await here would be interrupted before
+            # the frame was ever queued — leaving souk holding a run whose
+            # stream never ended, until its stall sweep noticed.
+            outbound.put_nowait(
+                souk_pb2.AgentEventEnvelope(run_id=run_id, agent_id=agent_id, end_of_stream=True)
+            )

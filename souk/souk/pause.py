@@ -11,9 +11,9 @@ resume (e.g. pydantic-ai's `Tool(requires_approval=True)` — see
 `providers/pydantic-ai-agent` for where this would go) emit and consume
 this automatically; a provider using one of those needs zero souk-
 specific code to support pausing. souk's only job is to notice this
-outcome while relaying (`grpc_server._handle_relay`) and, once the
+outcome while relaying (`handlers._handle_relay`) and, once the
 stream ends, record `status='input-required'` with the interrupts
-preserved in the run's metadata (`grpc_server._handle_finish`) instead
+preserved in the run's metadata (`handlers._handle_finish`) instead
 of `status='completed'`.
 
 Resuming is equally native: a caller sends a normal AG-UI call on the
@@ -22,7 +22,7 @@ same thread with `resume: [{"interruptId": ..., "status":
 forwarded to the provider byte-for-byte (`souk.agui.build_run_agent_input`'s
 `resume` param). souk never reads `payload`; it only checks that the list
 is non-empty to allow restarting a thread that already has an active
-(paused) run — see `api_agui._run_agent`. **Your run keeps its same
+(paused) run — see `protocols.agui's AGUIAdapter.run`. **Your run keeps its same
 `run_id` (and A2A `task_id`, if any) for the new round** — `run_stream`
 gets invoked again with a fresh `RunAgentInput` on that same id, not
 handed off to a new one.
@@ -40,9 +40,9 @@ just another agent, not a human — there's no reason to let *that* agent
 resolve an interrupt it was never meant to approve in the first place.
 So `is_resuming` below is the one and only check either surface uses to
 decide whether to let a call bypass an active, paused run instead of
-just reporting its current state — `api_agui._run_agent` feeds it the
+just reporting its current state — `protocols.agui's AGUIAdapter.run` feeds it the
 real `resume` a caller sent (AG-UI is the one surface that legitimately
-can carry one); `api_a2a._start_run` always feeds it `None`, structurally
+can carry one); `protocols.a2a's _start_run` always feeds it `None`, structurally
 incapable of ever bypassing this. An A2A-invoked provider that needs a
 human to actually resolve something must design for that human reaching
 it directly over AG-UI on this same thread_id — not for the delegating
@@ -92,7 +92,7 @@ def is_resuming(active_run: dict[str, Any] | None, resume: list[dict[str, Any]] 
     and `resume` is real, non-empty AG-UI `ResumeEntry` data — the one
     condition either HTTP surface uses to decide whether a call may
     bypass an active run instead of just reporting its current state
-    (see `repo.get_active_run_for_thread`'s callers). `api_a2a._start_run`
+    (see `repo.get_active_run_for_thread`'s callers). `protocols.a2a's _start_run`
     always passes `resume=None` here — see this module's docstring for
     why that's not an oversight.
     """

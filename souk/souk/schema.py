@@ -68,20 +68,29 @@ _TS = DateTime(timezone=True)
 _BIGSERIAL = BigInteger().with_variant(Integer(), "sqlite")
 
 
-# A "provider" isn't a first-class registration concept the way an agent
-# is — it's just whoever holds a given public_key, identified purely by
-# that key (see agents.public_key). This table exists only to attach an
-# optional, non-unique display label to that key for humans browsing the
-# directory (souk-directory groups agents by public_key into
-# "storefronts"). Deliberately not folded into `agents`: a provider's name
-# is set once per key, not once per agent, and shouldn't get wiped out just
-# because one particular registration batch didn't happen to pass it (see
-# repo.upsert_provider_name).
+# One row per provider identity: every public_key that has registered,
+# whether or not it chose a display name. It used to hold only the ones that
+# passed a `provider_name`, which made it a table of labels rather than of
+# identities — `fingerprint` needs the latter, since resolving a short
+# address has to be able to miss for a key that exists but never named
+# itself.
+#
+# Deliberately not folded into `agents`: both columns are properties of the
+# key, set once per key rather than once per agent, and a display name
+# shouldn't get wiped out because one registration batch didn't pass one
+# (see repo.set_provider_name).
 providers = Table(
     "providers",
     metadata,
     Column("public_key", String, primary_key=True),
-    Column("display_name", String, nullable=False),
+    # The short form of public_key (souk.identity.provider_fingerprint) —
+    # derived, so it can never drift from the key it belongs to, and UNIQUE
+    # so a second key hashing to the same prefix is refused by the database
+    # at registration rather than by a check that could race.
+    Column("fingerprint", String, nullable=False, unique=True),
+    # NULL means "this identity never said" — distinct from a name set and
+    # later cleared, which souk does not offer.
+    Column("display_name", String, nullable=True),
     Column("updated_at", _TS, nullable=False, default=_utcnow),
 )
 
@@ -97,12 +106,19 @@ agents = Table(
     # the same name; see the UNIQUE(public_key, name) constraint instead).
     Column("agent_id", String, primary_key=True),
     Column("name", String, nullable=False),
-    Column("sdk_client_id", String, nullable=False),
     # Ed25519 public key (hex) that owns this agent_id — see
     # souk/identity.py. Set once at first registration of this (public_key,
     # name) pair, never changed by a later one. Whoever holds the matching
     # private key owns this agent_id; `name` itself is not exclusive, so a
     # different public_key may freely reuse the same name.
+    #
+    # This is the *only* identity an agent has a provider by. There used to
+    # be an `sdk_client_id` column beside it, holding whatever string the
+    # registering client called itself — and claiming filtered on that, so
+    # two unrelated keypairs choosing the same string could claim each
+    # other's work, while two processes of one real identity choosing
+    # different strings could not claim their own (both measured; see the
+    # migration that dropped it).
     Column("public_key", String, nullable=False),
     Column("agent_card", _JSON, nullable=False),
     # Free-form, souk-internal extension data — distinct from agent_card
@@ -210,7 +226,7 @@ thread_history = Table(
     Index("idx_thread_history_thread", "thread_id", "id"),
 )
 
-# A2A's Task.id is just a run_id (see api_a2a._start_run) — no separate
+# A2A's Task.id is just a run_id (see protocols.a2a's _start_run) — no separate
 # task_id concept, so this partial unique index is what both souk's own
 # dispatch and A2A's tasks/get / tasks/cancel lookups rely on. Partial
 # (WHERE kind = 'run_status') because the same run_id also appears on the

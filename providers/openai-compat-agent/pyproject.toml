@@ -3,6 +3,13 @@ name = "openai-compat-agent"
 version = "0.1.0"
 description = "Wraps any OpenAI-compatible chat endpoint (a raw LLM, or a full agent that just happens to speak that wire format for convenience — e.g. Hermes Agent's API server) as a souk provider. No prompting/orchestration of its own beyond an optional per-agent system_prompt — a dumb relay by design."
 requires-python = ">=3.12"
+# Not for an index. This package depends on a sibling in this repo by bare
+# name (souk-agent-sdk), resolvable only through the [tool.uv.sources] path below —
+# uploaded anywhere, that name would resolve to whatever a stranger has
+# published under it. PyPI refuses an unrecognised classifier, which is what
+# makes this line a guard rather than a comment. Remove it when souk-agent-sdk is
+# genuinely published and this can name a real version.
+classifiers = ["Private :: Do Not Upload"]
 dependencies = [
     "souk-agent-sdk",
     "httpx>=0.27",

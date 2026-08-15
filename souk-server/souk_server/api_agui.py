@@ -2,9 +2,11 @@
 
 What AG-UI *means* — minting a thread for an unrecognized threadId, deciding
 whether a call starts a run or reports an active one, fast-failing an offline
-agent — lives in souk/protocols/agui.py, in core. This file is the serving
-half: it parses requests, turns adapter results into SSE or JSON, and maps
-souk.errors onto status codes. Nothing here decides protocol semantics.
+agent — lives in souk/protocols/agui.py, in core. This file parses requests
+and frames results as SSE or JSON. It does not map errors either: adapters
+raise souk.errors and one handler translates them for the whole app (see
+souk.deps.install_error_handlers), because which status a failure deserves is
+a property of the failure, not of the route that hit it.
 
 `POST /threads` remains an *optional* way to obtain a thread_id upfront —
 e.g. to show it in a UI before the first message — not a prerequisite:
@@ -13,56 +15,23 @@ client that has never heard of it (souk-no-forced-protocol-deviation).
 """
 
 from ag_ui.core import RunAgentInput
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from souk.core import Souk
-from souk.deps import get_souk
-from souk.errors import AgentNotFound, AmbiguousAgentName, InvalidRunInput, ThreadOwnershipMismatch
-from souk.identity import InvalidActorChain
-from souk.models import CreateThreadRequest, CreateThreadResponse
+from souk_server.deps import get_souk
+from souk.errors import AgentNotFound
+from souk_server.models import CreateThreadRequest, CreateThreadResponse
 from souk.protocols.agui import AGUIAdapter, ThreadSnapshot
 
 router = APIRouter()
 
 
-def _name_conflict(exc: AmbiguousAgentName) -> HTTPException:
-    """A display name is not exclusive across identities, so several matches
-    is a normal outcome the caller has to resolve — answered with the
-    candidates and the unambiguous route to retry against."""
-    return HTTPException(
-        status_code=409,
-        detail={
-            "error": f"multiple agents are registered under the name '{exc.name}'",
-            "retry_with": "/agui/id/{agent_id} or /a2a/id/{agent_id}/...",
-            "candidates": [
-                {
-                    "name": c["name"],
-                    "agent_id": c["agent_id"],
-                    "public_key_prefix": c["public_key"][:12],
-                    "joined_at": c["joined_at"].isoformat(),
-                    "description": c["agent_card"].get("description", ""),
-                }
-                for c in exc.candidates
-            ],
-        },
-    )
-
-
-async def _resolve(souk: Souk, name: str) -> str:
-    try:
-        return await AGUIAdapter(souk).resolve_agent_id(name)
-    except AgentNotFound as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except AmbiguousAgentName as e:
-        raise _name_conflict(e) from e
-
-
 async def _create_thread(souk: Souk, agent_id: str, body: CreateThreadRequest) -> CreateThreadResponse:
     if await souk.get_agent(agent_id) is None:
-        raise HTTPException(status_code=404, detail=f"agent '{agent_id}' is not registered")
+        raise AgentNotFound(f"agent '{agent_id}' is not registered")
     return CreateThreadResponse(thread_id=await souk.create_thread(agent_id, metadata=body.metadata))
 
 
@@ -81,7 +50,8 @@ async def create_thread_by_name(
     body: CreateThreadRequest = CreateThreadRequest(),
     souk: Souk = Depends(get_souk),
 ) -> CreateThreadResponse:
-    return await _create_thread(souk, await _resolve(souk, name), body)
+    agent_id = await AGUIAdapter(souk).resolve_agent_id(name)
+    return await _create_thread(souk, agent_id, body)
 
 
 @router.get("/threads/{thread_id}")
@@ -92,7 +62,7 @@ async def get_thread_snapshot(thread_id: str, souk: Souk = Depends(get_souk)) ->
     """
     snapshot = await souk.get_thread_snapshot(thread_id)
     if snapshot is None:
-        raise HTTPException(status_code=404, detail=f"thread '{thread_id}' not found")
+        raise AgentNotFound(f"thread '{thread_id}' not found")
     return snapshot
 
 
@@ -106,21 +76,12 @@ async def get_thread_tree(thread_id: str, souk: Souk = Depends(get_souk)) -> dic
     """
     tree = await souk.get_thread_tree(thread_id)
     if tree is None:
-        raise HTTPException(status_code=404, detail=f"thread '{thread_id}' not found")
+        raise AgentNotFound(f"thread '{thread_id}' not found")
     return tree
 
 
 async def _run_agent(souk: Souk, agent_id: str, body: RunAgentInput):
-    try:
-        result = await AGUIAdapter(souk).run(agent_id, body)
-    except AgentNotFound as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except ThreadOwnershipMismatch as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except InvalidActorChain as e:
-        raise HTTPException(status_code=401, detail=f"invalid actor chain: {e}") from e
-    except InvalidRunInput as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+    result = await AGUIAdapter(souk).run(agent_id, body)
 
     if isinstance(result, ThreadSnapshot):
         # The resolved thread_id is already the top-level `thread_id` field
@@ -150,4 +111,5 @@ async def run_agent_by_id(
 async def run_agent_by_name(
     name: str, body: RunAgentInput, souk: Souk = Depends(get_souk)
 ) -> EventSourceResponse | JSONResponse:
-    return await _run_agent(souk, await _resolve(souk, name), body)
+    agent_id = await AGUIAdapter(souk).resolve_agent_id(name)
+    return await _run_agent(souk, agent_id, body)
