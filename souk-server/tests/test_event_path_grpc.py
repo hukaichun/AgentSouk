@@ -90,6 +90,7 @@ async def test_the_grpc_transport_keeps_no_state_per_run(souk):
     context = _FakeContext(registration.session_token)
 
     handles = [await souk.start_run(agent_id, {"messages": []}) for _ in range(3)]
+    streams = {h.run_id: h.events() for h in handles}
     run_ids = sorted(h.run_id for h in handles)
     claimed = await servicer.PollForWork(
         souk_pb2.PollRequest(agent_ids=[agent_id]), context
@@ -110,9 +111,8 @@ async def test_the_grpc_transport_keeps_no_state_per_run(souk):
                 )
             )
         for run_id in run_ids:
-            run = souk.broker.get(run_id)
             async with asyncio.timeout(2):
-                assert (await run.out_queue.get())["type"] == "RUN_STARTED"
+                assert (await anext(streams[run_id]))["type"] == "RUN_STARTED"
 
         # Every run is live and being served over this one stream, and the
         # transport holds nothing about any of them.
@@ -191,7 +191,7 @@ async def test_a_connection_dropping_does_not_end_the_runs_it_carried(souk, fram
 
     # Still dispatching it: the run did not end because a connection did.
     async with asyncio.timeout(2):
-        while souk.broker.get(handle.run_id).seq == 0:
+        while not await souk.get_run_events(handle.run_id):
             await asyncio.sleep(0.01)
     assert souk.broker.get(handle.run_id) is not None
     assert (await souk.get_run(handle.run_id))["status"] == "running"
@@ -210,7 +210,9 @@ async def test_a_connection_dropping_does_not_end_the_runs_it_carried(souk, fram
 
     if frame == "events":
         async with asyncio.timeout(2):
-            while not souk.broker.get(handle.run_id).saw_run_finished:
+            while not any(
+                e["type"] == "RUN_FINISHED" for e in await souk.get_run_events(handle.run_id)
+            ):
                 await asyncio.sleep(0.01)
         souk.finish_run(handle.run_id, claimed_by=public_key)
     async with asyncio.timeout(2):

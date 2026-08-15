@@ -205,7 +205,43 @@ class Run:
     out_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
 
 
-def request_cancel(run: Run) -> None:
+@dataclass(frozen=True)
+class RunSnapshot:
+    """What a caller outside the broker may know about a run.
+
+    A copy, taken when you asked — ask again for a fresh one. Deliberately
+    not the live `Run`: that object carries this run's two queues and the
+    mutable state its pipeline is in the middle of changing, and handing it
+    out is what made `Run` part of the contract between the broker and
+    everything else rather than an implementation detail of the broker.
+    Nothing here is a live reference, so a broker keeping its runs in another
+    process can produce one just as well.
+    """
+
+    run_id: str
+    agent_id: str
+    thread_id: str
+    protocol: str
+    claimed_by: str | None
+    cancel_requested: bool
+
+    @property
+    def is_claimed(self) -> bool:
+        return self.claimed_by is not None
+
+
+def _snapshot(run: Run) -> RunSnapshot:
+    return RunSnapshot(
+        run_id=run.run_id,
+        agent_id=run.agent_id,
+        thread_id=run.thread_id,
+        protocol=run.protocol,
+        claimed_by=run.claimed_by,
+        cancel_requested=run.cancel_requested,
+    )
+
+
+def _request_cancel(run: Run) -> None:
     """The one correct way to cancel a run — call this, don't push
     RequestCancel directly. Splits into exactly the two halves described
     on `Run.cancel_requested` and `RequestCancel`: flips the flag immediately so
@@ -227,7 +263,7 @@ def request_cancel(run: Run) -> None:
     run.in_queue.put_nowait(RequestCancel())
 
 
-async def drain_run(run: Run) -> AsyncIterator[Any]:
+async def _drain_run(run: Run) -> AsyncIterator[Any]:
     """Yields whatever the run's pipeline pushes onto `out_queue`, in
     order, until `END_OF_STREAM`. The one piece of run-consumption logic
     shared by every protocol surface that watches a run (api_agui.py's
@@ -243,6 +279,14 @@ async def drain_run(run: Run) -> AsyncIterator[Any]:
         if item is END_OF_STREAM:
             return
         yield item
+
+
+async def _no_events() -> AsyncIterator[Any]:
+    """A run this broker does not have produces nothing rather than raising:
+    'already finished' and 'never here' are the same answer to a consumer,
+    and both are ordinary."""
+    return
+    yield  # pragma: no cover - what makes this an async generator
 
 
 HandlerMap = dict[type, Callable[[Run, Any], Awaitable[None]]]
@@ -424,8 +468,57 @@ class RunBroker:
                 break
         return found
 
-    def get(self, run_id: str) -> Run | None:
-        return self._runs.get(run_id)
+    def get(self, run_id: str) -> RunSnapshot | None:
+        """What this run currently looks like, as a copy. None if this broker
+        is not dispatching it — finished, cancelled, or never here."""
+        run = self._runs.get(run_id)
+        return _snapshot(run) if run is not None else None
+
+    def push(self, run_id: str, command: Command) -> bool:
+        """Affect a run: the only way in from outside. False if the run is
+        not being dispatched here, which is ordinary rather than an error —
+        a straggler for a run that already ended.
+
+        Everything that wants to change a run comes through here: a worker
+        reporting an event or the end of its stream (see souk.core), the
+        health sweep giving up on one (see souk.health). They used to reach
+        into `run.in_queue` themselves, which meant holding the live object.
+        """
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        run.in_queue.put_nowait(command)
+        return True
+
+    def subscribe(self, run_id: str) -> AsyncIterator[Any]:
+        """This run's events, in order, until its stream ends. Empty if this
+        broker is not dispatching it.
+
+        The read side of the same encapsulation: draining needed the live
+        object, this needs an id. A distributed broker answers it with a
+        subscription of its own rather than a local queue.
+        """
+        run = self._runs.get(run_id)
+        return _drain_run(run) if run is not None else _no_events()
+
+    def request_cancel(self, run_id: str) -> bool:
+        """Ask for a run to stop — see the module docstring for the two
+        halves this splits into. False if this broker is not dispatching
+        it."""
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        _request_cancel(run)
+        return True
+
+    def owned_run_ids(self) -> list[str]:
+        """Which runs this broker is responsible for — the question the
+        health sweeps have to ask before they reap anything. Here that is
+        simply what is in memory; a distributed broker answers with the runs
+        recorded against this instance, which is the same question at a
+        different scope, and is what stops one node reaping another's work.
+        """
+        return list(self._runs)
 
     def active_run_ids(self) -> list[str]:
         """Every run currently in dispatch. Live in-memory state, distinct

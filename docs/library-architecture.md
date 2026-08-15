@@ -672,25 +672,34 @@ this document oversold it and the overstatement was believed:
   constructor, not a module-level singleton. That part is real.
 - Its wake mechanism is a plain `asyncio.Event`, not anything transport-
   shaped, so a `LISTEN/NOTIFY` implementation could sit behind it.
-- There is **no interface**. Nothing declares what a broker must provide; a
-  substitute would be duck-typing against a concrete class.
-- And the substitutable unit is not `RunBroker` — it is `Run`. Around
-  thirty-five places outside `broker.py` read or write a `Run`'s fields
-  directly, `handlers.py` most of all: it bumps `seq`, sets
-  `saw_run_finished` and `pause_payload`, and pushes to `out_queue` itself.
-  A `Run` carries two `asyncio.Queue`s, which are precisely the things that
-  do not cross a process boundary, so the injection point takes an object
-  whose *return values* are the part that cannot be distributed.
+- `Run` is now the broker's own. Nothing outside `broker.py` holds one: a
+  caller gets a `RunSnapshot` (a copy of the facts, no live references) and
+  affects a run through operations — `push`, `subscribe`, `request_cancel`,
+  `owned_run_ids`. The one exception is deliberate: `handlers.py` receives
+  the live object, because the handlers *are* the pipeline's inner loop and
+  the broker is what dispatches them. A different broker implementation
+  brings its own.
+- There is still **no declared interface** — no Protocol, no ABC. The
+  surface is now small enough to be one, but writing it from the in-memory
+  implementation alone is how the last "swap-in seam" came to be believed:
+  it is only an interface once a second implementation has met it.
 
-The prerequisite is therefore to make `Run` an implementation detail of the
-broker — operations (`emit`, `subscribe`, `next_seq`) where field access is
-now — and it is worth noticing what that would reveal: a `Run` currently
-mixes three separable things. Its identity and input are immutable facts. Its
-round state (`seq`, `saw_run_finished`, `pause_payload`,
-`round_starting_seq`) belongs to whichever node runs that run's pipeline and
-never needs to travel. Only the two queues and the registry are genuinely
-distributed state. Today all three are one mutable object that everyone
-holds, which is why the seam looks bigger than it is.
+Encapsulating it made the shape visible, and the shape is better than it
+looked: a `Run` mixes three separable things. Its identity and input are
+immutable facts. Its round state (`seq`, `saw_run_finished`,
+`pause_payload`, `round_starting_seq`) belongs to whichever node runs that
+run's pipeline and never needs to travel. Only the two queues and the
+registry are genuinely distributed state — so a distributed broker has to
+move less than the old all-in-one object suggested.
+
+It also surfaced a bug that had been hiding behind the leak. Handing out the
+live `Run` meant a caller's reference kept that run's queue alive, so a
+handle taken now and read later still replayed everything. Subscribing by
+id instead is lazy, and a short run that finished — and was forgotten —
+before anyone read it returned nothing at all. Handles, the AG-UI relay and
+A2A's streaming branch now all subscribe at the moment they are created
+rather than at first iteration. The in-process test that starts five runs
+and reads them after they finish is what caught it.
 
 **Provider-side scaling is deliberately not souk's problem.** A provider
 running several processes shares one keypair, and souk cannot tell those

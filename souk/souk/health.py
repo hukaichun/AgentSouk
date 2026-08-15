@@ -44,13 +44,11 @@ async def _close_with_terminal_event(souk: "Souk", run_id: str, failure_reason: 
     agui_event_to_a2a_update already maps RUN_ERROR to a final
     `status: failed` update, so this serves AG-UI and A2A callers alike.
 
-    A no-op if the run has already been forgotten (finished, or already
-    cancelled) — this is just a command push, not a direct mutation, so
-    unlike the rest of this module it doesn't touch a Run's fields itself.
+    A no-op if the broker is no longer dispatching the run (finished, or
+    already cancelled) — this is a command push, not a mutation, and the
+    broker answers whether it landed.
     """
-    run = souk.broker.get(run_id)
-    if run is not None:
-        run.in_queue.put_nowait(Fail(failure_reason))
+    souk.broker.push(run_id, Fail(failure_reason))
 
 
 async def sweep_once(souk: "Souk") -> None:

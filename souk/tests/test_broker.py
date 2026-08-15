@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from souk.broker import Claim, Fail, FinishStream, RelayEvent, RequestCancel, RunBroker, request_cancel
+from souk.broker import Claim, Fail, FinishStream, RelayEvent, RequestCancel, RunBroker
 
 
 async def _until(predicate, timeout: float = 1.0) -> None:
@@ -161,7 +161,7 @@ def test_request_cancel_marks_the_run_synchronously_before_any_pipeline_processi
     broker = RunBroker()
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
     assert not run.cancel_requested
-    request_cancel(run)
+    broker.request_cancel("run_1")
     assert run.cancel_requested
     assert run.in_queue.qsize() == 1
 
@@ -169,14 +169,14 @@ def test_request_cancel_marks_the_run_synchronously_before_any_pipeline_processi
 def test_claim_skips_a_run_cancelled_before_any_worker_claimed_it():
     broker = RunBroker()
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
-    request_cancel(run)
+    broker.request_cancel(run.run_id)
     assert broker.claim(["agent_1"], claimed_by="sdk_1") == []
 
 
 def test_claim_does_not_let_a_cancelled_run_block_a_healthy_one_behind_it():
     broker = RunBroker()
     cancelled = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
-    request_cancel(cancelled)
+    broker.request_cancel(cancelled.run_id)
     healthy = broker.enqueue_run("run_2", "agent_1", "thread_1", {}, "ag-ui")
     assert broker.claim(["agent_1"], claimed_by="sdk_1") == [healthy]
 

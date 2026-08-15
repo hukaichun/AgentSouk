@@ -16,7 +16,6 @@ from ag_ui.core import RunAgentInput
 
 from souk import repo
 from souk.agui import build_run_agent_input, rewrite_message_ids
-from souk.broker import drain_run
 from souk.errors import AgentNotFound, InvalidRunInput
 from souk.identity import verify_actor_chain
 from souk.kyok import issue_kyok_token
@@ -183,24 +182,27 @@ class AGUIAdapter:
 
             await session.commit()
 
-        run = souk.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui", seq=starting_seq)
-        return EventStream(thread_id, run_id, _relay(run))
+        souk.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui", seq=starting_seq)
+        # Subscribed here, not inside _relay: an async generator's body does
+        # not run until it is first iterated, and a run that finishes before
+        # the caller starts reading would have nothing left to subscribe to.
+        return EventStream(thread_id, run_id, _relay(souk.broker.subscribe(run_id)))
 
 
-async def _relay(run) -> AsyncIterator[dict[str, Any]]:
+async def _relay(events: AsyncIterator[Any]) -> AsyncIterator[dict[str, Any]]:
     """The run's events, with provider-generated message ids remapped to
     souk-assigned ones consistently across a message's START/CONTENT/END
     (see souk.agui.rewrite_message_ids).
 
     No `finally`, deliberately: this loop ending some other way than
-    drain_run's natural end — the caller disconnected, or this generator was
+    the stream's natural end — the caller disconnected, or this generator was
     closed — does not cancel the run. souk's own state is authoritative and
     the run keeps going whether or not anyone is still watching this
     particular stream; a dropped connection shouldn't throw away in-progress
     work a reconnect could catch up on. Cancelling is an explicit act only.
     """
     message_id_map: dict[str, str] = {}
-    async for item in drain_run(run):
+    async for item in events:
         yield rewrite_message_ids(item, message_id_map)
 
 

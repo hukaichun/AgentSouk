@@ -31,7 +31,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from souk import repo
-from souk.broker import FinishStream, RelayEvent, Run, RunBroker, drain_run, request_cancel
+from souk.broker import FinishStream, RelayEvent, RunBroker, RunSnapshot
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
 from souk.errors import AgentNotFound, InvalidRegistration
@@ -80,28 +80,41 @@ class RunHandle:
     # emitting a single status update), so it is exposed rather than
     # papered over.
     is_live: bool
-    _run: Run | None = None
+    # The broker dispatching this run, not the run itself: a handle is
+    # something a caller keeps, and keeping the live Run would put its queues
+    # in the caller's hands (see broker.RunSnapshot).
+    _broker: RunBroker | None = None
+    # Subscribed when this handle is built, *not* when events() is first
+    # awaited. A caller that starts reading late must still get everything
+    # from the beginning, and a short run can finish — and be forgotten by
+    # the broker — before anyone reads. Subscribing lazily silently returned
+    # nothing for exactly those runs.
+    _events: AsyncIterator[Any] | None = None
 
     async def events(self) -> AsyncIterator[Any]:
-        """The run's events as they arrive. Empty for a run that isn't
-        live — read its persisted events (see `Souk.get_run_events`)
-        instead of waiting on a stream that will never produce anything.
+        """The run's events as they arrive, from the beginning. Empty for a
+        run that isn't live — read its persisted events (see
+        `Souk.get_run_events`) instead of waiting on a stream that will never
+        produce anything.
 
-        Leaving this early (a caller disconnecting, breaking out of the
-        loop) does not cancel the run; see `broker.drain_run`.
+        One stream per handle: this consumes the subscription taken when the
+        handle was created, so calling it twice does not replay.
+
+        Leaving it early (a caller disconnecting, breaking out of the loop)
+        does not cancel the run; see `RunBroker.subscribe`.
         """
-        if self._run is None:
+        if self._events is None:
             return
-        async for item in drain_run(self._run):
+        async for item in self._events:
             yield item
 
     def cancel(self) -> None:
         """Stop the run. Synchronous on purpose — the flag flips
         immediately so nothing hands the run out in the meantime, while the
         multi-step part (DB write, telling the agent) happens in order on
-        the run's own task. See `broker.request_cancel`."""
-        if self._run is not None:
-            request_cancel(self._run)
+        the run's own task. See `RunBroker.request_cancel`."""
+        if self._broker is not None:
+            self._broker.request_cancel(self.run_id)
 
 
 class Souk:
@@ -331,8 +344,7 @@ class Souk:
                 run.claimed_by,
             )
             return False
-        run.in_queue.put_nowait(RelayEvent(event))
-        return True
+        return self.broker.push(run_id, RelayEvent(event))
 
     def finish_run(self, run_id: str, *, claimed_by: str) -> bool:
         """The worker holding this run says its agent's stream has ended.
@@ -354,8 +366,7 @@ class Souk:
                 run.claimed_by,
             )
             return False
-        run.in_queue.put_nowait(FinishStream())
-        return True
+        return self.broker.push(run_id, FinishStream())
 
     async def attach_provider(
         self,
@@ -556,7 +567,7 @@ class Souk:
         input_json: dict[str, Any],
         protocol: str,
         seq: int = 0,
-    ) -> Run:
+    ) -> RunSnapshot:
         """Put a persisted run into live dispatch.
 
         The one place a run enters the broker, no matter which path created
@@ -600,14 +611,20 @@ class Souk:
             created = await repo.create_run(session, resolved_thread_id, agent_id, "ag-ui", run_input, metadata)
             run_id = created["run_id"]
 
-        run = self.enqueue_run(
+        self.enqueue_run(
             run_id,
             agent_id,
             resolved_thread_id,
             {**run_input, "threadId": resolved_thread_id, "runId": run_id},
             "ag-ui",
         )
-        return RunHandle(run_id=run_id, thread_id=resolved_thread_id, is_live=True, _run=run)
+        return RunHandle(
+            run_id=run_id,
+            thread_id=resolved_thread_id,
+            is_live=True,
+            _broker=self.broker,
+            _events=self.broker.subscribe(run_id),
+        )
 
     async def resume_run(self, run_id: str, run_input: dict[str, Any], metadata: dict | None = None) -> RunHandle:
         """Restart a paused ('input-required') run for another round under
@@ -624,7 +641,7 @@ class Souk:
             # earlier rounds already wrote events under the same run_id.
             starting_seq = await repo.get_last_event_seq(session, run_id)
 
-        run = self.enqueue_run(
+        self.enqueue_run(
             run_id,
             stored["agent_id"],
             stored["thread_id"],
@@ -632,16 +649,18 @@ class Souk:
             stored["protocol"] or "ag-ui",
             seq=starting_seq,
         )
-        return RunHandle(run_id=run_id, thread_id=stored["thread_id"], is_live=True, _run=run)
+        return RunHandle(
+            run_id=run_id,
+            thread_id=stored["thread_id"],
+            is_live=True,
+            _broker=self.broker,
+            _events=self.broker.subscribe(run_id),
+        )
 
     def cancel_run(self, run_id: str) -> bool:
         """Cancel a live run. False if souk isn't dispatching it — already
         finished, or never started here."""
-        run = self.broker.get(run_id)
-        if run is None:
-            return False
-        request_cancel(run)
-        return True
+        return self.broker.request_cancel(run_id)
 
 
 def _create_engine(settings: CoreSettings):
