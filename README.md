@@ -143,7 +143,6 @@ Modular, independent distributions — no shared workspace, each stands alone:
 | [`souk-client-sdk/`](souk-client-sdk/) | Python client library for consuming agents over AG-UI, and the caller-side KYOK bridge |
 | [`agent-template/`](agent-template/) | Minimal reference provider — the smallest complete thing that registers and serves an agent, no LLM dependency |
 | [`providers/`](providers/) | Fuller provider examples (Pydantic-AI agent with MCP tools & sub-agent delegation) |
-| [`proto/souk.proto`](proto/souk.proto) | The current gRPC relay's wire contract, kept as the record of the worker-channel semantics the WebSocket framing re-encodes |
 | [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
 
 ---
@@ -164,11 +163,7 @@ docker compose up paradedb -d
 SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk" uv run pytest
 ```
 
-SDK development mirrors it (`cd souk-agent-sdk && uv sync --group dev && uv run pytest`), with gRPC stubs generated once per checkout:
-
-```bash
-cd souk-agent-sdk && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
-```
+SDK development mirrors it (`cd souk-agent-sdk && uv sync --group dev && uv run pytest`).
 
 Schema changes are Alembic revisions under [`souk/alembic/`](souk/alembic/) — `uv run alembic upgrade head` is a deploy-time DDL step, deliberately separate from anything a running gateway does (see `CONTRIBUTING.md`).
 
@@ -211,7 +206,7 @@ curl -N -X POST http://localhost:8000/a2a/translator/rpc \
 
 ## 🔮 Roadmap
 
-- 🔌 **WebSocket relay base mode**: one gateway port for callers *and* providers. The spec and serving implementation live in AgentSoukServer ([`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)); this repo's share is the SDK transports that implement it, and eventually retiring `proto/souk.proto` alongside the gRPC carrier it describes.
+- 🔌 **WebSocket relay base mode**: one gateway port for callers *and* providers. The spec and serving implementation live in AgentSoukServer ([`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)); this repo's share — the SDK transports that implement it — has landed, and the gRPC wire (`proto/souk.proto` and its tooling) is retired with the carrier it described.
 - 🌐 **Cross-Souk Discovery**: `@souk` addressing (`agent@souk.example.com`) with client-side resolution and a `.well-known/souk-federation.json` discovery document — no inter-souk server-to-server proxying needed. See [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md).
 - 💳 **Native Monetization & Payments**: Integration with micro-payment rails like [x402](https://www.x402.org/) for agent-to-agent transactions and directory-listing economics.
 - 📈 **Horizontal Gateway Scaling**: Distributing broker state via Redis / Postgres LISTEN-NOTIFY for multi-replica deployments — see `docs/library-architecture.md`'s "What this leaves open" for what two replicas actually do today.

@@ -1,10 +1,11 @@
 # Provider examples
 
 souk doesn't run any agent logic itself — every actual agent is a "provider"
-that connects out to a souk and speaks its gRPC contract (`proto/souk.proto`).
+that connects out to a souk and speaks the gateway's WebSocket frame
+protocol (authored in AgentSoukServer's `docs/server-mode.md`).
 `souk_agent_sdk` is a convenience client for that contract, not the contract
-itself: any implementation of `proto/souk.proto`, in any language, is an
-equally valid provider.
+itself: any implementation of those frames, in any language, is an equally
+valid provider.
 
 - **`/agent-template`** (repo root, not under here) — the minimal reference:
   the smallest possible `souk_agent_sdk.AgentHandle` implementation, no

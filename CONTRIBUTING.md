@@ -23,14 +23,6 @@ cd agent-template && uv sync   # path-depends on souk-agent-sdk
 consumes `souk` through a submodule. Network-facing changes belong there
 — see issue #27 for the boundary.)
 
-If you touch `proto/souk.proto`, regenerate the SDK's gRPC stubs from
-the repo root before doing anything else:
-
-```bash
-uv sync --group dev
-uv run bash scripts/gen_proto.sh
-```
-
 ## Running the tests
 
 `souk/tests/` holds nearly all of the business logic (registration/
@@ -100,6 +92,7 @@ before a PR merges.
 Small, one logical change per commit — the existing `git log` is the best
 reference for the expected granularity and message style. Open an issue
 first for anything that isn't an obvious bug fix, especially anything
-touching the identity/routing model or `proto/souk.proto` — see README's
+touching the identity/routing model or the wire frames (authored in
+AgentSoukServer's `docs/server-mode.md`) — see README's
 [Roadmap](README.md#roadmap) for what's already a known direction versus
 what needs discussion first.

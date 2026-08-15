@@ -1,7 +1,18 @@
-"""Minimal streaming A2A client: calls another agent's `SendStreamingMessage`
-and yields each `StreamResponse` as it arrives. Used by agent-template's
-sub-agent-calling tool so a "main agent" can watch a sub-agent's progress live
-instead of only seeing its final result.
+"""Delegation glue, not a general A2A client.
+
+A2A is a standard protocol and souk serves it without deviation, so any
+standard A2A client can call a souk-listed agent — this SDK does not need
+to provide one, and this module's reason to exist is the one thing a
+generic client cannot do: carry souk's delegation context on the call —
+the extended `actor_chain` (provenance) and `reference_task_ids`
+(lineage). Used by agent-template's sub-agent-calling tool so a "main
+agent" can watch a sub-agent's progress live instead of only seeing its
+final result. If an official A2A client ever takes arbitrary metadata
+without dragging protobuf into a provider install, this module should
+shrink to the chain-building and die.
+
+Mechanically: calls another agent's `SendStreamingMessage` and yields each
+`StreamResponse` as it arrives.
 
 Speaks A2A v1.0, which renamed nearly everything this file used to say. The
 JSON-RPC method names are the gRPC service's method names (`SendMessage`,

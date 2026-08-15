@@ -9,12 +9,15 @@ something doesn't behave the way you expected.
 
 ## The SDK is convenience, not a requirement
 
-`souk_agent_sdk` is one Python client for `proto/souk.proto`'s gRPC
-service — not the contract itself. Anything that speaks that gRPC service
-directly, in any language, is an equally valid provider; souk never
-special-cases this SDK. If you're not on Python, or want to understand
-exactly what the SDK is doing for you, read the proto file and
-`souk_agent_sdk/client.py` side by side.
+`souk_agent_sdk` is one Python client for the gateway's provider
+WebSocket — not the contract itself. The contract is the frame protocol
+authored in AgentSoukServer's `docs/server-mode.md` (`WS /ws/provider`:
+hello/welcome, run frames down, event/finish frames up, cancel down);
+anything that speaks those frames, in any language — including a browser
+— is an equally valid provider; souk never special-cases this SDK. If
+you're not on Python, or want to understand exactly what the SDK is
+doing for you, read that spec and `souk_agent_sdk/client.py` side by
+side.
 
 ## Waiting on a sub-agent call that's still pending — this isn't a pause
 

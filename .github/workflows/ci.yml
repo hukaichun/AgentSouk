@@ -53,8 +53,6 @@ jobs:
           python-version: "3.12"
       - run: uv sync --group dev
         working-directory: souk-agent-sdk
-      - run: uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
-        working-directory: souk-agent-sdk
       # Import-sanity check that the SDK's public surface still loads
       # cleanly, kept alongside the real test suite below rather than
       # replaced by it — the two answer different questions.
@@ -74,7 +72,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: "3.12"
-      - run: uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+      - run: uv sync --group dev
         working-directory: souk-agent-sdk
       - run: uv sync
         working-directory: agent-template
@@ -88,7 +86,7 @@ jobs:
       - uses: astral-sh/setup-uv@v3
         with:
           python-version: "3.12"
-      - run: uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+      - run: uv sync --group dev
         working-directory: souk-agent-sdk
       - run: uv sync
         working-directory: providers/pydantic-ai-agent

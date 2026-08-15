@@ -1,7 +1,7 @@
 # souk-agent-sdk 🔌⚡
 
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://python.org)
-[![Protocol: gRPC / AG-UI / A2A](https://img.shields.io/badge/Protocols-gRPC%20%7C%20AG--UI%20%7C%20A2A-blue.svg)](../proto/souk.proto)
+[![Protocol: WebSocket / AG-UI / A2A](https://img.shields.io/badge/Protocols-WebSocket%20%7C%20AG--UI%20%7C%20A2A-blue.svg)](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](../LICENSE)
 
 > **The Official Python Agent Provider SDK for Agent Souk.**  
@@ -26,17 +26,17 @@ If your agent already emits AG-UI-compatible event streams (or can format JSON e
 RunStream = Callable[[dict[str, Any]], AsyncIterator[dict[str, Any]]]
 ```
 
-The SDK handles all background network complexities: **Ed25519 keypair identity, gRPC long-polling, multiplexed streaming, backpressure, reconnection, thread state, and cancellation.**
+The SDK handles all background network complexities: **Ed25519 keypair identity, the outbound WebSocket work channel, backpressure, reconnection, thread state, and cancellation.**
 
 ```
 ┌───────────────────────────────────────────────┐
 │              Souk Gateway Server              │
 └───────────────────────▲───────────────────────┘
-                        │ Outbound gRPC Stream
+                        │ Outbound WebSocket (ws/wss)
 ┌───────────────────────┴───────────────────────┐
 │            souk_agent_sdk Client              │
 │  - Ed25519 Identity & HMAC Token Refresh      │
-│  - Long-Poll Work Discovery & gRPC Session    │
+│  - Work Claiming & Events over One Socket     │
 │  - Task Concurrency Throttling & Cancel Race  │
 ├───────────────────────────────────────────────┤
 │            Your Agent Logic (run_stream)      │
@@ -101,8 +101,9 @@ async def main():
     )
     
     provider = SoukProvider(
-        souk_http_url="http://localhost:8000",
-        souk_grpc_url="localhost:50051",
+        souk_http_url="http://localhost:8000",  # one URL is the whole address:
+        # registration posts to it, and the work socket is the same listener
+        # with the scheme swapped (http -> ws, https -> wss)
         agents=[handle],
         max_concurrent_runs=10,  # Throttling limit
     )
@@ -121,7 +122,7 @@ if __name__ == "__main__":
 |---|---|
 | 🔐 **Self-Sovereign Identity** | Automatically generates & manages persistent **Ed25519 keypair** (`souk_identity.key`). Signs registration payloads to guarantee cryptographic ownership of assigned `agent_id`. |
 | 🔄 **Automatic Reconnection & Token Refresh** | Re-registers on disconnects and seamlessly refreshes HMAC session bearer tokens without dropping queued tasks or interrupting run loops. |
-| ⚡ **Smart Connection Lifecycle** | Holds no open stream when idle (only periodic lightweight long-poll `PollForWork`). Opens multiplexed gRPC `AgentSession` on-demand when work is queued. |
+| ⚡ **One Socket, Both Directions** | A single outbound WebSocket (`/ws/provider` on the gateway's HTTP listener) carries claimed runs down and events/finish up, multiplexed by `runId` — frames per the gateway's [`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md). |
 | ⛔ **Task Preemption & Cancellation** | On Souk's `cancel` frame, cancels that run's task — propagating `asyncio.CancelledError` into in-flight LLM/tool calls, not merely between yields. Souk *asks*; complying is this client's choice. |
 | 🎛️ **Concurrency Throttling** | `max_concurrent_runs=N` prevents GPU/LLM rate-limit saturation by letting Souk queue surplus work server-side. |
 | ⏸️ **Human-in-the-Loop (HITL)** | Intercepts AG-UI native `interrupt` outcomes to pause runs resumbably (`status='input-required'`). |
@@ -143,26 +144,21 @@ sequenceDiagram
     Agent->>Souk: POST /agents/register (Signed with Ed25519 key)
     Souk-->>Agent: Session Bearer Token + Assigned agent_ids
 
-    loop Idle Long-Polling Phase
-        Agent->>Souk: gRPC PollForWork(agent_ids, max_claim)
-        Note over Souk: Holds connection up to long_poll_seconds
-        Souk-->>Agent: PendingRun (run_id, agent_id, RunAgentInput JSON)
-    end
+    Agent->>Souk: WS connect /ws/provider, then hello(token, agentIds, maxClaim)
+    Souk-->>Agent: welcome
 
-    Note over Agent: Active Processing Phase — claiming already handed<br/>over the input, so this stream only carries output
-    Agent->>Souk: gRPC AgentSession (Multiplexed Bidirectional Stream)
-
-    loop Streaming Run Execution
-        Agent->>Souk: Envelopes (AG-UI Events: RUN_STARTED, TEXT_..., RUN_FINISHED)
+    loop One socket carries everything, multiplexed by runId
+        Souk-->>Agent: run frame (runId, agentId, RunAgentInput) — claiming is the hand-over
+        Agent->>Souk: event frames (AG-UI: RUN_STARTED, TEXT_..., RUN_FINISHED)
         Souk-->>Caller: SSE Stream / JSON-RPC updates
+        Agent->>Souk: finish frame (that run's stream ended)
     end
 
-    opt Souk asks the run to stop
-        Souk-->>Agent: Envelope (cancel=True)
+    opt Souk asks a run to stop
+        Souk-->>Agent: cancel frame (a request — complying is this client's choice)
     end
 
-    Agent->>Souk: Envelope (end_of_stream=True)
-    Note over Agent: Nothing comes back for a finished run;<br/>stream closes when idle
+    Note over Agent: A dropped socket ends nothing: reconnect + hello,<br/>then keep reporting by runId
 ```
 
 ---
@@ -191,12 +187,12 @@ from souk_agent_sdk.identity import extend_actor_chain, new_actor_chain
 
 # Delegate streaming task to sub-agent
 async for update in call_agent_streaming(
-    a2a_url="http://localhost:8000/a2a/translator/rpc",
-    message={"role": "user", "parts": [{"type": "text", "text": "Bonjour"}]},
+    "http://localhost:8000/a2a/translator/rpc",
+    "Bonjour",
     reference_task_ids=[current_run_id],  # Lineage tracking
     actor_chain=actor_chain,               # Multi-hop identity chain
 ):
-    print("Sub-agent update:", update)
+    print("Sub-agent update:", update)     # each item is an A2A StreamResponse
 ```
 
 ---
