@@ -40,72 +40,9 @@ jobs:
           SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
           SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
 
-  # The serving layer lives in its own repository (AgentSoukServer), which
-  # carries its own CI — including the app-builds probe, since it is the
-  # only place that can build the app.
-
-  souk-agent-sdk:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
-      - run: uv sync --group dev
-        working-directory: souk-agent-sdk
-      - run: uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
-        working-directory: souk-agent-sdk
-      # Import-sanity check that the SDK's public surface still loads
-      # cleanly, kept alongside the real test suite below rather than
-      # replaced by it — the two answer different questions.
-      - run: uv run python -c "import souk_agent_sdk.client, souk_agent_sdk.a2a_client, souk_agent_sdk.identity"
-        working-directory: souk-agent-sdk
-      - run: uv run pytest -v
-        working-directory: souk-agent-sdk
-
-  # Exercises souk-agent-sdk as a real dependency (path source, not just
-  # its own package) — catches accidental breakage of its public surface
-  # from a consumer's point of view, without needing an LLM key to run a
-  # full agent.
-  agent-template:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
-      - run: uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
-        working-directory: souk-agent-sdk
-      - run: uv sync
-        working-directory: agent-template
-      - run: uv run python -c "import agent_template.main"
-        working-directory: agent-template
-
-  pydantic-ai-agent:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
-      - run: uv sync --group dev && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
-        working-directory: souk-agent-sdk
-      - run: uv sync
-        working-directory: providers/pydantic-ai-agent
-      - run: uv run python -c "import pydantic_ai_agent.main"
-        working-directory: providers/pydantic-ai-agent
-
-  souk-client-sdk:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v3
-        with:
-          python-version: "3.12"
-      - run: uv sync --group dev
-        working-directory: souk-client-sdk
-      - run: uv run pytest -v
-        working-directory: souk-client-sdk
+  # The serving layer, the SDKs and the reference providers live in their
+  # own repository (AgentSoukServer), which carries its own CI — including
+  # the app-builds probe, since it is the only place that can build the app.
 
   souk-directory:
     runs-on: ubuntu-latest

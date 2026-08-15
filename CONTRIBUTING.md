@@ -5,30 +5,20 @@ sharing one git history, not one coupled monorepo — see the README's
 [Components](README.md#components) table for what each one is, and read
 that section before assuming a change belongs where you'd first guess.
 
-## No shared workspace
+## What lives here, and what doesn't
 
-There is deliberately no shared `uv` workspace tying `souk/`,
-`souk-agent-sdk/`, `souk-client-sdk/`, `agent-template/`, and
-`providers/*` together — each has its own `pyproject.toml` and is synced
+This tree is the library (`souk/`) and the reference caller UI
+(`souk-directory/`). The gateway, both SDKs and the reference providers
+live in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer),
+which consumes `souk` through a submodule and owns both ends of every
+wire it defines — anything network-facing belongs there (see issue #27
+for the boundary).
+
+There is deliberately no shared `uv` workspace; each project syncs
 independently:
 
 ```bash
 cd souk && uv sync --group dev
-cd souk-agent-sdk && uv sync --group dev
-cd agent-template && uv sync   # path-depends on souk-agent-sdk
-```
-
-(The serving layer is not in this tree: the reference gateway lives in
-[AgentSoukServer](https://github.com/hukaichun/AgentSoukServer), which
-consumes `souk` through a submodule. Network-facing changes belong there
-— see issue #27 for the boundary.)
-
-If you touch `proto/souk.proto`, regenerate the SDK's gRPC stubs from
-the repo root before doing anything else:
-
-```bash
-uv sync --group dev
-uv run bash scripts/gen_proto.sh
 ```
 
 ## Running the tests
@@ -85,14 +75,9 @@ before a PR merges.
 - Domain behavior (routing, identity, run dispatch, persistence, protocol
   translation) → `souk/`.
 - Anything that needs a socket — endpoints, transports, TLS, wire framing
-  → the [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)
-  repo, not here (issue #27).
-- The agent-side polling/dispatch client, or the A2A sub-agent-calling
-  helper → `souk-agent-sdk/`.
-- A caller-side convenience wrapper → `souk-client-sdk/`.
-- A new reference provider or framework example → `providers/` (see
-  `providers/README.md`); keep `agent-template/` itself minimal, don't
-  grow it into a framework.
+  — and the SDKs and reference providers that speak them → the
+  [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer) repo,
+  not here (issue #27).
 - The human-browsable directory/chat UI → `souk-directory/`.
 
 ## Commits / PRs
@@ -100,6 +85,7 @@ before a PR merges.
 Small, one logical change per commit — the existing `git log` is the best
 reference for the expected granularity and message style. Open an issue
 first for anything that isn't an obvious bug fix, especially anything
-touching the identity/routing model or `proto/souk.proto` — see README's
+touching the identity/routing model or the wire frames (authored in
+AgentSoukServer's `docs/server-mode.md`) — see README's
 [Roadmap](README.md#roadmap) for what's already a known direction versus
 what needs discussion first.

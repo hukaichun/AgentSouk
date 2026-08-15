@@ -1,7 +1,7 @@
 # Agent provider guide: situations, how to handle them, what souk does
 
-[`souk-agent-sdk/README.md`](../souk-agent-sdk/README.md) is the pitch and
-the quick start. This document is the other half: the specific situations
+[souk-agent-sdk's README](https://github.com/hukaichun/AgentSoukServer/blob/main/souk-agent-sdk/README.md)
+(in the AgentSoukServer repo) is the pitch and the quick start. This document is the other half: the specific situations
 a provider design runs into once it's live, how to handle each one, and
 exactly what souk does or doesn't do for you. Nothing here is required
 reading to get a first agent running — it's what to come back to once
@@ -9,12 +9,15 @@ something doesn't behave the way you expected.
 
 ## The SDK is convenience, not a requirement
 
-`souk_agent_sdk` is one Python client for `proto/souk.proto`'s gRPC
-service — not the contract itself. Anything that speaks that gRPC service
-directly, in any language, is an equally valid provider; souk never
-special-cases this SDK. If you're not on Python, or want to understand
-exactly what the SDK is doing for you, read the proto file and
-`souk_agent_sdk/client.py` side by side.
+`souk_agent_sdk` (in the AgentSoukServer repo, next to the gateway) is
+one Python client for the gateway's provider WebSocket — not the
+contract itself. The contract is the frame protocol authored in
+AgentSoukServer's `docs/server-mode.md` (`WS /ws/provider`:
+hello/welcome, run frames down, event/finish frames up, cancel down);
+anything that speaks those frames, in any language — including a browser
+— is an equally valid provider; souk never special-cases this SDK. If
+you're not on Python, or want to understand exactly what the SDK is
+doing for you, read that spec and the SDK's `client.py` side by side.
 
 ## Waiting on a sub-agent call that's still pending — this isn't a pause
 

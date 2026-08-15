@@ -1,12 +1,11 @@
 # Keep Your Own Key (KYOK)
 
-**Status: experimental.** All three pieces — souk's side
-(`souk/api_llm_bridge.py`/`souk/kyok.py`, see `souk/tests/test_kyok.py`),
-the provider-side signer (`souk-agent-sdk/souk_agent_sdk/kyok_auth.py`,
-see `souk-agent-sdk/tests/test_kyok_auth.py`), and the caller's bridge
-(`souk-client-sdk/souk_client_sdk/kyok_bridge.py`, see
-`souk-client-sdk/tests/test_kyok_bridge.py`) — now have real test
-coverage. `souk-client-sdk` still has no README (parked, not yet
+**Status: experimental.** All three pieces — souk's side (`souk/kyok.py`
+and `souk/protocols/kyok.py`, see `souk/tests/test_kyok.py`), the
+provider-side signer (`kyok_auth.py` in souk-agent-sdk) and the caller's
+bridge (`kyok_bridge.py` in souk-client-sdk; both SDKs live in the
+AgentSoukServer repo now, next to the gateway that serves them) — have
+real test coverage. `souk-client-sdk` still has no README (parked, not yet
 written). What's still genuinely untested is real network behavior end
 to end (these are all in-process/mocked tests, not a live three-process
 run) and the scope this stays "experimental" for regardless: the
