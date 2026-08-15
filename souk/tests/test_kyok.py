@@ -17,7 +17,7 @@ import pytest
 
 from souk import repo
 from souk.protocols.kyok import collapse_stream
-from souk.kyok import issue_kyok_token, verify_kyok_token
+from souk.kyok import KyokBridge, issue_kyok_token, verify_kyok_token
 
 
 def _kyok_headers(bearer: str, private_key, body: bytes) -> dict:
@@ -156,3 +156,76 @@ def test_collapse_stream_multi_index_reassembles_per_choice():
         "message": {"role": "assistant", "content": "b"},
         "finish_reason": "length",
     }
+
+
+# ---- KyokBridge registry lifetimes
+#
+# `GET /kyok/poll` takes an unauthenticated, caller-chosen `sessionId`, so the
+# number of distinct keys this registry can be asked about is under a
+# stranger's control. Both maps were `defaultdict`s, which means a *lookup*
+# inserted, and nothing ever reclaimed: 100k polls of unknown sessions
+# retained 81 MiB, and an ordinary finished session leaked a key too. A session
+# is now one object with one lifetime rule (`_Session.is_idle`). These
+# pin the lifetime rule — an entry exists exactly while there is something to
+# find — rather than pinning the fix's shape.
+
+
+async def test_polling_an_unknown_session_records_nothing() -> None:
+    bridge = KyokBridge()
+
+    for i in range(100):
+        assert await bridge.poll_one(f"junk_{i}", 0) is None
+
+    assert bridge._sessions == {}
+
+
+async def test_a_poll_that_waits_and_times_out_records_nothing() -> None:
+    """The other half of the same hole: the waiting path added a subscriber
+    set, and discarding the event emptied it without removing it."""
+    bridge = KyokBridge()
+
+    assert await bridge.poll_one("nobody", 0.01) is None
+
+    assert bridge._sessions == {}
+
+
+async def test_a_finished_session_leaves_nothing_behind() -> None:
+    """Not only an adversarial matter — `popleft()` empties a deque without
+    removing it, so every legitimate session leaked one entry for the life of
+    the process."""
+    bridge = KyokBridge()
+    request_id, _queue = bridge.submit("legit", {"messages": []})
+
+    assert (await bridge.poll_one("legit", 0))["requestId"] == request_id
+    bridge.forget(request_id)
+
+    assert bridge._requests == {}
+    assert bridge._sessions == {}
+
+
+async def test_a_waiting_poll_is_still_woken_by_a_submit() -> None:
+    """The regression the cleanup could plausibly cause: the wake path runs
+    through a set that is now removed when it empties."""
+    bridge = KyokBridge()
+
+    async def submit_shortly() -> str:
+        await asyncio.sleep(0.01)
+        request_id, _ = bridge.submit("live", {"messages": []})
+        return request_id
+
+    submitted, polled = await asyncio.gather(submit_shortly(), bridge.poll_one("live", 2.0))
+
+    assert polled is not None and polled["requestId"] == submitted
+    assert bridge._sessions == {}
+
+
+async def test_an_abandoned_request_does_not_hide_the_work_behind_it() -> None:
+    """A request forgotten before anyone polled it leaves a dead id at the
+    head of its session's queue. Returning None there would tell a bridge
+    with work waiting that it has nothing to do."""
+    bridge = KyokBridge()
+    abandoned, _ = bridge.submit("mixed", {"messages": ["first"]})
+    live, _ = bridge.submit("mixed", {"messages": ["second"]})
+    bridge.forget(abandoned)
+
+    assert (await bridge.poll_one("mixed", 0))["requestId"] == live
