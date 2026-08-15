@@ -81,7 +81,7 @@ async def test_attach_start_and_read_back(souk, new_identity):
     await _until(lambda: handle.run_id not in souk.active_runs())
 
     run = await souk.get_run(handle.run_id)
-    assert run["status"] == "completed"
+    assert run.status == "completed"
 
     # The reply was persisted as real thread history, not just relayed.
     messages = await souk.get_thread_messages(handle.thread_id)
@@ -95,10 +95,10 @@ async def test_roster_and_agent_lookup(souk, new_identity):
     agent_id = await _register(souk, "echo", new_identity())
 
     roster = await souk.list_agents()
-    assert [a["name"] for a in roster] == ["echo"]
-    assert roster[0]["online"] is True
+    assert [a.name for a in roster] == ["echo"]
+    assert roster[0].online is True
 
-    assert (await souk.get_agent(agent_id))["name"] == "echo"
+    assert (await souk.get_agent(agent_id)).name == "echo"
     assert [a["agent_id"] for a in await souk.resolve_agents_by_name("echo")] == [agent_id]
     assert await souk.get_agent("agent_nope") is None
 
@@ -121,7 +121,7 @@ async def test_cancel_a_running_agent(souk, new_identity):
     await _until(lambda: handle.run_id not in souk.active_runs())
 
     run = await souk.get_run(handle.run_id)
-    assert run["status"] == "cancelled"
+    assert run.status == "cancelled"
 
     # Cancelling something souk isn't dispatching is reported, not raised.
     assert souk.cancel_run(handle.run_id) is False
@@ -160,7 +160,7 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
     await _until(lambda: handle.run_id not in souk.active_runs())
 
     assert events[-1]["type"] == "RUN_FINISHED"
-    assert (await souk.get_run(handle.run_id))["status"] == "completed"
+    assert (await souk.get_run(handle.run_id)).status == "completed"
 
 
 async def test_a_cancel_before_any_provider_takes_the_run(souk, new_identity):
@@ -174,7 +174,7 @@ async def test_a_cancel_before_any_provider_takes_the_run(souk, new_identity):
     assert souk.cancel_run(handle.run_id) is True
     await _until(lambda: handle.run_id not in souk.active_runs())
 
-    assert (await souk.get_run(handle.run_id))["status"] == "cancelled"
+    assert (await souk.get_run(handle.run_id)).status == "cancelled"
 
 
 async def test_thread_lineage(souk, new_identity):
@@ -262,7 +262,7 @@ async def test_start_reconciles_what_the_last_process_left_behind(own_souk, new_
     orphaned = await own_souk.start()
 
     assert orphaned == [stale]
-    assert (await own_souk.get_run(stale))["status"] == "failed"
+    assert (await own_souk.get_run(stale)).status == "failed"
 
 
 async def test_start_runs_once_so_a_second_call_cannot_reap_live_work(own_souk, new_identity):
@@ -278,7 +278,7 @@ async def test_start_runs_once_so_a_second_call_cannot_reap_live_work(own_souk, 
         await session.commit()
 
     assert await own_souk.start() == []
-    assert (await own_souk.get_run(fresh))["status"] == "queued"
+    assert (await own_souk.get_run(fresh)).status == "queued"
 
 
 async def test_start_keeps_exactly_one_sweeper_and_aclose_stops_it(own_souk):

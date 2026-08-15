@@ -118,7 +118,7 @@ async def test_claiming_marks_the_agent_as_seen(souk):
 
     await souk.claim_work(registration.session_token, [agent_id])
 
-    assert (await souk.list_agents())[0]["online"] is True
+    assert (await souk.list_agents())[0].online is True
 
 
 async def test_max_claim_limits_and_zero_claims_nothing(souk):

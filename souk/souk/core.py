@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from souk import repo
 from souk.broker import FinishStream, RelayEvent, RunBroker, RunSnapshot
+from souk.changes import ChangeEvent, RosterChanged, RunStatusChanged
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, EXPECTED_SCHEMA_REVISION, quoted_schema
 from souk.errors import AgentNotFound, InvalidRegistration
@@ -45,6 +46,7 @@ from souk.identity import (
     verify_signature,
 )
 from souk.kyok import KyokBridge
+from souk.models import AgentRecord, AgentSummary, RunRecord
 from souk.providers import Provider
 from souk.worker import ClaimedRun, Worker
 
@@ -190,6 +192,9 @@ class Souk:
         # start() must not reconcile again (see start), so this records the
         # act, not the state.
         self._started = False
+        # Anyone watching this souk from inside the process — see on_change.
+        # A set, so subscribing twice with the same callable is once.
+        self._change_subscribers: set[Callable[[ChangeEvent], None]] = set()
 
     @asynccontextmanager
     async def session(self) -> AsyncIterator[AsyncSession]:
@@ -352,6 +357,9 @@ class Souk:
             agent_ids = await repo.register_agents(
                 session, public_key, agents, provider_name=provider_name
             )
+        # Covers more than "an agent appeared": re-registering without a
+        # name delists it, so this is also how a removal is announced.
+        self._notify_change(RosterChanged())
         return Registration(
             agent_ids=agent_ids,
             session_token=issue_session_token(public_key, self.settings.token_signing_secret),
@@ -590,6 +598,9 @@ class Souk:
             for agent_id in agent_ids:
                 await repo.touch_agent(session, agent_id)
         worker.start()
+        # Reachability is part of the roster's answer (`AgentSummary.online`),
+        # so attaching changes it even though no agent was added.
+        self._notify_change(RosterChanged())
 
     async def detach_provider(self, provider_id: str) -> None:
         """This provider is gone from this process. Unlike a remote one —
@@ -607,6 +618,56 @@ class Souk:
         async with self.session() as session:
             for agent_id in worker.agent_ids:
                 await repo.mark_agent_offline(session, agent_id, self.settings.online_window_seconds)
+        self._notify_change(RosterChanged())
+
+    # ---- Watching a souk from inside the process
+
+    def on_change(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:
+        """Be told when souk's own state changes, instead of asking again.
+
+        Returns the unsubscribe. `callback` is called synchronously, on
+        whichever task made the change, and is not awaited — the same
+        contract as `claim_work`'s `on_cancel`, and for the same reason: souk
+        is telling you, not handing you a job. Keep it short and do the real
+        work elsewhere; a slow callback slows down the run that triggered it.
+
+        No history, no replay, no ordering guarantee across subscribers. What
+        a subscriber does with an event is re-query (see `list_agents`,
+        `get_run`) — the database stays the thing that is true, and this only
+        saves you from polling it.
+
+        Raising is contained: one broken subscriber must not fail the
+        registration or the run that notified it. It is logged, not silenced.
+        """
+        self._change_subscribers.add(callback)
+
+        def unsubscribe() -> None:
+            self._change_subscribers.discard(callback)
+
+        return unsubscribe
+
+    def _notify_change(self, event: ChangeEvent) -> None:
+        # Iterate a copy: a callback is allowed to unsubscribe itself.
+        for callback in list(self._change_subscribers):
+            try:
+                callback(event)
+            except Exception:
+                logger.exception("on_change subscriber raised for %r", event)
+
+    async def mark_run_status(
+        self, session: AsyncSession, run_id: str, status: str, metadata: dict[str, Any] | None = None
+    ) -> None:
+        """Record a run's status *and* announce it. The one way souk changes
+        a run's status.
+
+        It exists because the alternative is remembering to notify at each of
+        the seven places that move a run — and the eighth, added later, is
+        the one that silently does not. `repo.mark_run_status` is the storage
+        half and is not called directly from anywhere else;
+        tests/test_change_hook.py asserts that rather than trusting it.
+        """
+        await repo.mark_run_status(session, run_id, status, metadata=metadata)
+        self._notify_change(RunStatusChanged(run_id=run_id, status=status))
 
     def _issue_worker_token(self, provider_id: str) -> str:
         """The token an in-process provider's worker claims with — issued to
@@ -617,7 +678,7 @@ class Souk:
         one can."""
         return issue_session_token(provider_id, self.settings.token_signing_secret)
 
-    async def list_agents(self) -> list[dict[str, Any]]:
+    async def list_agents(self) -> list[AgentSummary]:
         """The roster, with this souk's own online/staleness policy applied."""
         async with self.session() as session:
             return await repo.list_agents(
@@ -626,7 +687,7 @@ class Souk:
                 stale_hidden_window_seconds=self.settings.stale_hidden_window_seconds,
             )
 
-    async def get_agent(self, agent_id: str) -> dict[str, Any] | None:
+    async def get_agent(self, agent_id: str) -> AgentRecord | None:
         async with self.session() as session:
             return await repo.get_agent_by_id(session, agent_id)
 
@@ -705,7 +766,7 @@ class Souk:
 
     # ---- Runs
 
-    async def get_run(self, run_id: str) -> dict[str, Any] | None:
+    async def get_run(self, run_id: str) -> RunRecord | None:
         async with self.session() as session:
             return await repo.get_run(session, run_id)
 
@@ -803,15 +864,15 @@ class Souk:
 
         self.enqueue_run(
             run_id,
-            stored["agent_id"],
-            stored["thread_id"],
+            stored.agent_id,
+            stored.thread_id,
             run_input,
-            stored["protocol"] or "ag-ui",
+            stored.protocol or "ag-ui",
             seq=starting_seq,
         )
         return RunHandle(
             run_id=run_id,
-            thread_id=stored["thread_id"],
+            thread_id=stored.thread_id,
             is_live=True,
             _broker=self.broker,
             _events=self.broker.subscribe(run_id),

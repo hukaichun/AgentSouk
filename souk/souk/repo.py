@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.identity import provider_fingerprint
 from souk.ids import new_id
+from souk.models import AgentRecord, AgentSummary, RunRecord
 from souk.schema import agents, providers, run_events, thread_history, threads
 
 
@@ -263,7 +264,7 @@ async def mark_agent_offline(session: AsyncSession, agent_id: str, online_window
     await session.commit()
 
 
-async def get_agent_by_id(session: AsyncSession, agent_id: str) -> dict[str, Any] | None:
+async def get_agent_by_id(session: AsyncSession, agent_id: str) -> AgentRecord | None:
     """Direct, always-unambiguous lookup by the canonical key — a delisted
     agent is treated as not found, same as one that never existed."""
     row = (
@@ -278,7 +279,7 @@ async def get_agent_by_id(session: AsyncSession, agent_id: str) -> dict[str, Any
             ).where(agents.c.agent_id == agent_id, agents.c.delisted_at.is_(None))
         )
     ).mappings().first()
-    return dict(row) if row else None
+    return AgentRecord(**row) if row else None
 
 
 async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | None:
@@ -374,7 +375,7 @@ async def list_agents(
     *,
     online_window_seconds: int,
     stale_hidden_window_seconds: int,
-) -> list[dict[str, Any]]:
+) -> list[AgentSummary]:
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_hidden_window_seconds)
     rows = (
         await session.execute(
@@ -395,17 +396,17 @@ async def list_agents(
         )
     ).mappings().all()
     return [
-        {
-            "agent_id": row["agent_id"],
-            "name": row["name"],
-            "description": row["agent_card"].get("description", ""),
-            "skills": row["agent_card"].get("skills", []),
-            "joined_at": row["joined_at"],
-            "last_seen_at": row["last_seen_at"],
-            "online": is_agent_online(row["last_seen_at"], online_window_seconds),
-            "public_key": row["public_key"],
-            "provider_name": row["provider_name"],
-        }
+        AgentSummary(
+            agent_id=row["agent_id"],
+            name=row["name"],
+            description=row["agent_card"].get("description", ""),
+            skills=row["agent_card"].get("skills", []),
+            joined_at=row["joined_at"],
+            last_seen_at=row["last_seen_at"],
+            online=is_agent_online(row["last_seen_at"], online_window_seconds),
+            public_key=row["public_key"],
+            provider_name=row["provider_name"],
+        )
         for row in rows
     ]
 
@@ -909,15 +910,30 @@ async def fail_unclaimed_runs(
     return run_ids
 
 
-async def get_run(session: AsyncSession, run_id: str) -> dict[str, Any] | None:
+async def get_run(session: AsyncSession, run_id: str) -> RunRecord | None:
+    """Named columns, not `select(thread_history)`. Runs share that table
+    with messages, so selecting all of it also returned the columns that make
+    the sharing work (`id`, `kind`, `message_id`, `message_json`) — storage,
+    not facts about a run. See models.RunRecord.
+    """
     row = (
         await session.execute(
-            select(thread_history).where(
-                thread_history.c.run_id == run_id, thread_history.c.kind == "run_status"
-            )
+            select(
+                thread_history.c.run_id,
+                thread_history.c.thread_id,
+                thread_history.c.agent_id,
+                thread_history.c.protocol,
+                thread_history.c.status,
+                thread_history.c.input_json,
+                thread_history.c.metadata,
+                thread_history.c.created_at,
+                thread_history.c.started_at,
+                thread_history.c.completed_at,
+                thread_history.c.last_activity_at,
+            ).where(thread_history.c.run_id == run_id, thread_history.c.kind == "run_status")
         )
     ).mappings().first()
-    return dict(row) if row else None
+    return RunRecord(**row) if row else None
 
 
 async def append_run_event(session: AsyncSession, run_id: str, seq: int, event_json: dict[str, Any]) -> None:

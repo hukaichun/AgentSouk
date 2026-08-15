@@ -71,7 +71,7 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
     ).mappings().first()
     assert row["delisted_at"] is not None
 
-    names_after_delist = [a["name"] for a in await _listed(session, souk)]
+    names_after_delist = [a.name for a in await _listed(session, souk)]
     assert names_after_delist == ["greeter"]
 
     # Reappearing in a later batch clears delisted_at again (self-heal).
@@ -82,7 +82,7 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
         )
     ).mappings().first()
     assert row["delisted_at"] is None
-    names_after_return = sorted(a["name"] for a in await _listed(session, souk))
+    names_after_return = sorted(a.name for a in await _listed(session, souk))
     assert names_after_return == ["greeter", "translator"]
 
 
@@ -92,7 +92,7 @@ async def test_list_agents_excludes_stale_and_reports_online(session, souk, new_
 
     listed = await _listed(session, souk)
     assert len(listed) == 1
-    assert listed[0]["online"] is True  # just registered, last_seen_at is now()
+    assert listed[0].online is True  # just registered, last_seen_at is now()
 
     # Backdate past the stale-hidden window — should disappear from the
     # roster entirely, not just show online=False.
@@ -110,23 +110,23 @@ async def test_list_agents_reports_public_key_and_provider_name(session, souk, n
     )
 
     listed = await _listed(session, souk)
-    assert listed[0]["public_key"] == identity.public_key
-    assert listed[0]["provider_name"] == "Ada's Stall"
+    assert listed[0].public_key == identity.public_key
+    assert listed[0].provider_name == "Ada's Stall"
 
 
 async def test_provider_name_defaults_to_none_and_is_sticky_across_registrations(session, souk, new_identity):
     identity = new_identity()
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
-    assert (await _listed(session, souk))[0]["provider_name"] is None
+    assert (await _listed(session, souk))[0].provider_name is None
 
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}], provider_name="Ada's Stall"
     )
-    assert (await _listed(session, souk))[0]["provider_name"] == "Ada's Stall"
+    assert (await _listed(session, souk))[0].provider_name == "Ada's Stall"
 
     # A later registration that doesn't pass provider_name at all must not
     # blank out the name a previous one set.
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
-    assert (await _listed(session, souk))[0]["provider_name"] == "Ada's Stall"
+    assert (await _listed(session, souk))[0].provider_name == "Ada's Stall"
 
 
 async def test_resolve_agents_by_name_zero_one_many(session, new_identity):

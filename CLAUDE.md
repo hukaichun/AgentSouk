@@ -40,6 +40,12 @@ times over.
 - `docker compose up` didn't start, a provider failure reached callers as an
   empty 200, and A2A answered `-32601` to every spec-current client. All
   three were live the whole time 204 tests were green — see Testing below
+- souk's own logging was disabled for the entire test session, and had been
+  for a long time. `alembic/env.py` calls `fileConfig`, whose default is
+  `disable_existing_loggers=True`; conftest migrates after importing souk, so
+  every `souk.*` logger created by then was switched off. Found because a
+  test asserting a logged warning failed while a throwaway script proved the
+  code logged it — reading the code would never have found this
 
 When you catch yourself about to write "this should work" or "X is
 transport-specific", write eight lines that prove it instead.

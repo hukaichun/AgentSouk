@@ -98,7 +98,7 @@ async def test_a_local_agent_can_drive_a_run_with_no_transport(souk):
     await _until(lambda: handle.run_id not in souk.active_runs())
     async with souk.session() as session:
         stored = await repo.get_run(session, handle.run_id)
-        assert stored["status"] == "completed"
+        assert stored.status == "completed"
         messages = await repo.get_thread_messages(session, handle.thread_id)
     assert messages[-1]["content"] == "hello from in-process"
 

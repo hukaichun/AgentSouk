@@ -150,8 +150,8 @@ class AGUIAdapter:
             # already knows the target is offline, don't queue at all — emit
             # a terminal event and close, instead of opening a stream that
             # would sit idle until queued_timeout_seconds.
-            if not repo.is_agent_online(agent["last_seen_at"], souk.settings.online_window_seconds):
-                await repo.mark_run_status(
+            if not repo.is_agent_online(agent.last_seen_at, souk.settings.online_window_seconds):
+                await souk.mark_run_status(
                     session, run_id, "failed", metadata={"failureReason": "agent_offline"}
                 )
                 await session.commit()

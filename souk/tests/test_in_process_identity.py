@@ -88,8 +88,8 @@ async def test_an_attached_provider_is_actually_online_and_reachable(souk):
     await souk.attach_provider(public_key, LocalProvider(), [agent_id])
 
     roster = await souk.list_agents()
-    assert [a["agent_id"] for a in roster] == [agent_id]
-    assert roster[0]["online"] is True
+    assert [a.agent_id for a in roster] == [agent_id]
+    assert roster[0].online is True
 
     handle = await souk.start_run(agent_id, {"messages": []})
     assert [e["type"] async for e in handle.events()] == ["RUN_STARTED", "RUN_FINISHED"]
@@ -101,14 +101,14 @@ async def test_detaching_marks_it_offline_immediately(souk):
     of the online window first."""
     _registration, public_key, agent_id = await _register(souk)
     await souk.attach_provider(public_key, LocalProvider(), [agent_id])
-    assert (await souk.list_agents())[0]["online"] is True
+    assert (await souk.list_agents())[0].online is True
 
     await souk.detach_provider(public_key)
 
     roster = await souk.list_agents()
-    assert roster[0]["online"] is False
+    assert roster[0].online is False
     # Still listed, just not available — de-listing is a different act.
-    assert roster[0]["agent_id"] == agent_id
+    assert roster[0].agent_id == agent_id
 
 
 async def test_registration_issues_a_session_token(souk):
