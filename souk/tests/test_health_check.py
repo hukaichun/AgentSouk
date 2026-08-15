@@ -11,6 +11,7 @@ them is worse than not having one.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from alembic.config import Config
@@ -123,3 +124,28 @@ async def test_background_running_reflects_start(settings: CoreSettings) -> None
         assert health.ready
     finally:
         await souk.aclose()
+
+
+def test_running_migrations_does_not_disable_souks_own_loggers() -> None:
+    """`alembic/env.py` calls `fileConfig`, whose default is
+    `disable_existing_loggers=True` — it turns off every logger that already
+    exists. Migrations are not only run from a command line: this suite runs
+    one at session start, after importing souk, and it silently killed
+    `souk.core`, `souk.broker`, `souk.health` and the rest for the whole
+    process. An embedding application would lose its own the same way, having
+    done nothing but migrate its database.
+
+    No setup here on purpose: conftest has already run the migration by the
+    time this executes, so this is the real path rather than a reconstruction
+    of it.
+    """
+    silenced = [
+        name
+        for name in ("souk.core", "souk.broker", "souk.handlers", "souk.health", "souk.worker")
+        if logging.getLogger(name).disabled
+    ]
+
+    assert not silenced, (
+        f"running migrations disabled {silenced}. See souk/alembic/env.py — fileConfig needs "
+        "disable_existing_loggers=False."
+    )

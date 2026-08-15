@@ -15,9 +15,20 @@ from souk.schema import metadata as souk_metadata
 config = context.config
 
 # Interpret the config file for Python logging.
-# This line sets up loggers basically.
+#
+# `disable_existing_loggers=False` is not a style preference. The default is
+# True, which disables every logger that already exists at this moment — and
+# migrations are not only run from a command line. Anything that runs
+# `alembic upgrade` in-process (souk's own test suite does, at session start,
+# after importing souk) silently loses `souk.core`, `souk.broker`,
+# `souk.health` and every other logger created before this line, for the rest
+# of the process. It cost an afternoon: a test asserting souk logged a
+# swallowed exception failed while the code was demonstrably logging it.
+#
+# An embedding application would lose its own loggers the same way, having
+# done nothing but migrate its database.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # souk's schema is defined once as SQLAlchemy Core table metadata (see
 # souk/schema.py). Pointing Alembic at it lets `alembic revision

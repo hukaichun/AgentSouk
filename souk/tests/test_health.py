@@ -44,8 +44,8 @@ async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error
     assert failed_run_ids == [run_id]
 
     run = await repo.get_run(session, run_id)
-    assert run["status"] == "failed"
-    assert run["metadata"]["failureReason"] == "no_provider_online"
+    assert run.status == "failed"
+    assert run.metadata["failureReason"] == "no_provider_online"
 
 
 async def test_fail_unclaimed_runs_leaves_recent_or_online_runs_alone(session, new_identity):
@@ -61,7 +61,7 @@ async def test_fail_unclaimed_runs_leaves_recent_or_online_runs_alone(session, n
     assert await repo.fail_unclaimed_runs(session, timeout_seconds=0, online_window_seconds=60) == []
 
     run = await repo.get_run(session, created["run_id"])
-    assert run["status"] == "queued"
+    assert run.status == "queued"
 
 
 async def _make_paused_run(session, agent_id, thread_id, seconds_stale: int) -> str:
@@ -89,8 +89,8 @@ async def test_fail_stale_paused_runs_fails_runs_past_timeout(session, new_ident
     assert failed_run_ids == [run_id]
 
     run = await repo.get_run(session, run_id)
-    assert run["status"] == "failed"
-    assert run["metadata"]["failureReason"] == "paused_no_resume"
+    assert run.status == "failed"
+    assert run.metadata["failureReason"] == "paused_no_resume"
 
 
 async def test_fail_stale_paused_runs_leaves_recent_pauses_alone(session, new_identity):
@@ -104,7 +104,7 @@ async def test_fail_stale_paused_runs_leaves_recent_pauses_alone(session, new_id
     assert await repo.fail_stale_paused_runs(session, timeout_seconds=60) == []
 
     run = await repo.get_run(session, run_id)
-    assert run["status"] == "input-required"
+    assert run.status == "input-required"
 
 
 async def test_fail_stale_paused_runs_ignores_running_and_queued(session, new_identity):
@@ -124,7 +124,7 @@ async def test_fail_stale_paused_runs_ignores_running_and_queued(session, new_id
     assert await repo.fail_stale_paused_runs(session, timeout_seconds=60) == []
 
     run = await repo.get_run(session, created["run_id"])
-    assert run["status"] == "queued"
+    assert run.status == "queued"
 
 
 async def test_sweep_once_skips_paused_sweep_when_unconfigured(session, souk, new_identity):
@@ -144,4 +144,4 @@ async def test_sweep_once_skips_paused_sweep_when_unconfigured(session, souk, ne
     await health.sweep_once(souk)
 
     run = await repo.get_run(session, run_id)
-    assert run["status"] == "input-required"
+    assert run.status == "input-required"

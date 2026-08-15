@@ -127,11 +127,11 @@ class A2AAdapter:
         agent = await self._souk.get_agent(agent_id)
         if agent is None:
             raise AgentNotFound(f"agent '{agent_id}' is not registered")
-        card = dict(agent["agent_card"])
+        card = dict(agent.agent_card)
         base = f"{self._public_base_url}/a2a/id/{agent_id}"
         return to_wire(
             pb.AgentCard(
-                name=card.get("name", agent["name"]),
+                name=card.get("name", agent.name),
                 description=card.get("description", ""),
                 version="0.1.0",
                 # v1.0 replaced the card's single `url` + `preferredTransport`
@@ -248,7 +248,7 @@ class A2AAdapter:
             run_id,
             thread_id,
             await self._display_name(agent_id),
-            stored["status"] if stored else "completed",
+            stored.status if stored else "completed",
             events,
         )
 
@@ -280,7 +280,7 @@ class A2AAdapter:
                 # one status update reflecting the current persisted state,
                 # then close.
                 stored = await self._souk.get_run(run_id)
-                status = stored["status"] if stored else "completed"
+                status = stored.status if stored else "completed"
                 yield status_update_for_run_status(run_id, thread_id, status)
                 return
             async for item in events:
@@ -291,8 +291,8 @@ class A2AAdapter:
             # persisted outcome, so a live watcher isn't left with a false
             # "completed" as the last word.
             stored = await self._souk.get_run(run_id)
-            if stored is not None and stored["status"] != "completed":
-                yield status_update_for_run_status(run_id, thread_id, stored["status"])
+            if stored is not None and stored.status != "completed":
+                yield status_update_for_run_status(run_id, thread_id, stored.status)
 
         return results()
 
@@ -308,18 +308,18 @@ class A2AAdapter:
         the outcome instead of watching nothing.
         """
         run = await self._run_of(agent_id, task_id)
-        thread_id = run["thread_id"]
+        thread_id = run.thread_id
         events = self._souk.broker.subscribe(task_id) if self._souk.broker.get(task_id) else None
 
         async def results() -> AsyncIterator[dict[str, Any]]:
             if events is None:
-                yield status_update_for_run_status(task_id, thread_id, run["status"])
+                yield status_update_for_run_status(task_id, thread_id, run.status)
                 return
             async for item in events:
                 yield agui_event_to_a2a_update(item, task_id, thread_id)
             stored = await self._souk.get_run(task_id)
-            if stored is not None and stored["status"] != "completed":
-                yield status_update_for_run_status(task_id, thread_id, stored["status"])
+            if stored is not None and stored.status != "completed":
+                yield status_update_for_run_status(task_id, thread_id, stored.status)
 
         return results()
 
@@ -330,9 +330,9 @@ class A2AAdapter:
         run = await self._run_of(agent_id, task_id)
         return build_task(
             task_id,
-            run["thread_id"],
+            run.thread_id,
             await self._display_name(agent_id),
-            run["status"],
+            run.status,
             await self._souk.get_run_events(task_id),
         )
 
@@ -355,9 +355,9 @@ class A2AAdapter:
         current = await self._souk.get_run(task_id) or run
         return build_task(
             task_id,
-            run["thread_id"],
+            run.thread_id,
             await self._display_name(agent_id),
-            current["status"],
+            current.status,
             await self._souk.get_run_events(task_id),
         )
 
@@ -365,13 +365,13 @@ class A2AAdapter:
 
     async def _run_of(self, agent_id: str, task_id: str) -> dict[str, Any]:
         run = await self._souk.get_run(task_id) if task_id else None
-        if run is None or run["agent_id"] != agent_id:
+        if run is None or run.agent_id != agent_id:
             raise RunNotFound(f"no task '{task_id}' for agent '{agent_id}'")
         return run
 
     async def _display_name(self, agent_id: str) -> str:
         agent = await self._souk.get_agent(agent_id)
-        return agent["name"] if agent else agent_id
+        return agent.name if agent else agent_id
 
     async def _start_run(self, agent_id: str, params: dict) -> tuple[str, str, bool]:
         """Queues a run from tasks/send(Subscribe) params.
@@ -448,8 +448,8 @@ class A2AAdapter:
 
             messages = await repo.append_thread_messages(session, thread_id, run_id, messages)
 
-            if not repo.is_agent_online(agent["last_seen_at"], souk.settings.online_window_seconds):
-                await repo.mark_run_status(
+            if not repo.is_agent_online(agent.last_seen_at, souk.settings.online_window_seconds):
+                await souk.mark_run_status(
                     session, run_id, "failed", metadata={"failureReason": "agent_offline"}
                 )
                 await session.commit()
@@ -511,7 +511,7 @@ async def _context_of_task(session, task_id: str | None) -> str | None:
     run = await repo.get_run(session, task_id)
     if run is None:
         raise RunNotFound(f"no task '{task_id}'")
-    return run["thread_id"]
+    return run.thread_id
 
 
 async def _lineage_parent(session, params: dict) -> str | None:
@@ -528,7 +528,7 @@ async def _lineage_parent(session, params: dict) -> str | None:
     if not reference_task_ids:
         return None
     referenced = await repo.get_run(session, reference_task_ids[0])
-    return referenced["thread_id"] if referenced is not None else None
+    return referenced.thread_id if referenced is not None else None
 
 
 def _send_args(params: dict[str, Any]) -> dict[str, Any]:

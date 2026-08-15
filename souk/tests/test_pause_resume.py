@@ -48,8 +48,8 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_id
     await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
-    assert reread["status"] == "input-required"
-    assert reread["metadata"]["interrupts"] == [interrupt]
+    assert reread.status == "input-required"
+    assert reread.metadata["interrupts"] == [interrupt]
     souk.broker.forget(run_id)
 
 
@@ -72,7 +72,7 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, so
     await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
-    assert reread["status"] == "completed"
+    assert reread.status == "completed"
     souk.broker.forget(run_id)
 
 
@@ -100,12 +100,12 @@ async def test_finalize_delegated_call_reports_honestly_without_registering_any_
     )
 
     db_run = await repo.get_run(session, run_c["run_id"])
-    assert db_run["status"] == "input-required"
+    assert db_run.status == "input-required"
 
     # B was never touched — still whatever it was before this call.
     reread_b = await repo.get_run(session, run_b["run_id"])
-    assert reread_b["metadata"] == {}
-    assert reread_b["status"] == "queued"
+    assert reread_b.metadata == {}
+    assert reread_b.status == "queued"
 
 
 async def test_a_delegating_agent_gets_an_honest_answer_by_just_asking_again(session, new_identity):

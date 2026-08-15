@@ -59,7 +59,7 @@ async def test_a_provider_that_raises_reaches_the_caller_as_run_error(brisk):
         # The same account either way: a caller that reconnects and reads the
         # run's stored events sees what the live stream showed.
         persisted = await repo.get_run_events(session, handle.run_id)
-    assert stored["status"] == "failed"
+    assert stored.status == "failed"
     assert [e["type"] for e in persisted] == ["RUN_ERROR"]
 
 
@@ -85,7 +85,7 @@ async def test_a_provider_that_reports_its_own_failure_is_not_corrected(brisk):
 
     await _until(lambda: handle.run_id not in brisk.active_runs())
     async with brisk.session() as session:
-        assert (await repo.get_run(session, handle.run_id))["status"] == "failed"
+        assert (await repo.get_run(session, handle.run_id)).status == "failed"
 
 
 async def test_a_cancelled_run_gets_no_run_error(brisk):
@@ -114,4 +114,4 @@ async def test_a_cancelled_run_gets_no_run_error(brisk):
 
     await _until(lambda: handle.run_id not in brisk.active_runs())
     async with brisk.session() as session:
-        assert (await repo.get_run(session, handle.run_id))["status"] == "cancelled"
+        assert (await repo.get_run(session, handle.run_id)).status == "cancelled"

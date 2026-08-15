@@ -55,7 +55,7 @@ async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
     dispatched from. Both are gone: the worker pushes.
     """
     async with souk.session() as session:
-        await repo.mark_run_status(session, run.run_id, "running")
+        await souk.mark_run_status(session, run.run_id, "running")
 
 
 async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
@@ -141,7 +141,7 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
     )
 
     async with souk.session() as session:
-        await repo.mark_run_status(session, run.run_id, status, metadata=metadata)
+        await souk.mark_run_status(session, run.run_id, status, metadata=metadata)
         if status in ("completed", "input-required"):
             # A genuine reply was produced (as opposed to failed/cancelled —
             # see souk/agui_reduce.py's module docstring for why those don't
@@ -207,12 +207,12 @@ async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
     """
     if run.claimed_by is None:
         async with souk.session() as session:
-            await repo.mark_run_status(session, run.run_id, "cancelled")
+            await souk.mark_run_status(session, run.run_id, "cancelled")
         await run.out_queue.put(END_OF_STREAM)
         return
 
     async with souk.session() as session:
-        await repo.mark_run_status(session, run.run_id, "cancelling")
+        await souk.mark_run_status(session, run.run_id, "cancelling")
     if run.cancel_notify is not None:
         # A worker's own code: it must never be able to break this run's
         # pipeline, and there is nothing souk could do about it anyway.
@@ -226,7 +226,7 @@ async def _handle_fail(souk: "Souk", run: Run, cmd: Fail) -> None:
     run.seq += 1
     async with souk.session() as session:
         await repo.append_run_event(session, run.run_id, run.seq, event)
-        await repo.mark_run_status(session, run.run_id, "failed", metadata={"failureReason": cmd.reason})
+        await souk.mark_run_status(session, run.run_id, "failed", metadata={"failureReason": cmd.reason})
     await run.out_queue.put(event)
     await run.out_queue.put(END_OF_STREAM)
 

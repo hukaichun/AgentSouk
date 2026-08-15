@@ -336,13 +336,29 @@ who asked.
 
 ### Typed data, and where typing stops
 
-souk's own data is modeled, not passed around as bare `dict`. Today it is
-not, and the current code shows why that is a wart rather than a choice:
-`agui.build_run_agent_input` validates its argument into a real
-`ag_ui.core.RunAgentInput` and then immediately calls `.model_dump()`,
-discarding the model at the boundary. Everything downstream is left poking
-strings — `event.get("type")` in `agui_reduce`, `outcome.get("type")` in
-`pause`. The types already exist in `ag-ui-protocol`; core should keep them.
+souk's own data is modeled, not passed around as bare `dict`. The query
+methods are now: `list_agents` returns `AgentSummary`, `get_agent` an
+`AgentRecord`, `get_run` a `RunRecord` (`souk/models.py`).
+
+The reason is not annotations. souk's field names were only ever written down
+in `repo.py`'s row-building, so every consumer learned them by reading it —
+the gateway carried a hand-written model listing exactly those keys, kept in
+step by nobody. Naming them where the data is produced means a rename breaks
+at the source instead of downstream, and `tests/test_query_models.py` pins
+the field *sets* whole, so a disappearing field fails a test rather than a
+consumer.
+
+`get_run` got narrower in the process. Runs live in `thread_history` next to
+messages, and it was `select(thread_history)`, so it also returned `id`,
+`kind`, `message_id` and `message_json` — the columns that make that sharing
+work, and meaningless as facts about a run. Nothing read them (checked across
+the repo rather than assumed).
+
+Still bare `dict`: `get_thread_tree` and `get_thread_snapshot`, whose shapes
+are nested and ad-hoc with nothing duplicating their contract, and
+`build_run_agent_input`, which validates into a real
+`ag_ui.core.RunAgentInput` and then `.model_dump()`s it — one validation at
+the boundary, then the checked payload travels as data.
 
 So: **anything souk constructs or owns is a pydantic model** — `RunAgentInput`
 on the way to a provider, and souk's own agent/thread/run state on the way
@@ -536,8 +552,36 @@ await souk.get_run(run_id)
 await souk.get_run_events(run_id)
 await souk.resume_run(run_id, input)         # HITL: same run_id across rounds
 souk.cancel_run(run_id)
+
+unsubscribe = souk.on_change(callback)       # told, rather than asking again
 souk.active_runs()                           # live in-memory dispatch state
 ```
+
+### Being told, instead of asking again
+
+`on_change` is the read side's counterpart to `on_cancel`: a plain
+synchronous callback, invoked and not awaited, no queue, no replay, no
+ordering guarantee. souk already computes these facts — an agent registered,
+a run went to `running` — and the only way to learn one used to be asking
+again on a timer.
+
+Deliberately coarse. `RosterChanged` says *something* is different, not what;
+the subscriber re-queries. Fine-grained events would be a promise of a
+complete, ordered account of every change, which souk cannot keep across a
+restart or a second process.
+
+Two details worth stating because they are the ones that would otherwise be
+discovered:
+
+- **`Souk.mark_run_status` is the only way a run's status moves.** Seven call
+  sites do it today, and the eighth — added later, by someone who has not
+  read this — is the one that would silently not notify. `repo` keeps the
+  storage half, and `tests/test_change_hook.py` walks the AST to assert
+  nothing outside `Souk` calls it.
+- **Going offline by falling silent fires nothing.** `online` is derived —
+  `last_seen_at` against a window, evaluated when you ask — so there is no
+  instant at which anything happens. Registration, attach and detach all
+  fire; staleness is poll-only, and says so in `changes.py`.
 
 ### Background work belongs to the Souk
 
