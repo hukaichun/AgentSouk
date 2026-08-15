@@ -31,10 +31,58 @@ jobs:
           python-version: "3.12"
       - run: uv sync --group dev
         working-directory: souk
-      - run: uv run bash ../scripts/gen_proto.sh souk/grpc_gen
-        working-directory: souk
+      # No gRPC stubs here, and nothing to generate them with: souk depends
+      # on no transport at all (see its pyproject). If this step ever comes
+      # back, something has moved into core that shouldn't have.
       - run: uv run pytest -v
         working-directory: souk
+        env:
+          SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
+          SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
+
+  # The serving layer is a separate distribution (souk-server), so it gets
+  # its own job — it is the only one that needs the gRPC stubs, and the only
+  # one that can build the app.
+  souk-server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: souk
+          POSTGRES_PASSWORD: souk
+          POSTGRES_DB: souk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk-server
+      - run: uv run bash ../scripts/gen_proto.sh souk_server/grpc_gen
+        working-directory: souk-server
+      # A green suite has never meant the app starts — nothing under tests/
+      # imports the bootstrap, and a rename sweep once left unparseable code
+      # there with the suite passing. Building it is the check for that.
+      - run: |
+          uv run python -c "
+          from souk.config import CoreSettings
+          from souk.core import Souk
+          from souk_server.server import create_app
+          create_app(Souk(CoreSettings(database_url='sqlite+aiosqlite:///:memory:',
+                                       token_signing_secret='ci')))
+          print('app builds')
+          "
+        working-directory: souk-server
+      - run: uv run pytest -v
+        working-directory: souk-server
         env:
           SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
           SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
