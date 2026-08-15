@@ -68,20 +68,29 @@ _TS = DateTime(timezone=True)
 _BIGSERIAL = BigInteger().with_variant(Integer(), "sqlite")
 
 
-# A "provider" isn't a first-class registration concept the way an agent
-# is — it's just whoever holds a given public_key, identified purely by
-# that key (see agents.public_key). This table exists only to attach an
-# optional, non-unique display label to that key for humans browsing the
-# directory (souk-directory groups agents by public_key into
-# "storefronts"). Deliberately not folded into `agents`: a provider's name
-# is set once per key, not once per agent, and shouldn't get wiped out just
-# because one particular registration batch didn't happen to pass it (see
-# repo.upsert_provider_name).
+# One row per provider identity: every public_key that has registered,
+# whether or not it chose a display name. It used to hold only the ones that
+# passed a `provider_name`, which made it a table of labels rather than of
+# identities — `fingerprint` needs the latter, since resolving a short
+# address has to be able to miss for a key that exists but never named
+# itself.
+#
+# Deliberately not folded into `agents`: both columns are properties of the
+# key, set once per key rather than once per agent, and a display name
+# shouldn't get wiped out because one registration batch didn't pass one
+# (see repo.set_provider_name).
 providers = Table(
     "providers",
     metadata,
     Column("public_key", String, primary_key=True),
-    Column("display_name", String, nullable=False),
+    # The short form of public_key (souk.identity.provider_fingerprint) —
+    # derived, so it can never drift from the key it belongs to, and UNIQUE
+    # so a second key hashing to the same prefix is refused by the database
+    # at registration rather than by a check that could race.
+    Column("fingerprint", String, nullable=False, unique=True),
+    # NULL means "this identity never said" — distinct from a name set and
+    # later cleared, which souk does not offer.
+    Column("display_name", String, nullable=True),
     Column("updated_at", _TS, nullable=False, default=_utcnow),
 )
 

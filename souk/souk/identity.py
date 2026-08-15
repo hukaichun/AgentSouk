@@ -61,6 +61,34 @@ SESSION_TOKEN_TTL_SECONDS = 3600
 SIGNATURE_FRESHNESS_WINDOW_SECONDS = 60
 
 
+# A short, stable stand-in for a provider's public key, for places a
+# 64-character hex string is unusable — chiefly an address a human reads or
+# types (see docs/library-architecture.md on addressing). Derived, never
+# minted: anyone holding the key can compute it, it is the same on every
+# souk, and there is nothing to store on the provider's side or hand out.
+#
+# 16 hex is 64 bits. That is not about accidental collisions (those would
+# need ~2^32 providers) but deliberate ones: grinding keypairs until one
+# matches a chosen provider's fingerprint costs ~2^64, out of reach. souk
+# also refuses a registration whose fingerprint already belongs to another
+# key (see repo.ensure_provider), so even a found collision blocks a
+# registration rather than impersonating anyone.
+FINGERPRINT_HEX_LENGTH = 16
+
+
+def provider_fingerprint(public_key: str) -> str:
+    """SHA-256 of the key's raw bytes, truncated. The bytes rather than the
+    hex text, so the answer does not depend on how the hex was cased."""
+    return hashlib.sha256(bytes.fromhex(public_key)).hexdigest()[:FINGERPRINT_HEX_LENGTH]
+
+
+def is_fingerprint(value: str) -> bool:
+    """Whether this is a fingerprint rather than a full public key. The two
+    are distinguishable by length — 16 hex against 64 — so one parameter can
+    accept either without ambiguity."""
+    return len(value) == FINGERPRINT_HEX_LENGTH
+
+
 def is_timestamp_fresh(timestamp: int) -> bool:
     return abs(time.time() - timestamp) <= SIGNATURE_FRESHNESS_WINDOW_SECONDS
 

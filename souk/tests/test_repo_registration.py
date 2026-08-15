@@ -10,10 +10,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import select, update
 
 from souk import repo
-from souk.schema import agents
+from souk.identity import provider_fingerprint
+from souk.schema import agents, providers
 
 
 async def _listed(session, souk):
@@ -172,3 +174,55 @@ async def test_a_delisted_agent_is_not_addressable(session, new_identity):
 
     assert await repo.resolve_agent(session, identity.public_key, "translator") is None
     assert await repo.resolve_agent(session, identity.public_key, "summarizer") is not None
+
+
+async def test_a_provider_is_addressable_by_its_fingerprint(session, new_identity):
+    """The short form of a 64-character key, so an address can be read and
+    typed. Derived, so it is never out of step with the key."""
+    identity = new_identity()
+    ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
+    fingerprint = provider_fingerprint(identity.public_key)
+
+    by_key = await repo.resolve_agent(session, identity.public_key, "translator")
+    by_fingerprint = await repo.resolve_agent(session, fingerprint, "translator")
+
+    assert by_fingerprint == by_key
+    assert by_fingerprint["agent_id"] == ids["translator"]
+
+
+async def test_an_identity_that_never_named_itself_is_still_addressable(session, new_identity):
+    """`providers` records identities, not labels — a short address has to
+    resolve for a key that registered and said nothing else about itself."""
+    identity = new_identity()
+    await repo.register_agents(session, identity.public_key, [{"name": "solo"}])
+
+    assert await repo.resolve_agent(session, provider_fingerprint(identity.public_key), "solo")
+
+
+async def test_a_second_key_cannot_take_an_existing_fingerprint(session, new_identity):
+    """Two identities sharing an address is the one thing an address may not
+    do. 64 bits puts a real collision out of reach, so this plants one to
+    exercise what the constraint does with it.
+    """
+    mine, theirs = new_identity(), new_identity()
+    await repo.register_agents(session, mine.public_key, [{"name": "translator"}])
+    await session.execute(
+        update(providers)
+        .where(providers.c.public_key == mine.public_key)
+        .values(fingerprint=provider_fingerprint(theirs.public_key))
+    )
+    await session.commit()
+
+    with pytest.raises(repo.ProviderFingerprintTaken):
+        await repo.register_agents(session, theirs.public_key, [{"name": "impostor"}])
+
+    # Refused outright: the colliding registration left nothing behind.
+    assert await repo.get_agent_ids_for_public_key(session, theirs.public_key) == set()
+
+
+async def test_junk_resolves_to_nothing_rather_than_raising(session, new_identity):
+    identity = new_identity()
+    await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
+
+    for junk in ("", "nope", "z" * 16, provider_fingerprint(identity.public_key).upper()):
+        assert await repo.resolve_agent(session, junk, "translator") is None

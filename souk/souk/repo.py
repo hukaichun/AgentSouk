@@ -25,11 +25,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import func, insert, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from souk.identity import provider_fingerprint
 from souk.ids import new_id
 from souk.schema import agents, providers, run_events, thread_history, threads
 
@@ -51,6 +53,15 @@ def _upsert(session: AsyncSession, table):
     return (pg_insert if is_postgres else sqlite_insert)(table)
 
 
+class ProviderFingerprintTaken(Exception):
+    """A different key already holds this key's fingerprint — its short
+    address (see souk.identity.provider_fingerprint). Refused rather than
+    allowed, because two identities sharing an address is the one thing an
+    address may not do. Raised from the UNIQUE constraint rather than from a
+    check, so two colliding registrations arriving together cannot both pass.
+    """
+
+
 class ThreadNotFound(Exception):
     """Raised by ensure_thread when a caller-supplied thread_id doesn't
     exist — a caller error (referencing an id souk never issued, or one
@@ -67,20 +78,48 @@ class ThreadOwnershipMismatch(Exception):
     """
 
 
-async def upsert_provider_name(session: AsyncSession, public_key: str, display_name: str) -> None:
-    """Sets/updates this public_key's storefront label — see
-    souk/schema.py's providers table notes. Only called when a registration
-    batch actually includes `provider_name`; register_agents leaves any
-    existing label untouched otherwise (a registration that doesn't
-    happen to pass one isn't "no name", it's "didn't say").
+async def ensure_provider(session: AsyncSession, public_key: str) -> None:
+    """Record this identity, so it has a row whether or not it ever names
+    itself — that row is what a short address resolves through (see
+    souk/schema.py's providers table).
+
+    Raises `ProviderFingerprintTaken` if another key already holds this
+    key's fingerprint. The check is the UNIQUE index doing it, not a
+    read-then-write here: two colliding registrations arriving together
+    would both pass a check and one would still have to lose, and only the
+    database can decide that without a race.
     """
     now = _utcnow()
-    stmt = _upsert(session, providers).values(public_key=public_key, display_name=display_name, updated_at=now)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[providers.c.public_key],
-        set_={"display_name": stmt.excluded.display_name, "updated_at": now},
+    stmt = _upsert(session, providers).values(
+        public_key=public_key,
+        fingerprint=provider_fingerprint(public_key),
+        updated_at=now,
     )
-    await session.execute(stmt)
+    # Nothing to update: both columns here are derived from the key, so a
+    # second registration by the same identity has nothing new to say.
+    stmt = stmt.on_conflict_do_nothing(index_elements=[providers.c.public_key])
+    try:
+        await session.execute(stmt)
+    except IntegrityError as e:
+        await session.rollback()
+        raise ProviderFingerprintTaken(
+            f"another provider already holds fingerprint {provider_fingerprint(public_key)}"
+        ) from e
+
+
+async def set_provider_name(session: AsyncSession, public_key: str, display_name: str) -> None:
+    """Sets this identity's storefront label — see souk/schema.py's providers
+    table notes. Only called when a registration batch actually includes
+    `provider_name`; register_agents leaves any existing label untouched
+    otherwise (a registration that doesn't happen to pass one isn't "no
+    name", it's "didn't say"). The row itself is ensured separately, since
+    an identity exists whether or not it is named.
+    """
+    await session.execute(
+        update(providers)
+        .where(providers.c.public_key == public_key)
+        .values(display_name=display_name, updated_at=_utcnow())
+    )
 
 
 async def register_agents(
@@ -104,8 +143,9 @@ async def register_agents(
 
     Returns {name: agent_id} for this batch.
     """
+    await ensure_provider(session, public_key)
     if provider_name is not None:
-        await upsert_provider_name(session, public_key, provider_name)
+        await set_provider_name(session, public_key, provider_name)
 
     names = [agent["name"] for agent in agents_batch]
     existing = (
@@ -240,8 +280,12 @@ async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | No
     ).scalars().first()
 
 
-async def resolve_agent(session: AsyncSession, public_key: str, name: str) -> dict[str, Any] | None:
+async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict[str, Any] | None:
     """The agent this identity registered under this name, or None.
+
+    `provider` is the identity's public key or its fingerprint — the two are
+    different lengths (64 hex against 16), so one parameter takes either
+    without ambiguity and neither can be mistaken for the other.
 
     Addressing an agent by *whose* it is and what they called it, which is
     what an agent's identity has been all along: `UNIQUE(public_key, name)`
@@ -262,8 +306,12 @@ async def resolve_agent(session: AsyncSession, public_key: str, name: str) -> di
                 agents.c.metadata,
                 agents.c.joined_at,
                 agents.c.last_seen_at,
-            ).where(
-                agents.c.public_key == public_key,
+            )
+            # Outer, so addressing by the full key still works for an agent
+            # whose identity somehow has no providers row.
+            .select_from(agents.outerjoin(providers, providers.c.public_key == agents.c.public_key))
+            .where(
+                or_(agents.c.public_key == provider, providers.c.fingerprint == provider),
                 agents.c.name == name,
                 agents.c.delisted_at.is_(None),
             )

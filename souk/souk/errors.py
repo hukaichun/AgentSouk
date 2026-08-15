@@ -5,14 +5,16 @@ someone else" without knowing whether anyone is listening over HTTP, so it
 raises these instead of an `HTTPException`. Mapping them onto status codes is
 the serving layer's job — the only layer that knows what a status code is.
 
-`repo` keeps its own ThreadNotFound / ThreadOwnershipMismatch, which predate
-this module and are equally part of the vocabulary; they are re-exported here
-so a caller has one place to import from.
+`repo` keeps its own ThreadNotFound / ThreadOwnershipMismatch /
+ProviderFingerprintTaken — the first two predate this module and the third is
+raised by a database constraint rather than by a decision, which is where it
+belongs. All are equally part of the vocabulary and are re-exported here so a
+caller has one place to import from.
 """
 
 from __future__ import annotations
 
-from souk.repo import ThreadNotFound, ThreadOwnershipMismatch
+from souk.repo import ProviderFingerprintTaken, ThreadNotFound, ThreadOwnershipMismatch
 
 __all__ = [
     "AgentNotFound",
@@ -20,6 +22,7 @@ __all__ = [
     "KyokRejected",
     "AmbiguousAgentName",
     "InvalidRunInput",
+    "ProviderFingerprintTaken",
     "RunNotFound",
     "SoukError",
     "ThreadNotFound",
