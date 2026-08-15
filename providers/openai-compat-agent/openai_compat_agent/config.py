@@ -43,7 +43,6 @@ class AgentConfig(BaseModel):
 
 class OpenAICompatConfig(BaseModel):
     souk_http_url: str
-    souk_grpc_url: str
     provider_name: str | None = None
     agents: list[AgentConfig]
 

@@ -181,7 +181,6 @@ async def main() -> None:
 
     provider = SoukProvider(
         cfg.souk_http_url,
-        cfg.souk_grpc_url,
         handles,
         identity_key_path=identity_key_path,
         provider_name=cfg.provider_name,

@@ -52,7 +52,7 @@ async def my_agent_run(run_input: dict):
     yield {"type": "TEXT_DELTA", "delta": "Hello from my agent!"}
 
 handle = AgentHandle(name="my-custom-agent", description="My agent description", run_stream=my_agent_run)
-provider = SoukProvider(souk_http_url="http://localhost:8000", souk_grpc_url="localhost:50051", handles=[handle])
+provider = SoukProvider(souk_http_url="http://localhost:8000", handles=[handle])
 await provider.run_forever()
 ```
 4. **Run Docker or Host Process**: Launch your agent, and it will register automatically via Ed25519 identity key!

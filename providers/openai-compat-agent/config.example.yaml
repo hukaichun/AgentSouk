@@ -1,5 +1,4 @@
 souk_http_url: http://souk:8000
-souk_grpc_url: souk:50051
 provider_name: AgentSouk OpenAI-compat demo stall
 
 # All three point at the same underlying OpenAI-compatible endpoint on

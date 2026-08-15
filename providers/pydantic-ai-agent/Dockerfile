@@ -19,8 +19,7 @@ COPY providers/pydantic-ai-agent /app/providers/pydantic-ai-agent
 # source (see providers/pydantic-ai-agent/pyproject.toml), which builds a
 # wheel from whatever's on disk at that point.
 WORKDIR /app/souk-agent-sdk
-RUN uv sync --group dev \
-    && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+RUN uv sync
 
 WORKDIR /app/providers/pydantic-ai-agent
 RUN uv sync

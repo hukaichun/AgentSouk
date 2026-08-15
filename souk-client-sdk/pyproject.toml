@@ -6,6 +6,9 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",
     "httpx-sse>=0.4",
+    # The KYOK bridge's socket (WS /ws/kyok — frame protocol authored in
+    # the gateway repo's docs/server-mode.md).
+    "websockets>=13",
     "pydantic>=2.9",
     # Only used by souk_client_sdk.kyok_bridge (Keep Your Own Key) — one
     # unified async interface across LLM providers, with streaming chunks
@@ -14,7 +17,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "respx>=0.21"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

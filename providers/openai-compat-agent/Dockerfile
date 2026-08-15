@@ -19,8 +19,7 @@ COPY providers/openai-compat-agent /app/providers/openai-compat-agent
 # path source (see providers/openai-compat-agent/pyproject.toml), which
 # builds a wheel from whatever's on disk at that point.
 WORKDIR /app/souk-agent-sdk
-RUN uv sync --group dev \
-    && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+RUN uv sync
 
 WORKDIR /app/providers/openai-compat-agent
 RUN uv sync

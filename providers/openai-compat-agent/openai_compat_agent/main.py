@@ -114,7 +114,7 @@ async def main() -> None:
         logger.info("wrapping OpenAI-compatible endpoint as agent '%s': api_base=%s", agent.name, agent.api_base)
 
     provider = SoukProvider(
-        cfg.souk_http_url, cfg.souk_grpc_url, handles, provider_name=cfg.provider_name
+        cfg.souk_http_url, handles, provider_name=cfg.provider_name
     )
     await provider.run_forever()
 

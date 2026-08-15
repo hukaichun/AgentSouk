@@ -14,13 +14,8 @@ COPY scripts /app/scripts
 COPY souk-agent-sdk /app/souk-agent-sdk
 COPY agent-template /app/agent-template
 
-# Stubs must exist in souk-agent-sdk's own source tree *before* syncing
-# agent-template below — agent-template depends on souk-agent-sdk via a
-# plain path source (see agent-template/pyproject.toml), which builds a
-# wheel from whatever's on disk at that point.
 WORKDIR /app/souk-agent-sdk
-RUN uv sync --group dev \
-    && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
+RUN uv sync
 
 WORKDIR /app/agent-template
 RUN uv sync

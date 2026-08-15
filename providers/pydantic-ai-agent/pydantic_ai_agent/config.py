@@ -37,7 +37,6 @@ class AgentConfig(BaseModel):
 
 class TemplateConfig(BaseModel):
     souk_http_url: str
-    souk_grpc_url: str
     # Optional storefront label for this provider's public_key — shown
     # when souk-directory groups agents by provider. Provider-level, not
     # per-agent (see souk_agent_sdk.client.SoukProvider's provider_name

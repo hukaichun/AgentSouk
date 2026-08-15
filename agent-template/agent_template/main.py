@@ -12,8 +12,8 @@ The whole contract is: build one or more `AgentHandle(name, run_stream)`,
 where `run_stream(run_input: dict) -> AsyncIterator[dict]` takes a real
 AG-UI RunAgentInput (camelCase wire JSON, as built by souk.agui) and yields
 AG-UI events. Hand a list of handles to SoukProvider and call
-run_forever() — everything else (registration, polling, the persistent
-gRPC AgentSession, reconnect-on-drop) is souk_agent_sdk's job, not yours.
+run_forever() — everything else (registration, the
+persistent work socket, reconnect-on-drop) is souk_agent_sdk's job, not yours.
 """
 
 from __future__ import annotations
@@ -66,12 +66,10 @@ async def run_stream(run_input: dict[str, Any]) -> AsyncIterator[dict[str, Any]]
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     souk_http_url = os.environ.get("SOUK_HTTP_URL", "http://localhost:8000")
-    souk_grpc_url = os.environ.get("SOUK_GRPC_URL", "localhost:50051")
     agent_name = os.environ.get("AGENT_NAME", "echo-agent")
 
     provider = SoukProvider(
         souk_http_url,
-        souk_grpc_url,
         agents=[AgentHandle(name=agent_name, description="Echoes back the last user message.", run_stream=run_stream)],
     )
     logger.info("starting agent-template provider: agent_name=%s souk_http_url=%s", agent_name, souk_http_url)
