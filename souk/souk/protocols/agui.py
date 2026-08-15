@@ -1,6 +1,6 @@
 """AG-UI translation: a RunAgentInput in, a stream of AG-UI events out.
 
-Extracted from what used to be api_agui._run_agent, minus everything that was
+Extracted from what used to be protocols.agui's AGUIAdapter.run, minus everything that was
 about HTTP. It yields AG-UI event mappings; turning those into SSE frames,
 and these errors into status codes, belongs to whoever serves it.
 """

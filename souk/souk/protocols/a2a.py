@@ -30,7 +30,7 @@ from souk.broker import drain_run
 from souk.errors import AgentNotFound, AmbiguousAgentName, InvalidRunInput, RunNotFound
 from souk.identity import verify_actor_chain
 from souk.pause import is_resuming
-from souk.translate_a2a import (
+from souk.protocols.a2a_translate import (
     a2a_message_to_agui_messages,
     agui_event_to_a2a_update,
     build_task,

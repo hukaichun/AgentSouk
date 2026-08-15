@@ -210,7 +210,7 @@ thread_history = Table(
     Index("idx_thread_history_thread", "thread_id", "id"),
 )
 
-# A2A's Task.id is just a run_id (see api_a2a._start_run) — no separate
+# A2A's Task.id is just a run_id (see protocols.a2a's _start_run) — no separate
 # task_id concept, so this partial unique index is what both souk's own
 # dispatch and A2A's tasks/get / tasks/cancel lookups rely on. Partial
 # (WHERE kind = 'run_status') because the same run_id also appears on the

@@ -222,7 +222,7 @@ async def get_agent_by_id(session: AsyncSession, agent_id: str) -> dict[str, Any
 
 
 async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | None:
-    """Just the identity half of get_agent_by_id — see souk.api_llm_bridge.
+    """Just the identity half of get_agent_by_id — see souk.protocols.kyok.
     chat_completions, which needs this to verify a KyokSigningAuth
     signature (souk_agent_sdk.kyok_auth) against the actual key this
     agent_id registered with, without pulling the whole agent_card/
@@ -312,7 +312,7 @@ async def list_agents(
 
 async def get_agent_name_for_public_key(session: AsyncSession, public_key: str) -> str | None:
     """Resolves a verified caller's public key (see souk.identity's
-    a2a_call_signing_payload / api_a2a._start_run) back to one of its
+    a2a_call_signing_payload / protocols.a2a's _start_run) back to one of its
     registered agent names, purely for audit/display — if the key owns
     several names this just picks one, since the point is establishing
     "this is a known, registered identity", not which specific name.
@@ -342,7 +342,7 @@ async def create_thread(
 ) -> str:
     """Always mints a genuinely fresh thread_id (souk.ids.new_id('thread'))
     and stores it. Callers: the optional `POST /threads` endpoint
-    (api_agui.create_thread), and `ensure_thread` itself — both its
+    (Souk.create_thread), and `ensure_thread` itself — both its
     `parent_thread_id` case (no existing child thread for that pairing yet)
     and its no-id-at-all/unrecognized-id fallback (see that function's
     docstring and souk-no-forced-protocol-deviation: a standard AG-UI/A2A
@@ -400,7 +400,7 @@ async def ensure_thread(
        when processing a Message that does not include one"), not an
        error. This holds even when `parent_thread_id` is given (a
        sub-agent call carrying `Message.referenceTaskIds` — see
-       api_a2a._start_run): lineage recording and session continuity are
+       protocols.a2a's _start_run): lineage recording and session continuity are
        deliberately orthogonal (A2A's own `referenceTaskIds` is
        explicitly informational-only, not a session-grouping primitive
        — see souk-no-forced-protocol-deviation). souk still stores
@@ -431,11 +431,11 @@ async def ensure_thread(
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
     """Direct children of `thread_id` (see threads.parent_thread_id) —
-    walked recursively by the caller (api_agui.get_thread_tree) to build a
+    walked recursively by the caller (Souk.get_thread_tree) to build a
     full lineage tree. souk is the one party that actually sees every A2A
     hop, so this is data it can own outright; it only gets populated when
     a caller sets Message.referenceTaskIds though (real A2A, see
-    api_a2a._start_run), so it's only as complete as callers choose to
+    protocols.a2a's _start_run), so it's only as complete as callers choose to
     make it.
     """
     rows = (
@@ -504,7 +504,7 @@ async def create_run(
     # run_id is minted in Python (souk.ids.new_id('run')). message_id is set
     # explicitly to NULL — that column carries a real id only on 'message'
     # rows, and a 'run_status' row must not pick one up. A2A's Task.id is
-    # just this run_id (see api_a2a._start_run) — no separate task_id.
+    # just this run_id (see protocols.a2a's _start_run) — no separate task_id.
     run_id = new_id("run")
     await session.execute(
         insert(thread_history).values(
@@ -550,7 +550,7 @@ async def reopen_run(
     its *same* run_id, instead of minting a new one via create_run — see
     souk/pause.py's module docstring: a stable identity across however
     many pause/resume rounds a run goes through (HITL approval) is what
-    lets a caller's A2A Task.id (== this run_id, see api_a2a._start_run)
+    lets a caller's A2A Task.id (== this run_id, see protocols.a2a's _start_run)
     keep pointing at the same task for its whole life (see api_a2a.py's
     tasks/get, tasks/cancel) instead of needing to chase a resume chain.
 
@@ -610,8 +610,8 @@ async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> di
     """The thread's run that's still 'open' in some sense — not yet
     completed/failed/cancelled. Used to enforce a single active run per
     thread: while one exists, a new call on the same thread must not
-    start a second, concurrent one (see api_agui.run_agent /
-    api_a2a._start_run) — that would fork the thread's otherwise linear
+    start a second, concurrent one (see protocols.agui's AGUIAdapter.run /
+    protocols.a2a's _start_run) — that would fork the thread's otherwise linear
     history with no clean way to merge it back.
     """
     row = (
@@ -767,7 +767,7 @@ async def fail_unclaimed_runs(
     ambiguously so) when the call was made, got queued, then went dark
     before ever polling for it. The common "target already known offline
     at call time" case is handled synchronously instead (see
-    api_a2a._start_run/api_agui.run_agent's fast-fail path) — this sweep is
+    protocols.a2a's _start_run/protocols.agui's AGUIAdapter.run's fast-fail path) — this sweep is
     only the fallback for the race, not the primary mechanism, so it's
     deliberately not firing on every provider that's simply throttling
     itself via PollRequest.max_claim (see fail_stalled_runs's docstring on
@@ -830,7 +830,7 @@ async def append_run_event(session: AsyncSession, run_id: str, seq: int, event_j
 async def get_run_events(session: AsyncSession, run_id: str, since_seq: int = 0) -> list[dict[str, Any]]:
     """`since_seq` (exclusive) restricts this to one pause/resume round's
     own events — see broker.Run.round_starting_seq's docstring for why
-    that matters to grpc_server._handle_finish.
+    that matters to handlers._handle_finish.
     """
     rows = (
         await session.execute(

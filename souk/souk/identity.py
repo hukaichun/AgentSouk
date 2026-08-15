@@ -139,7 +139,7 @@ def _hop_hash(token: str) -> str:
 def verify_actor_chain(chain: list[str]) -> ChainResult:
     """Verifies a caller-supplied identity chain — see
     souk_agent_sdk.identity.new_actor_chain/extend_actor_chain for how one
-    is built, and api_a2a._start_run for where this is called.
+    is built, and protocols.a2a's _start_run for where this is called.
 
     Each entry in `chain` is a standard compact JWT (alg=EdDSA), signed by
     whoever performed that hop, so any off-the-shelf JWT library can

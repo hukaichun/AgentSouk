@@ -1,4 +1,4 @@
-"""Pure-function unit tests for souk.translate_a2a — no DB, no HTTP.
+"""Pure-function unit tests for souk.protocols.a2a_translate — no DB, no HTTP.
 Covers the RUN_ERROR -> failed mapping the offline-handling sweep (A7b,
 souk.health) relies on to give live SSE subscribers an explicit terminal
 event instead of the stream just closing.
@@ -6,7 +6,7 @@ event instead of the stream just closing.
 
 from __future__ import annotations
 
-from souk.translate_a2a import (
+from souk.protocols.a2a_translate import (
     agui_event_to_a2a_update,
     status_update_for_run_status,
 )

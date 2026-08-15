@@ -38,9 +38,9 @@ async def _close_with_terminal_event(souk: "Souk", run_id: str, failure_reason: 
     """Unblocks whoever's still waiting on this run's output (an open AG-UI
     SSE connection or an A2A tasks/sendSubscribe stream) — otherwise they'd
     hang until their own client-side timeout with no idea the run had
-    already been given up on. Pushing Fail (see grpc_server._handle_fail)
+    already been given up on. Pushing Fail (see handlers._handle_fail)
     persists an explicit RUN_ERROR event before closing the stream, so a
-    live subscriber gets a real terminal signal — translate_a2a's
+    live subscriber gets a real terminal signal — protocols.a2a_translate's
     agui_event_to_a2a_update already maps RUN_ERROR to a final
     `status: failed` update, so this serves AG-UI and A2A callers alike.
 

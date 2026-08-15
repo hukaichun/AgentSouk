@@ -1,6 +1,6 @@
 """KYOK translation: relaying a provider's LLM call to whoever is paying.
 
-Extracted from what used to be api_llm_bridge, minus everything about HTTP.
+Extracted from what used to be protocols.kyok, minus everything about HTTP.
 KYOK is structurally a second broker — a provider submits work (a completion),
 the caller's own bridge claims it and streams back the answer — so it splits
 the same way runs do: the mechanism and its checks live in core, the three

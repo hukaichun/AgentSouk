@@ -12,7 +12,7 @@ role of stdin/stdout:
   disconnecting is *not* one of these: souk's own DB state is
   authoritative regardless of whether anyone's still watching a
   particular stream, so a dropped connection alone never cancels a run —
-  see api_agui.run_agent's event_stream for the reasoning.
+  see protocols.agui's AGUIAdapter.run's event_stream for the reasoning.
 - `out_queue` ("stdout"): AG-UI events the run emits, drained by whichever
   HTTP/SSE consumer (api_agui.py / api_a2a.py) is watching it.
 
@@ -112,7 +112,7 @@ class FinishStream:
 class RequestCancel:
     """The async, multi-step half of a cancellation — DB write, telling
     the agent to stop, sending out_queue its END_OF_STREAM — handled by
-    grpc_server._handle_cancel on the run's own pipeline task. Pushed by
+    handlers._handle_cancel on the run's own pipeline task. Pushed by
     `request_cancel` below, never directly — see that function for the
     synchronous half (`Run.cancel_requested`) this doesn't cover.
     """
@@ -195,12 +195,12 @@ def request_cancel(run: Run) -> None:
     RequestCancel directly. Splits into exactly the two halves described
     on `Run.cancel_requested` and `RequestCancel`: flips the flag immediately so
     the rest of the system (chiefly broker.poll(), and
-    grpc_server._handle_claim's narrower fallback check for the case
+    handlers._handle_claim's narrower fallback check for the case
     poll() already handed the run out) can react without delay, then
     queues the actual DB write / agent notification for the run's own
     pipeline task to carry out in order relative to its other commands.
 
-    Cancelling a run is always an explicit act — see api_agui.run_agent's
+    Cancelling a run is always an explicit act — see protocols.agui's AGUIAdapter.run's
     event_stream for why an HTTP/SSE consumer disconnecting must never
     call this. In practice that leaves A2A's tasks/cancel as the only
     caller, an ordinary request context, not one already being torn
@@ -240,7 +240,7 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
     from the registry) on:
     - FinishStream — the agent's own authoritative "done" signal.
     - Fail — the health sweep gave up on this run outright (see
-      grpc_server._handle_fail); no FinishStream is ever coming for one
+      handlers._handle_fail); no FinishStream is ever coming for one
       of these either.
     - RequestCancel, but only if the run was never claimed
       (`provider is None`) — an explicit tasks/cancel (the only
@@ -249,7 +249,7 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
       come for it. If it *was* already claimed, this does not terminate
       the pipeline by itself — it waits for the agent's own FinishStream
       once it unwinds after being told to stop (see
-      grpc_server._handle_cancel's docstring for the narrow late-claim
+      handlers._handle_cancel's docstring for the narrow late-claim
       race this leaves to _handle_claim's own check instead).
     """
     while True:
@@ -301,7 +301,7 @@ class RunBroker:
         """`handlers=None` skips spawning this run's pipeline task — only
         useful for tests exercising pure registry/poll/wake logic in
         isolation. Every real caller (api_agui.py, api_a2a.py,
-        grpc_server.py's auto-resume path) must pass grpc_server.HANDLERS,
+        grpc_server.py's auto-resume path) must pass handlers.make_handlers,
         or nothing will ever consume commands pushed for this run.
 
         `seq` defaults to 0 for a fresh run_id. A run_id being *reopened*
@@ -369,7 +369,7 @@ class RunBroker:
         than ever handing one to an agent — dropped silently here, not
         counted against max_claim, same as an already-forgotten run_id.
         This is what actually closes the "cancelled before ever being
-        claimed" gap in the common case: grpc_server._handle_claim's own
+        claimed" gap in the common case: handlers._handle_claim's own
         cancelled check exists only for the much narrower race this
         can't see (already returned by this call, cancelled before the
         agent's claim envelope arrives).
