@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from sqlalchemy import event
@@ -30,7 +31,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from souk import repo
-from souk.broker import Claim, Run, RunBroker, drain_run, request_cancel
+from souk.broker import FinishStream, RelayEvent, Run, RunBroker, drain_run, request_cancel
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
 from souk.errors import AgentNotFound, InvalidRegistration
@@ -43,7 +44,8 @@ from souk.identity import (
     verify_signature,
 )
 from souk.kyok import KyokBridge
-from souk.providers import AgentProvider
+from souk.providers import Provider
+from souk.worker import ClaimedRun, Worker
 
 logger = logging.getLogger("souk.core")
 
@@ -124,9 +126,11 @@ class Souk:
         # KYOK's completion relay — structurally a second broker (see
         # souk/kyok.py), so it is held the same way for the same reasons.
         self.kyok_bridge = KyokBridge()
-        # Agents running in this process, by agent_id (see attach_provider).
-        self._providers: dict[str, AgentProvider] = {}
-        self._heartbeat: asyncio.Task | None = None
+        # Providers running in this process, by provider_id, each with the
+        # worker souk drives it through (see attach_provider) — the same
+        # grouping a remote SDK process has, so one provider's several
+        # agents share one claim budget.
+        self._workers: dict[str, Worker] = {}
         # Every background task this souk started — see spawn().
         self._tasks: set[asyncio.Task] = set()
 
@@ -219,24 +223,35 @@ class Souk:
         *,
         max_claim: int | None = None,
         wait_seconds: float = 0,
-    ) -> list[Run]:
-        """A remote provider asking for work, and being told what it got.
+        on_cancel: Callable[[str], None] | None = None,
+    ) -> list[ClaimedRun]:
+        """A worker asking for work, and leaving with it.
 
-        The counterpart to `attach_provider`: an in-process agent is simply
-        present, a remote one has to come and claim. Both are the same
-        domain act — souk deciding this identity may run these agents — so
-        both belong here rather than in whichever transport happens to carry
-        the request. A second transport (WebSocket, say) implements framing
-        and calls this; it does not get to re-derive who owns what.
+        The one door into souk for every worker, in-process or remote (see
+        souk/worker.py) — souk deciding this identity may run these agents is
+        a domain act, so it belongs here rather than in whichever transport
+        happens to carry the request. A second transport (WebSocket, say)
+        implements framing and calls this; it does not get to re-derive who
+        owns what.
+
+        Each run comes back with its `run_input`, because claiming *is* the
+        hand-over: there is no follow-up call in which souk delivers the
+        input, and so no window in which a run has been claimed but its
+        worker is still waiting to be told what to do.
+
+        `on_cancel` is how souk later *asks* this worker to stop one of these
+        runs (see broker.Run.cancel_notify). Optional: a worker that offers
+        no way to be asked simply never hears about it, which changes
+        nothing about how the run's outcome is decided.
 
         Everything security-relevant happens here:
 
         - the session token is verified (`InvalidRegistration` if not),
         - requested agent_ids are filtered down to ones this token's holder
           actually owns, because a valid token for one provider must not be
-          usable to poll for another's agents,
-        - and the agents it does own are marked as seen, which is how a
-          remote provider stays online at all.
+          usable to claim another's agents,
+        - and the agents it does own are marked as seen, which is how any
+          provider — in-process or remote — stays online at all.
 
         `max_claim=None` means unlimited; `0` explicitly means "no capacity
         right now" and claims nothing — distinct from None, and a reason not
@@ -258,7 +273,9 @@ class Souk:
                 sorted(set(agent_ids) - owned),
             )
 
-        runs = self.broker.poll(allowed, max_claim=max_claim)
+        runs = self.broker.claim(
+            allowed, claimed_by=sdk_client_id, cancel_notify=on_cancel, max_claim=max_claim
+        )
         if not runs and wait_seconds > 0 and max_claim != 0:
             event = self.broker.subscribe_wake(allowed)
             try:
@@ -267,89 +284,185 @@ class Souk:
                 pass
             finally:
                 self.broker.unsubscribe_wake(allowed, event)
-            runs = self.broker.poll(allowed, max_claim=max_claim)
+            runs = self.broker.claim(
+                allowed, claimed_by=sdk_client_id, cancel_notify=on_cancel, max_claim=max_claim
+            )
 
         async with self.session() as session:
             for agent_id in allowed:
                 await repo.touch_agent(session, agent_id)
-        return runs
+        return [
+            ClaimedRun(
+                run_id=run.run_id,
+                agent_id=run.agent_id,
+                thread_id=run.thread_id,
+                run_input=run.input_json,
+            )
+            for run in runs
+        ]
 
-    def assign_provider(self, run_id: str, provider: AgentProvider) -> bool:
-        """A provider says it is taking a run souk handed it.
+    def report_event(self, run_id: str, event: Any, *, claimed_by: str) -> bool:
+        """One AG-UI event a worker produced for a run it holds.
 
-        The second half of `claim_work`: that decides *what* a provider may
-        take, this records *who* took a particular run, so the pipeline hands
-        that run's input to it. False if souk is no longer dispatching the
-        run — it finished or was given up on between being offered and being
-        taken, which is ordinary rather than an error.
+        The return path, and the whole reason the provider port could go: an
+        event now goes from wherever it was produced straight onto the run's
+        own queue, with nothing in between to route it a second time.
+        Synchronous, because a worker reporting an event should never be made
+        to wait on souk's persistence — the run's pipeline does that, in
+        order, on its own task.
 
-        Kept here, and not left as a transport poking the broker, for the
-        same reason as the rest: a second transport implements framing and
-        calls this.
+        `claimed_by` is the reporting provider's sdk_client_id, checked against
+        the identity that actually claimed this run. Holding an authenticated
+        connection is not the same as holding *this run*: without this, any
+        connected provider could push events into any run_id it could guess.
+        False (and nothing recorded) if the run is unknown — finished,
+        cancelled, given up on — or if it belongs to somebody else.
+        """
+        run = self.broker.get(run_id)
+        if run is None:
+            # Ordinary: a straggler from a run souk already stopped
+            # dispatching, e.g. one the health sweep gave up on.
+            return False
+        if run.claimed_by != claimed_by:
+            logger.warning(
+                "report_event: '%s' reported for run %s, which is held by '%s'",
+                claimed_by,
+                run_id,
+                run.claimed_by,
+            )
+            return False
+        run.in_queue.put_nowait(RelayEvent(event))
+        return True
+
+    def finish_run(self, run_id: str, *, claimed_by: str) -> bool:
+        """The worker holding this run says its agent's stream has ended.
+
+        The authoritative end of a run, and the only one: souk decides the
+        outcome from what it saw (see handlers._handle_finish) rather than
+        from anything the worker asserts about it. Same ownership check as
+        `report_event` — ending someone else's run is exactly as much of a
+        forgery as producing events for it.
         """
         run = self.broker.get(run_id)
         if run is None:
             return False
-        run.in_queue.put_nowait(Claim(provider))
+        if run.claimed_by != claimed_by:
+            logger.warning(
+                "finish_run: '%s' tried to end run %s, which is held by '%s'",
+                claimed_by,
+                run_id,
+                run.claimed_by,
+            )
+            return False
+        run.in_queue.put_nowait(FinishStream())
         return True
 
-    async def attach_provider(self, agent_id: str, provider: AgentProvider) -> None:
-        """Run an agent in this process.
+    async def attach_provider(
+        self,
+        provider_id: str,
+        provider: Provider,
+        agent_ids: list[str],
+        *,
+        max_claim: int | None = None,
+    ) -> None:
+        """Run a provider in this process.
 
-        Deliberately *not* a shortcut past registration. An in-process
-        provider proves who it is exactly like a remote one — by having
-        registered (see register_agents), which is why this refuses an
-        agent_id souk has never issued. Sharing a process with souk is not
-        a reason to be trusted.
+        A provider, not an agent: `provider_id` is the identity that
+        registered (the `sdk_client_id` of `register_agents`), and
+        `agent_ids` are which of its agents it is here to serve. One object serving several agents is the ordinary case, not a
+        special one, which is why the port hands it the `agent_id` of each
+        run and lets it route (see souk/providers.py).
 
-        Liveness works the same way too. A remote provider says "I'm still
-        here" by polling; an attached one is kept fresh by souk's own
-        heartbeat, on the same last_seen_at that the roster and the
-        offline fast-fail read. That matters in both directions: an
-        attached provider shows as genuinely online, and if this process
-        wedges the heartbeat stops and it correctly stops looking available.
+        Deliberately *not* a shortcut past registration, in either
+        direction:
 
-        `provider` only has to have the AG-UI agent shape; see
-        souk/providers.py. There is no wrapper class to construct.
+        - every agent_id must be one this provider_id actually registered.
+          Attaching used to derive the provider from the agent, which meant
+          there was nothing to check — the answer was whatever the agent row
+          said. Declaring the identity first is what makes it checkable, and
+          `AgentNotFound` is raised for an id this provider does not own.
+        - the worker souk starts claims over the same `claim_work` a remote
+          provider calls, with a real session token scoped to `provider_id`,
+          subject to the same ownership filtering. Sharing a process with
+          souk is not a reason to be trusted, and is no longer a reason to
+          take a different path.
+
+        Liveness follows from that rather than needing its own mechanism:
+        claiming marks these agents seen, so an attached provider stays
+        online exactly the way a remote one does, and if this process wedges
+        its worker stops claiming and it correctly stops looking available.
+        (An in-process heartbeat used to exist for this. It was a second
+        mechanism for a fact the claim loop already produces.)
+
+        `max_claim` is how many runs this provider will have in flight at
+        once, across every agent it hosts — the in-process counterpart of
+        PollRequest.max_claim. None (the default) is unlimited, matching the
+        remote SDK's default.
+
+        Attaching the same provider_id again replaces what it serves: the
+        provider object, its agent list and its budget. The worker keeps
+        running, and runs already in flight are untouched.
         """
-        if await self.get_agent(agent_id) is None:
-            raise AgentNotFound(
-                f"agent '{agent_id}' is not registered — a provider must register "
-                "before it can be attached, in-process or not"
+        if not agent_ids:
+            raise ValueError(
+                f"provider '{provider_id}' attached with no agent_ids — there would be "
+                "nothing for it to claim"
             )
-        self._providers[agent_id] = provider
-        await self._touch_attached()
-        if self._heartbeat is None or self._heartbeat.done():
-            self._heartbeat = self.spawn(self._heartbeat_forever(), name="provider-heartbeat")
-
-    async def detach_provider(self, agent_id: str) -> None:
-        """This provider is gone. Unlike a remote one — whose absence souk
-        can only infer once it stops polling — this is a departure souk
-        actually witnessed, so the agent is marked offline immediately
-        rather than left to age out of the window."""
-        if self._providers.pop(agent_id, None) is None:
-            return
         async with self.session() as session:
-            await repo.mark_agent_offline(session, agent_id, self.settings.online_window_seconds)
+            owned = await repo.get_agent_ids_for_sdk_client(session, provider_id)
+        unowned = [agent_id for agent_id in agent_ids if agent_id not in owned]
+        if unowned:
+            raise AgentNotFound(
+                f"provider '{provider_id}' has not registered agent id(s) {sorted(unowned)} — "
+                "a provider must register before it can be attached, in-process or not"
+            )
 
-    async def _touch_attached(self) -> None:
-        if not self._providers:
-            return
+        worker = self._workers.get(provider_id)
+        if worker is None:
+            worker = Worker(
+                self,
+                session_token=self._issue_worker_token(provider_id),
+                renew_token=partial(self._issue_worker_token, provider_id),
+                provider=provider,
+                agent_ids=agent_ids,
+                max_claim=max_claim,
+            )
+            self._workers[provider_id] = worker
+        else:
+            worker.provider = provider
+            worker.agent_ids = list(agent_ids)
+            worker.max_claim = max_claim
+        # Online from this moment, rather than from whenever the worker's
+        # loop next comes round — attaching is itself evidence it is here.
         async with self.session() as session:
-            for agent_id in list(self._providers):
+            for agent_id in agent_ids:
                 await repo.touch_agent(session, agent_id)
+        worker.start()
 
-    async def _heartbeat_forever(self) -> None:
-        """Keeps attached agents' last_seen_at fresh, the same signal a
-        remote provider refreshes by polling. Half the online window, so a
-        single missed beat never makes a live agent look offline."""
-        interval = max(1, self.settings.online_window_seconds // 2)
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                await self._touch_attached()
-            except Exception:
-                logger.exception("provider heartbeat failed")
+    async def detach_provider(self, provider_id: str) -> None:
+        """This provider is gone from this process. Unlike a remote one —
+        whose absence souk can only infer once it stops claiming — this is a
+        departure souk actually witnessed, so its agents are marked offline
+        immediately rather than left to age out of the window.
+
+        Runs it is already running are left to finish: they are still
+        producing, and souk records no outcome it hasn't observed.
+        """
+        worker = self._workers.pop(provider_id, None)
+        if worker is None:
+            return
+        worker.stop()
+        async with self.session() as session:
+            for agent_id in worker.agent_ids:
+                await repo.mark_agent_offline(session, agent_id, self.settings.online_window_seconds)
+
+    def _issue_worker_token(self, provider_id: str) -> str:
+        """The token an in-process provider's worker claims with. souk mints
+        it for the identity that registered rather than exempting in-process
+        providers from carrying one, so `claim_work`'s ownership filtering
+        applies to them unchanged — an attached provider cannot claim another
+        provider's work any more than a remote one can."""
+        return issue_session_token(provider_id, self.settings.token_signing_secret)
 
     async def list_agents(self) -> list[dict[str, Any]]:
         """The roster, with this souk's own online/staleness policy applied."""
@@ -444,18 +557,20 @@ class Souk:
     ) -> Run:
         """Put a persisted run into live dispatch.
 
-        The one place a run enters the broker, so an attached in-process
-        provider picks up work no matter which path created the run — a
-        library call, an AG-UI request, or an A2A one. A remote agent's runs
-        simply sit here until it polls for them.
+        The one place a run enters the broker, no matter which path created
+        it — a library call, an AG-UI request, or an A2A one. It then waits
+        to be claimed, by an in-process worker or a remote one; enqueueing
+        wakes any worker currently long-polling for this agent (see
+        RunBroker.enqueue_run), so waiting to be claimed costs about a
+        scheduling turn in-process, not a poll interval.
+
+        This used to hand the run straight to an attached provider here,
+        which is exactly why an in-process provider had no way to throttle:
+        souk pushed, and nothing asked whether it had capacity.
         """
-        run = self.broker.enqueue_run(
+        return self.broker.enqueue_run(
             run_id, agent_id, thread_id, input_json, protocol, make_handlers(self), seq=seq
         )
-        provider = self._providers.get(agent_id)
-        if provider is not None:
-            run.in_queue.put_nowait(Claim(provider))
-        return run
 
     async def start_run(
         self,

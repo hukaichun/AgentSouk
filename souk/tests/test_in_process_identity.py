@@ -22,14 +22,8 @@ from souk.errors import AgentNotFound, InvalidRegistration
 from souk.identity import registration_signing_payload
 
 
-class Agent:
-    async def start(self, agent_id: str, run_input: dict):
-        return self._events(run_input)
-
-    async def cancel(self, run_id: str) -> None:
-        pass
-
-    async def _events(self, run_input: dict):
+class LocalProvider:
+    async def run_stream(self, agent_id: str, run_input: dict):
         yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
@@ -80,7 +74,7 @@ async def test_registration_refuses_a_stale_timestamp(souk):
 async def test_attaching_an_unregistered_agent_is_refused(souk):
     """The whole point: being in-process is not a way around registering."""
     with pytest.raises(AgentNotFound):
-        await souk.attach_provider("agent_never_registered", Agent())
+        await souk.attach_provider("sdk_local", LocalProvider(), ["agent_never_registered"])
 
 
 async def test_an_attached_provider_is_actually_online_and_reachable(souk):
@@ -88,7 +82,7 @@ async def test_an_attached_provider_is_actually_online_and_reachable(souk):
     offline and fast-failed calls to a provider that was right there."""
     _registration, agent_id = await _register(souk)
 
-    await souk.attach_provider(agent_id, Agent())
+    await souk.attach_provider("sdk_local", LocalProvider(), [agent_id])
 
     roster = await souk.list_agents()
     assert [a["agent_id"] for a in roster] == [agent_id]
@@ -103,10 +97,10 @@ async def test_detaching_marks_it_offline_immediately(souk):
     stops polling and has to be inferred — so it shouldn't have to age out
     of the online window first."""
     _registration, agent_id = await _register(souk)
-    await souk.attach_provider(agent_id, Agent())
+    await souk.attach_provider("sdk_local", LocalProvider(), [agent_id])
     assert (await souk.list_agents())[0]["online"] is True
 
-    await souk.detach_provider(agent_id)
+    await souk.detach_provider("sdk_local")
 
     roster = await souk.list_agents()
     assert roster[0]["online"] is False

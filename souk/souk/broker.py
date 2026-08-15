@@ -5,9 +5,13 @@ methods — see its docstring), with two queues attached to it playing the
 role of stdin/stdout:
 
 - `in_queue` ("stdin"): every external actor that wants to *affect* a run
-  — the gRPC side relaying frames from the agent (see grpc_server.py's
-  AgentSession), an explicit A2A tasks/cancel, the health sweep giving up
-  on a stalled/abandoned run — does so by pushing one `Command` here.
+  — the worker holding it reporting an event or the end of its stream
+  (see souk.core's report_event/finish_run, whichever transport carried
+  it), an explicit A2A tasks/cancel, the health sweep giving up on a
+  stalled/abandoned run — does so by pushing one `Command` here. This is
+  the *only* routing table an event crosses: a worker's frame is looked
+  up here by run_id and pushed, with no second per-run table in between
+  (see docs/library-architecture.md on the worker model).
   Nobody else ever touches a Run's fields directly. An HTTP/SSE consumer
   disconnecting is *not* one of these: souk's own DB state is
   authoritative regardless of whether anyone's still watching a
@@ -80,21 +84,24 @@ END_OF_STREAM = object()
 
 @dataclass
 class Claim:
-    """An agent has claimed this run and is ready to receive its input —
-    carries the AgentProvider (see souk/providers.py) that owns it from
-    here on. Deliberately a provider rather than a transport-specific
-    channel: a run is claimed the same way whether the agent is a local
-    Python object or a remote one reached over a wire.
-    """
+    """A worker has taken this run — pushed by `RunBroker.claim`, which
+    hands the run's input straight to the claimer.
 
-    provider: Any
+    No payload: who took it is recorded on the Run itself, synchronously,
+    in the same step that hands it over (see `claim`). This used to carry
+    an AgentProvider object for core to call back into; it doesn't,
+    because core no longer calls anyone — a worker pushes (see
+    souk/worker.py). What is left is a marker that the hand-over happened,
+    ordered on the run's own pipeline against everything else about it.
+    """
 
 
 @dataclass
 class RelayEvent:
-    """One AG-UI event the agent produced for this run — as its own
+    """One AG-UI event a worker produced for this run — as its own
     payload, not a wire frame; whatever transport carried it has already
-    been peeled off by the time this exists (see souk.handlers._pump).
+    been peeled off by the time this exists (see souk.core's
+    `report_event`, the one door events come in by).
     """
 
     event: Any
@@ -156,15 +163,23 @@ class Run:
     # pause/resume round under the same run_id — see repo.reopen_run.
     round_starting_seq: int = 0
     pause_payload: dict[str, Any] | None = None
-    # The claimed run's agent, set by the Claim handler. None until an
-    # agent takes the run — which several places test for, since "never
+    # The sdk_client_id of the worker that took this run, set by `claim`
+    # in the same synchronous step that hands the input over. None until
+    # someone takes it — which several places test for, since "never
     # claimed" and "claimed then cancelled" need different handling.
-    provider: Any | None = None
-    # The task draining `provider`'s event stream into this run's in_queue
-    # (see souk.handlers._pump). Cancelling it is how a cancel reaches the
-    # agent: the pump closes the stream on its way out, which is the
-    # provider's signal to stop.
-    pump_task: asyncio.Task | None = None
+    #
+    # Also what every reported event is checked against (see
+    # souk.core.report_event): a worker may only speak for runs it was
+    # actually given, and a connection alone is not evidence of that.
+    claimed_by: str | None = None
+    # How to *ask* the worker holding this run to stop — supplied by
+    # whoever claimed it (souk.core.claim_work's `on_cancel`), because
+    # only the claimer knows how to reach itself: an in-process worker
+    # cancels its own task, a gRPC one writes a frame. Called by
+    # handlers._handle_cancel, synchronously and at most once; it must
+    # not block, and what the worker does about it is the worker's
+    # business, not souk's.
+    cancel_notify: Callable[[str], None] | None = None
     # "Someone asked for this run to stop" — NOT "this run was cancelled".
     # souk knows the first for certain; the second is only knowable once
     # the agent's stream actually ends, because a provider is free to
@@ -173,11 +188,11 @@ class Run:
     #
     # The one field anyone may set directly, synchronously, from any thread
     # of control — see request_cancel() below. Read by:
-    #   - poll(), which won't hand out a run whose cancel was already
-    #     requested.
-    #   - handlers._handle_claim, for the narrow race poll() can't close
-    #     (already handed out, request arrived before the claim); it
-    #     declines to hand the run over at all.
+    #   - claim(), which won't hand out a run whose cancel was already
+    #     requested. It marks the run claimed in the same synchronous
+    #     step, so there is no window between the two for a request to
+    #     land in — the "handed out but not yet claimed" race the old
+    #     pull model had to cover in a second place is gone.
     #   - handlers._handle_finish, which needs it to tell "stopped early
     #     because we asked" apart from "stopped early because it broke".
     cancel_requested: bool = False
@@ -243,14 +258,13 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
       handlers._handle_fail); no FinishStream is ever coming for one
       of these either.
     - RequestCancel, but only if the run was never claimed
-      (`provider is None`) — an explicit tasks/cancel (the only
+      (`claimed_by is None`) — an explicit tasks/cancel (the only
       thing that ever pushes this; see broker.request_cancel) arriving
-      before any agent claimed the run means no FinishStream will ever
+      before any worker claimed the run means no FinishStream will ever
       come for it. If it *was* already claimed, this does not terminate
-      the pipeline by itself — it waits for the agent's own FinishStream
-      once it unwinds after being told to stop (see
-      handlers._handle_cancel's docstring for the narrow late-claim
-      race this leaves to _handle_claim's own check instead).
+      the pipeline by itself — it waits for the worker's own FinishStream
+      once its agent unwinds after being asked to stop (see
+      handlers._handle_cancel).
     """
     while True:
         cmd = await run.in_queue.get()
@@ -264,7 +278,7 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
             logger.exception("run %s: error handling %s", run.run_id, type(cmd).__name__)
         if isinstance(cmd, (FinishStream, Fail)):
             break
-        if isinstance(cmd, RequestCancel) and run.provider is None:
+        if isinstance(cmd, RequestCancel) and run.claimed_by is None:
             break
     owner.forget(run.run_id)
 
@@ -354,10 +368,25 @@ class RunBroker:
         for agent_id in agent_ids:
             self._wake_subscribers[agent_id].discard(event)
 
-    def poll(self, agent_ids: list[str], max_claim: int | None = None) -> list[Run]:
-        """Returns (and removes from the pending queue) up to `max_claim`
-        runs across `agent_ids`, round-robining between agents so a cap
-        doesn't starve later ids in the list.
+    def claim(
+        self,
+        agent_ids: list[str],
+        *,
+        claimed_by: str,
+        cancel_notify: Callable[[str], None] | None = None,
+        max_claim: int | None = None,
+    ) -> list[Run]:
+        """Hands up to `max_claim` runs across `agent_ids` to one worker,
+        round-robining between agents so a cap doesn't starve later ids in
+        the list.
+
+        Claiming and being claimed are one act, not two. Each run returned
+        is marked as `claimed_by` this worker and has its Claim queued
+        *before this returns*, with no `await` anywhere in between — so
+        there is no window in which a run has been handed out but souk
+        still believes nobody has it. That window used to exist (poll
+        returned run_ids, the provider came back later to claim them) and
+        needed a second cancelled-check to cover it.
 
         `max_claim=None` means the caller never reported a capacity at
         all — drains everything currently queued, unlimited (the old
@@ -365,14 +394,9 @@ class RunBroker:
         caller explicitly reported "no spare capacity right now", so
         nothing is claimed — distinct from None, not a stand-in for it.
 
-        Filters out runs already asked to stop (see Run.cancel_requested) rather
-        than ever handing one to an agent — dropped silently here, not
+        Filters out runs already asked to stop (see Run.cancel_requested)
+        rather than ever handing one over — dropped silently here, not
         counted against max_claim, same as an already-forgotten run_id.
-        This is what actually closes the "cancelled before ever being
-        claimed" gap in the common case: handlers._handle_claim's own
-        cancelled check exists only for the much narrower race this
-        can't see (already returned by this call, cancelled before the
-        agent's claim envelope arrives).
         """
         if max_claim is not None and max_claim <= 0:
             return []
@@ -392,6 +416,9 @@ class RunBroker:
                 progressed = True
                 run = self._runs.get(run_id)
                 if run is not None and not run.cancel_requested:
+                    run.claimed_by = claimed_by
+                    run.cancel_notify = cancel_notify
+                    run.in_queue.put_nowait(Claim())
                     found.append(run)
             if not progressed:
                 break

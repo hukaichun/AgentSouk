@@ -4,15 +4,23 @@ This file is transport and nothing else. What a run *means* — persisting
 events, deciding a final status, reducing a reply into thread history —
 lives in souk/handlers.py, in core; this only carries bytes to and from it.
 
+The remote worker loop is the same loop souk runs for an in-process one (see
+souk/worker.py); these two RPCs are just how it reaches across a wire:
+
+    PollForWork   -> Souk.claim_work    — claim runs, and receive their input
+    AgentSession  -> Souk.report_event  — push each event back, per run
+                     Souk.finish_run    — and say when the stream ended
+                  <- a cancel frame     — souk asking a run to stop
+
 AgentSession is one persistent, multiplexed stream per SDK client
-connection — every run that client's agents pick up (via PollForWork) is
-claimed, delivered, and drained through this single connection, not by
-opening a new stream per run (see proto/souk.proto for the exact framing).
-GrpcProvider is what turns that one multiplexed stream back into the
-one-stream-per-run shape souk's AgentProvider port asks for (see
-souk/providers.py): the connection is held by the provider, and each run
-gets its own queue fed by this file's demultiplexing loop. That is also why
-"one run per call" in the port says nothing about connection count.
+connection: every run that client currently has in flight pushes through
+this single connection, disambiguated by run_id on each envelope.
+
+Nothing in here keeps per-run state. It used to: a `GrpcProvider` held a
+queue per run so core could iterate one stream per run, which is what made an
+event cross two routing tables before it reached the run's own pipeline. Core
+already has the only table needed — the broker's run registry — so a frame
+now goes straight there by run_id (see docs/library-architecture.md).
 
 A finished run gets nothing back: the SDK's `end_of_stream` frame is the
 last word on it (see souk.handlers._handle_finish for why there is no
@@ -24,8 +32,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import defaultdict
 from collections.abc import AsyncIterator
-from typing import TYPE_CHECKING, Any
+from functools import partial
+from typing import TYPE_CHECKING
 
 import grpc
 
@@ -51,153 +61,158 @@ def _bearer(context) -> str:
 
 
 def _authenticate(context, signing_secret: str) -> str | None:
-    """AgentSession's own check: returns the sdk_client_id, or None if the
-    token is missing/invalid/expired. Defense in depth — PollForWork
-    additionally filters requested agent_ids down to ones this holder really
-    owns, since a token alone doesn't say *which* agents it controls."""
+    """Returns the public key this call is authenticated as, or None if the
+    token is missing/invalid/expired. Both RPCs need the *identity*, not just
+    a yes/no: it is what every claimed run is recorded against and what every
+    reported event is checked against (see Souk.report_event). A provider has
+    no other id — nothing it calls itself is anything souk verified.
+    """
     token = _bearer(context)
     return verify_session_token(token, signing_secret) if token else None
 
 
-class GrpcProvider:
-    """One connected SDK client, presented as an AgentProvider.
+class WorkerSessions:
+    """Which connected providers souk can currently reach, by public key.
 
-    Satisfies souk/providers.py's port: `start(run_input)` delivers the input
-    and hands back the event stream for that one run. The connection is held here, not per run, so every
-    run this client claims is multiplexed over the same AgentSession stream —
-    which is why the port being "one call per run" says nothing about how
-    many connections a transport opens.
+    Exists for exactly one message — "please stop run X" — because that is
+    the only thing souk ever sends a worker, and a request has to reach a
+    connection. Keyed by client rather than by run: a run's claim happens on
+    PollForWork, possibly before this client has any stream open at all, so
+    binding the ask to whichever stream that identity has *when souk asks*
+    is the only thing that works. It is also why this is not a routing table
+    in the sense the old GrpcProvider._runs was — nothing an agent produces
+    passes through here.
 
-    `start` puts the input on the wire before it returns, which is exactly
-    what the port promises: the SDK's run task blocks waiting for that frame,
-    so a cancel arriving first would otherwise strand it.
+    A client may briefly hold more than one stream (a reconnect overlapping
+    the old one), so this holds a set and asks all of them; a stream that
+    doesn't have the run ignores the frame.
     """
 
-    # Sentinel queued when the agent sends end_of_stream for a run — ends
-    # that run's iterator without ending the connection.
-    _DONE = object()
+    def __init__(self) -> None:
+        self._outbound: dict[str, set[asyncio.Queue]] = defaultdict(set)
 
-    def __init__(self, outbound: asyncio.Queue) -> None:
-        self.outbound = outbound
-        self._runs: dict[str, asyncio.Queue] = {}
-        self._agent_ids: dict[str, str] = {}
+    def add(self, sdk_client_id: str, outbound: asyncio.Queue) -> None:
+        self._outbound[sdk_client_id].add(outbound)
 
-    async def start(self, agent_id: str, run_input: dict) -> AsyncIterator[Any]:
-        run_id = run_input["runId"]
-        # Kept only so this run's cancel frame can carry it: envelopes have an
-        # agent_id field, and cancel arrives with just a run_id.
-        self._agent_ids[run_id] = agent_id
-        queue: asyncio.Queue = asyncio.Queue()
-        self._runs[run_id] = queue
-        await self.outbound.put(
-            souk_pb2.AgentEventEnvelope(
-                run_id=run_id, agent_id=agent_id, json_payload=json.dumps(run_input)
-            )
-        )
-        return self._events(run_id, agent_id, queue)
+    def remove(self, sdk_client_id: str, outbound: asyncio.Queue) -> None:
+        self._outbound[sdk_client_id].discard(outbound)
+        if not self._outbound[sdk_client_id]:
+            del self._outbound[sdk_client_id]
 
-    async def _events(self, run_id: str, agent_id: str, queue: asyncio.Queue) -> AsyncIterator[Any]:
-        """Ends when the agent's own end_of_stream arrives, and not before —
-        including for a cancelled run, which keeps being read until the agent
-        actually stops (see souk.handlers._pump)."""
-        try:
-            while (item := await queue.get()) is not self._DONE:
-                yield item
-        finally:
-            self._runs.pop(run_id, None)
-            self._agent_ids.pop(run_id, None)
-
-    async def cancel(self, run_id: str) -> None:
-        """Put souk's cancel request on the wire. The SDK races it against
-        the run in flight (see souk_agent_sdk.client's watch_cancel); whether
-        the agent stops is its own business, and this returning says only
-        that the request was sent."""
-        await self.outbound.put(
-            souk_pb2.AgentEventEnvelope(
-                run_id=run_id, agent_id=self._agent_ids.get(run_id, ""), cancel=True
-            )
-        )
-
-    def deliver_event(self, run_id: str, event: Any) -> None:
-        queue = self._runs.get(run_id)
-        if queue is None:
-            # Straggler from a run souk already stopped reading — expected
-            # after a cancel, not an error.
+    def notify_cancel(self, sdk_client_id: str, run_id: str) -> None:
+        """Put souk's cancel request on the wire. Synchronous and
+        best-effort by design: this returning says only that the request was
+        queued for the worker, never that anything stopped. Whether the agent
+        stops, and when, is the worker's business — souk finds out by what
+        the run's stream does next (see souk.handlers._handle_cancel).
+        """
+        streams = self._outbound.get(sdk_client_id)
+        if not streams:
+            # Nothing open to ask on: the worker is between connections, or
+            # gone. The run keeps running until it ends or the health sweep
+            # gives up on it — souk records no outcome it hasn't observed.
+            logger.info("cancel for run %s: no open session for %s", run_id, sdk_client_id)
             return
-        queue.put_nowait(event)
-
-    def close_run(self, run_id: str) -> None:
-        queue = self._runs.get(run_id)
-        if queue is not None:
-            queue.put_nowait(self._DONE)
-
-    def close_all(self) -> None:
-        """The connection is going away — end every run still reading from
-        it rather than leaving their pumps blocked forever."""
-        for queue in list(self._runs.values()):
-            queue.put_nowait(self._DONE)
-        self._runs.clear()
-        self._agent_ids.clear()
+        for outbound in streams:
+            outbound.put_nowait(souk_pb2.AgentEventEnvelope(run_id=run_id, cancel=True))
 
 
 class SoukAgentGatewayServicer(souk_pb2_grpc.SoukAgentGatewayServicer):
     def __init__(self, souk: "Souk") -> None:
         self._souk = souk
+        self._sessions = WorkerSessions()
 
     async def PollForWork(self, request, context):
         """Framing only. Who may claim what, filtering to owned agents, the
         long-poll wait and marking agents seen are all one domain act, and
         live on Souk.claim_work — so a second transport implements framing
-        rather than re-deriving any of it (see souk/core.py)."""
+        rather than re-deriving any of it (see souk/core.py).
+
+        The response carries each run's RunAgentInput, because claiming is
+        the hand-over: there is no follow-up frame in which souk delivers the
+        input, and so no window where a worker holds a run it hasn't been
+        told how to run.
+        """
+        sdk_client_id = _authenticate(context, self._souk.settings.token_signing_secret)
+        if sdk_client_id is None:
+            await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
+
         try:
             runs = await self._souk.claim_work(
                 _bearer(context),
                 list(request.agent_ids),
                 max_claim=request.max_claim if request.HasField("max_claim") else None,
                 wait_seconds=request.wait_seconds if request.HasField("wait_seconds") else 0,
+                on_cancel=partial(self._sessions.notify_cancel, sdk_client_id),
             )
         except InvalidRegistration as e:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, str(e))
 
         return souk_pb2.PollResponse(
-            pending=[souk_pb2.PendingRun(run_id=r.run_id, agent_id=r.agent_id) for r in runs]
+            pending=[
+                souk_pb2.PendingRun(
+                    run_id=run.run_id,
+                    agent_id=run.agent_id,
+                    json_payload=json.dumps(run.run_input),
+                )
+                for run in runs
+            ]
         )
 
     async def AgentSession(
         self, request_iterator: AsyncIterator[souk_pb2.AgentEventEnvelope], context
     ):
-        if _authenticate(context, self._souk.settings.token_signing_secret) is None:
+        sdk_client_id = _authenticate(context, self._souk.settings.token_signing_secret)
+        if sdk_client_id is None:
             await context.abort(grpc.StatusCode.UNAUTHENTICATED, "missing or invalid session token")
 
         souk = self._souk
-        provider = GrpcProvider(asyncio.Queue())
+        outbound: asyncio.Queue = asyncio.Queue()
+        self._sessions.add(sdk_client_id, outbound)
 
         async def handle_incoming() -> None:
-            # Pure demultiplexing: every frame is routed either to the run's
-            # own pipeline (a claim) or to that run's event queue inside the
-            # provider. No DB or business logic happens here, so nothing in
-            # this loop can raise from it, and one bad run can't take down
-            # the whole connection's dispatch.
+            # Unwrap and hand over, nothing else. Every frame names the run
+            # it belongs to and core looks it up in the one table that
+            # exists; this loop keeps no state of its own, so there is
+            # nothing here for a bad frame to corrupt and no run whose
+            # events depend on this connection still being the one that
+            # claimed it. Whether this client may speak for that run_id at
+            # all is core's check, not a matter of having connected.
             async for envelope in request_iterator:
-                run_id = envelope.run_id
-                if not envelope.json_payload and not envelope.end_of_stream:
-                    # A claim. Recording who took the run is core's call; all
-                    # this file knows is that a claim frame arrived.
-                    if not souk.assign_provider(run_id, provider):
-                        logger.warning("AgentSession: claim for unknown/finished run_id=%s", run_id)
-                elif envelope.end_of_stream:
-                    provider.close_run(run_id)
+                if envelope.end_of_stream:
+                    souk.finish_run(envelope.run_id, claimed_by=sdk_client_id)
+                elif envelope.json_payload:
+                    souk.report_event(
+                        envelope.run_id, json.loads(envelope.json_payload), claimed_by=sdk_client_id
+                    )
                 else:
-                    provider.deliver_event(run_id, json.loads(envelope.json_payload))
+                    # Nothing to relay. An SDK older than the worker model
+                    # sends one of these per run to announce a claim; there
+                    # is nothing to announce now (claiming carries the
+                    # input), and one confused client must not take its own
+                    # connection down with a parse error.
+                    logger.warning(
+                        "AgentSession: empty envelope for run_id=%s from %s — an SDK "
+                        "predating the worker model?",
+                        envelope.run_id,
+                        sdk_client_id,
+                    )
 
         reader = asyncio.create_task(handle_incoming())
         try:
             while True:
-                item = await provider.outbound.get()
+                item = await outbound.get()
                 yield item
         finally:
             reader.cancel()
-            provider.close_all()
+            self._sessions.remove(sdk_client_id, outbound)
+            # Deliberately nothing else. This connection going away is not
+            # evidence that the runs it was carrying have ended — the worker
+            # may reconnect and report them (a run is addressed by id, not
+            # by connection). souk used to synthesise a stream-ending for
+            # every one of them here, which is precisely the kind of outcome
+            # it never observed. A worker that really is gone is caught by
+            # the stall sweep instead (see souk/health.py).
 
 
 def create_grpc_server(souk: "Souk", settings: ServingSettings) -> grpc.aio.Server:

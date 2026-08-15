@@ -1,0 +1,278 @@
+"""How far an event travels between the worker and the caller.
+
+The pull model made this longer than it needed to be: an event arriving on a
+wire was routed into a per-run queue inside the transport, drained by a pump
+task turning that push back into the pull the provider port described, and
+only then pushed onto the run's own queue. Two queues and two routing tables
+before it reached the pipeline that persists it.
+
+What this file pins is the shape that replaced it — one lookup, in core's
+own run registry, and nothing per run anywhere else:
+
+    event ─→ Souk.report_event ─→ run.in_queue ─→ (persist) ─→ run.out_queue
+
+so it is a regression test for the layering rather than for a behaviour: the
+suite would stay green if a transport started keeping a queue per run again.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import time
+
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+from souk.broker import RelayEvent, RunBroker
+from souk.grpc_gen import souk_pb2
+from souk.grpc_server import SoukAgentGatewayServicer
+from souk.identity import registration_signing_payload
+
+
+async def _register(souk, sdk_client_id: str, *names: str):
+    key = Ed25519PrivateKey.generate()
+    timestamp = int(time.time())
+    return await souk.register_agents(
+        sdk_client_id,
+        key.public_key().public_bytes_raw().hex(),
+        key.sign(registration_signing_payload(sdk_client_id, list(names), timestamp)).hex(),
+        timestamp,
+        [{"name": n} for n in names],
+    )
+
+
+class _FakeContext:
+    def __init__(self, token: str) -> None:
+        self._token = token
+
+    def invocation_metadata(self):
+        return (("authorization", self._token),)
+
+
+class _Session:
+    """One open AgentSession, driven the way grpc would drive it: frames in
+    on the request iterator, frames out collected off the response stream,
+    and a `close()` that tears the call down mid-flight like a dropped
+    connection does."""
+
+    def __init__(self, servicer: SoukAgentGatewayServicer, context: _FakeContext) -> None:
+        self._inbound: asyncio.Queue = asyncio.Queue()
+        self.received: asyncio.Queue = asyncio.Queue()
+        self._stream = servicer.AgentSession(self._requests(), context)
+        self._task = asyncio.create_task(self._consume())
+
+    async def _requests(self):
+        while (envelope := await self._inbound.get()) is not None:
+            yield envelope
+
+    async def _consume(self) -> None:
+        async for frame in self._stream:
+            self.received.put_nowait(frame)
+
+    def send(self, envelope) -> None:
+        self._inbound.put_nowait(envelope)
+
+    async def close(self) -> None:
+        self._inbound.put_nowait(None)
+        self._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._task
+
+
+def test_a_reported_event_lands_on_the_runs_own_queue_untouched(souk):
+    """One hop, and the same object. Anything that re-queued or re-wrapped
+    the event on the way in would show up here as a different object."""
+    broker = RunBroker()
+    souk.broker, original = broker, souk.broker
+    try:
+        # handlers=None: nothing consumes the queue, so what arrives on it
+        # is observable rather than instantly drained.
+        run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
+        broker.claim(["agent_1"], claimed_by="sdk_1")
+        run.in_queue.get_nowait()  # the Claim
+
+        event = {"type": "CUSTOM", "value": object()}
+        assert souk.report_event("run_1", event, claimed_by="sdk_1") is True
+
+        assert run.in_queue.qsize() == 1
+        queued = run.in_queue.get_nowait()
+        assert isinstance(queued, RelayEvent)
+        assert queued.event is event
+    finally:
+        souk.broker = original
+
+
+def test_an_event_for_someone_elses_run_is_refused(souk):
+    """Being connected is not the same as holding the run. Without this,
+    any authenticated provider could push events into any run_id it could
+    guess — including another provider's."""
+    broker = RunBroker()
+    souk.broker, original = broker, souk.broker
+    try:
+        run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
+        broker.claim(["agent_1"], claimed_by="sdk_owner")
+        run.in_queue.get_nowait()  # the Claim
+
+        assert souk.report_event("run_1", {"type": "CUSTOM"}, claimed_by="sdk_impostor") is False
+        assert souk.finish_run("run_1", claimed_by="sdk_impostor") is False
+        assert run.in_queue.qsize() == 0
+
+        # And nothing about it stops the rightful holder.
+        assert souk.report_event("run_1", {"type": "CUSTOM"}, claimed_by="sdk_owner") is True
+    finally:
+        souk.broker = original
+
+
+def test_reporting_for_a_run_souk_no_longer_has_is_not_an_error(souk):
+    """A straggler from a run the health sweep already gave up on, or one
+    that finished as the frame was in flight. Ordinary, not a fault."""
+    assert souk.report_event("run_gone", {"type": "CUSTOM"}, claimed_by="sdk_1") is False
+    assert souk.finish_run("run_gone", claimed_by="sdk_1") is False
+
+
+async def test_the_grpc_transport_keeps_no_state_per_run(souk):
+    """The routing table that disappeared. Three runs in flight over one
+    AgentSession, and the servicer's only registry is of open streams by
+    client — no run_id appears anywhere in it, because events go straight
+    to core by run_id instead of being demultiplexed here first.
+    """
+    registration = await _register(souk, "sdk_grpc", "greeter")
+    agent_id = registration.agent_ids["greeter"]
+    servicer = SoukAgentGatewayServicer(souk)
+    context = _FakeContext(registration.session_token)
+
+    handles = [await souk.start_run(agent_id, {"messages": []}) for _ in range(3)]
+    run_ids = sorted(h.run_id for h in handles)
+    claimed = await servicer.PollForWork(
+        souk_pb2.PollRequest(agent_ids=[agent_id]), context
+    )
+    assert sorted(p.run_id for p in claimed.pending) == run_ids
+    # Claiming *is* the hand-over: the input comes back with the run, not
+    # in a follow-up frame over the session.
+    assert json.loads(claimed.pending[0].json_payload)["runId"] == claimed.pending[0].run_id
+
+    session = _Session(servicer, context)
+    try:
+        for run_id in run_ids:
+            session.send(
+                souk_pb2.AgentEventEnvelope(
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    json_payload=json.dumps({"type": "RUN_STARTED", "runId": run_id}),
+                )
+            )
+        for run_id in run_ids:
+            run = souk.broker.get(run_id)
+            async with asyncio.timeout(2):
+                assert (await run.out_queue.get())["type"] == "RUN_STARTED"
+
+        # Every run is live and being served over this one stream, and the
+        # transport holds nothing about any of them.
+        state = repr(servicer.__dict__) + repr(servicer._sessions.__dict__)
+        assert not any(run_id in state for run_id in run_ids)
+    finally:
+        for run_id in run_ids:
+            souk.finish_run(run_id, claimed_by="sdk_grpc")
+        await session.close()
+
+
+async def test_a_cancel_reaches_the_worker_holding_the_run(souk):
+    """souk's one message to a worker. It goes to whichever stream that
+    provider identity has open when souk asks — not to the connection the
+    run was claimed on, which may not even have existed yet.
+    """
+    registration = await _register(souk, "sdk_cancel", "greeter")
+    agent_id = registration.agent_ids["greeter"]
+    servicer = SoukAgentGatewayServicer(souk)
+    context = _FakeContext(registration.session_token)
+
+    handle = await souk.start_run(agent_id, {"messages": []})
+    await servicer.PollForWork(souk_pb2.PollRequest(agent_ids=[agent_id]), context)
+
+    # The session opens *after* the claim, which is the ordinary case: a
+    # worker claims first and opens a stream only once it has work.
+    session = _Session(servicer, context)
+    await asyncio.sleep(0)
+
+    souk.cancel_run(handle.run_id)
+    async with asyncio.timeout(2):
+        frame = await session.received.get()
+    assert (frame.run_id, frame.cancel) == (handle.run_id, True)
+
+    # A request, not a command: souk keeps reading, and the run is
+    # 'cancelling' until its stream actually ends.
+    async with asyncio.timeout(2):
+        while (await souk.get_run(handle.run_id))["status"] != "cancelling":
+            await asyncio.sleep(0.01)
+
+    souk.finish_run(handle.run_id, claimed_by="sdk_cancel")
+    await session.close()
+    async with asyncio.timeout(2):
+        while souk.broker.get(handle.run_id) is not None:
+            await asyncio.sleep(0.01)
+    assert (await souk.get_run(handle.run_id))["status"] == "cancelled"
+    assert [e async for e in handle.events()] == []
+
+
+@pytest.mark.parametrize("frame", ["events", "end_of_stream"])
+async def test_a_connection_dropping_does_not_end_the_runs_it_carried(souk, frame):
+    """souk records no outcome it hasn't observed, and a dropped TCP
+    connection is not one. A worker addresses a run by id, so it may
+    reconnect and report the rest — including how it ended — on a new
+    stream. This used to synthesise an ending for every run on the
+    connection the moment it closed.
+    """
+    registration = await _register(souk, "sdk_drop", "greeter")
+    agent_id = registration.agent_ids["greeter"]
+    servicer = SoukAgentGatewayServicer(souk)
+    context = _FakeContext(registration.session_token)
+
+    handle = await souk.start_run(agent_id, {"messages": []})
+    await servicer.PollForWork(souk_pb2.PollRequest(agent_ids=[agent_id]), context)
+
+    session = _Session(servicer, context)
+    session.send(
+        souk_pb2.AgentEventEnvelope(
+            run_id=handle.run_id,
+            agent_id=agent_id,
+            json_payload=json.dumps({"type": "RUN_STARTED", "runId": handle.run_id}),
+        )
+    )
+    await asyncio.sleep(0)
+    await session.close()  # the connection drops mid-run
+
+    # Still dispatching it: the run did not end because a connection did.
+    async with asyncio.timeout(2):
+        while souk.broker.get(handle.run_id).seq == 0:
+            await asyncio.sleep(0.01)
+    assert souk.broker.get(handle.run_id) is not None
+    assert (await souk.get_run(handle.run_id))["status"] == "running"
+
+    # A second stream from the same worker finishes it, and souk accepts it
+    # because the run is addressed by id and held by this identity.
+    second = souk_pb2.AgentEventEnvelope(run_id=handle.run_id, agent_id=agent_id, end_of_stream=True)
+    if frame == "events":
+        second = souk_pb2.AgentEventEnvelope(
+            run_id=handle.run_id,
+            agent_id=agent_id,
+            json_payload=json.dumps({"type": "RUN_FINISHED", "runId": handle.run_id}),
+        )
+    resumed = _Session(servicer, context)
+    resumed.send(second)
+
+    if frame == "events":
+        async with asyncio.timeout(2):
+            while not souk.broker.get(handle.run_id).saw_run_finished:
+                await asyncio.sleep(0.01)
+        souk.finish_run(handle.run_id, claimed_by="sdk_drop")
+    async with asyncio.timeout(2):
+        while souk.broker.get(handle.run_id) is not None:
+            await asyncio.sleep(0.01)
+    await resumed.close()
+    # A run whose worker reported RUN_FINISHED completed; one that only
+    # reported the end of its stream stopped without finishing, and souk
+    # never asked it to — so it failed. Both are read off what arrived.
+    expected = "completed" if frame == "events" else "failed"
+    assert (await souk.get_run(handle.run_id))["status"] == expected

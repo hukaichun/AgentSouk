@@ -9,8 +9,9 @@ and it is quietly gone — so it is asserted here rather than left to reviews.
 
 If this fails, the fix is almost never "add the module to the allowed list".
 It is that whatever needed a transport type belongs in the serving layer, or
-needs a port (souk/providers.py is the example) so core can stay ignorant of
-it.
+needs a port (souk/worker.py is the example: a worker reaches core through
+plain method calls, so core never learns what carried them) so core can stay
+ignorant of it.
 """
 
 from __future__ import annotations
@@ -77,7 +78,8 @@ def test_core_module_imports_no_transport(module: Path) -> None:
 def test_grpc_generated_stubs_are_not_reachable_from_core() -> None:
     """protobuf leaks the same way an import of `grpc` does, and used to:
     three handlers built souk_pb2 envelopes directly. They now live in
-    souk/handlers.py and talk through the AgentProvider port instead.
+    souk/handlers.py and never talk to a worker at all — a worker pushes
+    events in, and whatever carried them was peeled off before core saw it.
     """
     offenders = [m.name for m in _core_modules() if "grpc_gen" in m.read_text()]
     assert not offenders, f"core modules referencing generated gRPC stubs: {offenders}"

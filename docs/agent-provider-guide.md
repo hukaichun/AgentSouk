@@ -132,9 +132,11 @@ the first place. Worth knowing rather than assuming cancellation
 uniformly "just works" for every caller.
 
 When it does happen (A2A `tasks/cancel`), souk sends a `cancel=true`
-envelope on the run's gRPC stream; the SDK's `_handle_run` races your
-`run_stream` against watching for it and calls `.cancel()` on the actual
-task running your generator the moment it arrives — delivering
+envelope on your current gRPC stream — a *request*, not a command: souk
+keeps persisting and relaying whatever your run emits afterwards, and if
+you finish normally anyway the run is recorded `completed`. The SDK
+complies on your behalf: its read loop calls `.cancel()` on the task
+running your generator the moment the frame arrives — delivering
 `CancelledError` into whatever it's currently awaiting, an in-flight LLM
 call included, not just at your next `yield`. `asyncio.CancelledError` is
 a `BaseException`, not an `Exception`, since Python 3.8 — an ordinary

@@ -84,6 +84,24 @@ class CoreSettings(BaseSettings):
     # this only if your deployment wants paused runs to eventually give up.
     paused_timeout_seconds: int | None = None
 
+    # How an in-process worker (souk/worker.py) paces its claim loop. Both
+    # are domain timing, not network settings: a worker hosted in this
+    # process claims over the same `claim_work` a remote one calls, so it
+    # needs the same two numbers the remote SDK configures for itself.
+    #
+    # The long poll is how long an *idle* worker's claim call blocks waiting
+    # for work before coming round again — it returns the moment work is
+    # enqueued (see RunBroker.subscribe_wake), so this is only the ceiling on
+    # an idle cycle, not on latency. Kept comfortably under
+    # online_window_seconds: claiming is also what marks these agents seen,
+    # so a worker that went a whole online window without claiming would look
+    # offline while sitting right there.
+    worker_long_poll_seconds: float = 25.0
+    # How often a *busy* worker checks for more work. It can't long-poll then
+    # — what changes while it's busy is its own capacity, which souk can't
+    # observe — so this is a plain interval between top-up claims.
+    worker_poll_interval_seconds: float = 2.0
+
     # ---- Identity
 
     # Signs the bearer tokens issued at registration and required on every

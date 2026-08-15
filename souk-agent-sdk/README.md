@@ -122,7 +122,7 @@ if __name__ == "__main__":
 | 🔐 **Self-Sovereign Identity** | Automatically generates & manages persistent **Ed25519 keypair** (`souk_identity.key`). Signs registration payloads to guarantee cryptographic ownership of assigned `agent_id`. |
 | 🔄 **Automatic Reconnection & Token Refresh** | Re-registers on disconnects and seamlessly refreshes HMAC session bearer tokens without dropping queued tasks or interrupting run loops. |
 | ⚡ **Smart Connection Lifecycle** | Holds no open stream when idle (only periodic lightweight long-poll `PollForWork`). Opens multiplexed gRPC `AgentSession` on-demand when work is queued. |
-| ⛔ **Task Preemption & Cancellation** | Races inbound Souk cancellation frames against `run_stream` and immediately propagates `asyncio.CancelledError` into in-flight LLM/tool calls. |
+| ⛔ **Task Preemption & Cancellation** | On Souk's `cancel` frame, cancels that run's task — propagating `asyncio.CancelledError` into in-flight LLM/tool calls, not merely between yields. Souk *asks*; complying is this client's choice. |
 | 🎛️ **Concurrency Throttling** | `max_concurrent_runs=N` prevents GPU/LLM rate-limit saturation by letting Souk queue surplus work server-side. |
 | ⏸️ **Human-in-the-Loop (HITL)** | Intercepts AG-UI native `interrupt` outcomes to pause runs resumbably (`status='input-required'`). |
 | 🔗 **A2A Delegation & Actor Chains** | `a2a_client.call_agent_streaming` simplifies sub-agent calls while signing multi-hop EdDSA JWT `ActorChain` provenance. |
@@ -146,22 +146,23 @@ sequenceDiagram
     loop Idle Long-Polling Phase
         Agent->>Souk: gRPC PollForWork(agent_ids, max_claim)
         Note over Souk: Holds connection up to long_poll_seconds
-        Souk-->>Agent: Returns PendingRun (run_id, agent_id)
+        Souk-->>Agent: PendingRun (run_id, agent_id, RunAgentInput JSON)
     end
 
-    Note over Agent: Active Processing Phase
+    Note over Agent: Active Processing Phase — claiming already handed<br/>over the input, so this stream only carries output
     Agent->>Souk: gRPC AgentSession (Multiplexed Bidirectional Stream)
-    Agent->>Souk: Envelope (Claim run_id)
-    Souk-->>Agent: Envelope (RunAgentInput JSON)
-    
+
     loop Streaming Run Execution
         Agent->>Souk: Envelopes (AG-UI Events: RUN_STARTED, TEXT_..., RUN_FINISHED)
         Souk-->>Caller: SSE Stream / JSON-RPC updates
     end
-    
+
+    opt Souk asks the run to stop
+        Souk-->>Agent: Envelope (cancel=True)
+    end
+
     Agent->>Souk: Envelope (end_of_stream=True)
-    Souk-->>Agent: Envelope (ack=True)
-    Note over Agent: Stream closes when idle
+    Note over Agent: Nothing comes back for a finished run;<br/>stream closes when idle
 ```
 
 ---

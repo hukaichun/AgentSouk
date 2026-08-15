@@ -1,11 +1,16 @@
 """Claiming work is a domain act, not a gRPC one.
 
-`attach_provider` and `claim_work` are the two ways a provider takes on
-runs — in-process by being present, remote by coming to ask. Both decide the
-same thing (may this identity run these agents?), so both belong in core. A
+Every worker comes through here — the one souk runs in its own process for
+an attached agent as much as one behind a wire — because deciding whether
+an identity may run these agents is a domain question, not a framing one. A
 second transport should implement framing and call this, never re-derive who
 owns what: the filtering below is the only thing stopping a valid token for
-one provider being used to poll for another's agents.
+one provider being used to claim another's agents.
+
+Claiming is also the hand-over. A claimed run comes back with its input and
+is already recorded as taken, in one step — there is no second call in which
+the worker announces what it took, and so no window in between for anything
+to observe a run that has been handed out but belongs to nobody.
 """
 
 from __future__ import annotations
@@ -32,14 +37,51 @@ async def _register(souk, sdk_client_id: str, *names: str):
     )
 
 
-async def test_claiming_returns_queued_runs(souk):
+async def test_claiming_returns_queued_runs_with_their_input(souk):
     registration = await _register(souk, "sdk_1", "a")
     agent_id = registration.agent_ids["a"]
-    souk.enqueue_run("run_1", agent_id, "thread_1", {}, "ag-ui")
+    souk.enqueue_run("run_1", agent_id, "thread_1", {"messages": [{"role": "user"}]}, "ag-ui")
 
     runs = await souk.claim_work(registration.session_token, [agent_id])
 
-    assert [r.run_id for r in runs] == ["run_1"]
+    assert [(r.run_id, r.agent_id, r.thread_id) for r in runs] == [("run_1", agent_id, "thread_1")]
+    # With the input, not just a pointer to it — a worker leaves this call
+    # able to start, rather than waiting to be told what to run.
+    assert runs[0].run_input == {"messages": [{"role": "user"}]}
+
+
+async def test_a_claimed_run_is_recorded_as_taken(souk):
+    """What makes a later cancel unambiguous: souk knows somebody has it,
+    so it asks and waits rather than recording an outcome itself (see
+    handlers._handle_cancel's two cases)."""
+    registration = await _register(souk, "sdk_1", "a")
+    agent_id = registration.agent_ids["a"]
+    run = souk.enqueue_run("run_1", agent_id, "thread_1", {}, "ag-ui")
+    assert run.claimed_by is None
+
+    await souk.claim_work(registration.session_token, [agent_id])
+
+    assert run.claimed_by == "sdk_1"
+
+
+async def test_souk_asks_the_worker_that_claimed_the_run_to_stop(souk):
+    """Cancellation reaches a worker through what it supplied when it
+    claimed — souk holds no provider object to call into."""
+    registration = await _register(souk, "sdk_1", "a")
+    agent_id = registration.agent_ids["a"]
+    souk.enqueue_run("run_1", agent_id, "thread_1", {}, "ag-ui")
+    asked: list[str] = []
+
+    await souk.claim_work(registration.session_token, [agent_id], on_cancel=asked.append)
+    souk.cancel_run("run_1")
+
+    async with asyncio.timeout(1):
+        while not asked:
+            await asyncio.sleep(0)
+    assert asked == ["run_1"]
+    # Asked, not decided: souk is still dispatching the run, waiting to see
+    # what its stream does, rather than having ended it here.
+    assert souk.broker.get("run_1") is not None
 
 
 async def test_a_token_cannot_claim_another_providers_agents(souk):

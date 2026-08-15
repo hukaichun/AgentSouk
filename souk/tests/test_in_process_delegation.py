@@ -37,14 +37,8 @@ class Callee:
     def __init__(self) -> None:
         self.seen_caller: dict | None = None
 
-    async def start(self, agent_id: str, run_input: dict):
+    async def run_stream(self, agent_id: str, run_input: dict):
         self.seen_caller = (run_input.get("forwardedProps") or {}).get("caller")
-        return self._events(run_input)
-
-    async def cancel(self, run_id: str) -> None:
-        pass
-
-    async def _events(self, run_input: dict):
         yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "done"}
@@ -72,7 +66,7 @@ def _message(text: str) -> dict:
 async def test_delegate_without_building_a_json_rpc_envelope(souk):
     callee_id = await _register(souk, "callee")
     callee = Callee()
-    await souk.attach_provider(callee_id, callee)
+    await souk.attach_provider("sdk_callee", callee, [callee_id])
 
     task = await A2AAdapter(souk).send_task(callee_id, _message("do the thing"))
 
@@ -85,7 +79,7 @@ async def test_identity_is_carried_through_an_in_process_hop(souk):
     has to be able to relay who it is acting for, or provenance stops here."""
     callee_id = await _register(souk, "callee")
     callee = Callee()
-    await souk.attach_provider(callee_id, callee)
+    await souk.attach_provider("sdk_callee", callee, [callee_id])
 
     agency, relaying_agent = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
     chain = extend_actor_chain(relaying_agent, new_actor_chain(agency, USER))
@@ -106,7 +100,7 @@ async def test_a_tampered_chain_is_rejected_on_this_path_too(souk):
     """Entering at the semantic rung is a shortcut past the envelope, not
     past verification."""
     callee_id = await _register(souk, "callee")
-    await souk.attach_provider(callee_id, Callee())
+    await souk.attach_provider("sdk_callee", Callee(), [callee_id])
 
     chain = new_actor_chain(Ed25519PrivateKey.generate(), USER)
     tampered = [chain[0][:-4] + "AAAA"]
@@ -118,7 +112,7 @@ async def test_a_tampered_chain_is_rejected_on_this_path_too(souk):
 async def test_lineage_links_the_callee_thread_back_to_the_caller(souk):
     caller_id = await _register(souk, "caller")
     callee_id = await _register(souk, "callee")
-    await souk.attach_provider(callee_id, Callee())
+    await souk.attach_provider("sdk_callee", Callee(), [callee_id])
 
     caller_thread = await souk.create_thread(caller_id)
     caller_run = await souk.start_run(caller_id, {"messages": []}, thread_id=caller_thread)
@@ -133,7 +127,7 @@ async def test_lineage_links_the_callee_thread_back_to_the_caller(souk):
 
 async def test_context_id_continues_the_same_conversation(souk):
     callee_id = await _register(souk, "callee")
-    await souk.attach_provider(callee_id, Callee())
+    await souk.attach_provider("sdk_callee", Callee(), [callee_id])
     adapter = A2AAdapter(souk)
 
     first = await adapter.send_task(callee_id, _message("one"))
@@ -150,7 +144,7 @@ async def test_the_wire_rung_and_the_semantic_rung_agree(souk):
     diverge, a remote caller and an in-process one are getting different
     behaviour from the same protocol."""
     callee_id = await _register(souk, "callee")
-    await souk.attach_provider(callee_id, Callee())
+    await souk.attach_provider("sdk_callee", Callee(), [callee_id])
     adapter = A2AAdapter(souk)
 
     direct = await adapter.send_task(callee_id, _message("hi"))
@@ -168,7 +162,7 @@ async def test_the_wire_rung_and_the_semantic_rung_agree(souk):
 
 async def test_get_and_cancel_are_callable_without_an_envelope(souk):
     callee_id = await _register(souk, "callee")
-    await souk.attach_provider(callee_id, Callee())
+    await souk.attach_provider("sdk_callee", Callee(), [callee_id])
     adapter = A2AAdapter(souk)
 
     task = await adapter.send_task(callee_id, _message("hi"))
