@@ -22,8 +22,6 @@ Two ways to address an agent:
 
 from __future__ import annotations
 
-import json
-
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
@@ -112,8 +110,8 @@ async def _rpc(adapter: A2AAdapter, agent_id: str, request: Request):
     if isinstance(result, A2AStream):
 
         async def stream():
-            async for item in result.results:
-                yield {"event": "message", "data": json.dumps(item)}
+            async for data in result.encode():
+                yield {"event": "message", "data": data}
 
         return EventSourceResponse(stream())
     return result

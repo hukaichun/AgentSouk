@@ -7,6 +7,7 @@ and these errors into status codes, belongs to whoever serves it.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,18 @@ class EventStream:
     thread_id: str
     run_id: str
     events: AsyncIterator[dict[str, Any]]
+
+    async def encode(self) -> AsyncIterator[str]:
+        """The events as SSE `data:` payloads.
+
+        Encoding lives here rather than in a route so that anyone serving
+        souk over their own framework gets the wire format right for free —
+        it is part of speaking AG-UI, not part of speaking HTTP. Framing
+        these strings into an actual response stays with whoever owns the
+        server.
+        """
+        async for event in self.events:
+            yield json.dumps(event)
 
 
 @dataclass

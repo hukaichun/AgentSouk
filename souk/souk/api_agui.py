@@ -12,8 +12,6 @@ forcing every caller through it would break a standard, unmodified AG-UI
 client that has never heard of it (souk-no-forced-protocol-deviation).
 """
 
-import json
-
 from ag_ui.core import RunAgentInput
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.encoders import jsonable_encoder
@@ -28,12 +26,6 @@ from souk.models import CreateThreadRequest, CreateThreadResponse
 from souk.protocols.agui import AGUIAdapter, ThreadSnapshot
 
 router = APIRouter()
-
-
-def _sse(event: dict) -> dict:
-    """One AG-UI event as an SSE frame. The adapter yields events; framing
-    them is this layer's job."""
-    return {"event": "message", "data": json.dumps(event)}
 
 
 def _name_conflict(exc: AmbiguousAgentName) -> HTTPException:
@@ -141,8 +133,8 @@ async def _run_agent(souk: Souk, agent_id: str, body: RunAgentInput):
     # threadId/runId copied from the RunAgentInput it was given. That is the
     # standard, in-band place a client learns them.
     async def stream():
-        async for event in result.events:
-            yield _sse(event)
+        async for data in result.encode():
+            yield {"event": "message", "data": data}
 
     return EventSourceResponse(stream())
 

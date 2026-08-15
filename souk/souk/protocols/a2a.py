@@ -19,6 +19,7 @@ leaving each integrator to re-derive:
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -26,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 from souk import repo
 from souk.agui import build_run_agent_input
 from souk.broker import drain_run
-from souk.errors import AgentNotFound, AmbiguousAgentName, InvalidRunInput
+from souk.errors import AgentNotFound, AmbiguousAgentName, InvalidRunInput, RunNotFound
 from souk.identity import verify_actor_chain
 from souk.pause import is_resuming
 from souk.translate_a2a import (
@@ -48,6 +49,17 @@ class A2AStream:
     """`tasks/sendSubscribe`: a stream of JSON-RPC result envelopes."""
 
     results: AsyncIterator[dict[str, Any]]
+
+    async def encode(self) -> AsyncIterator[str]:
+        """The envelopes as SSE `data:` payloads.
+
+        Encoding lives here rather than in a route so that anyone serving
+        souk over their own framework gets the wire format right for free —
+        it is part of speaking A2A, not part of speaking HTTP. Framing these
+        strings into an actual response stays with whoever owns the server.
+        """
+        async for item in self.results:
+            yield json.dumps(item)
 
 
 class A2AAdapter:
@@ -87,24 +99,61 @@ class A2AAdapter:
         }
 
     async def handle_rpc(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any] | A2AStream:
+        """The wire rung: a JSON-RPC envelope in, a JSON-RPC envelope out.
+
+        A thin wrapper over the semantic methods below, which is the point —
+        the envelope exists for transmission, so anything already in this
+        process should call `send_task`/`get_task`/`cancel_task` directly
+        rather than constructing `{"jsonrpc": "2.0", ...}` to talk to itself.
+        Both rungs run the same A2A semantics, so an in-process caller and a
+        remote one are never subtly different.
+        """
         method = payload.get("method")
         params = payload.get("params", {})
         rpc_id = payload.get("id")
 
         if method == "tasks/send":
-            return await self._tasks_send(agent_id, params, rpc_id)
+            return _result(rpc_id, await self.send_task(agent_id, **_send_args(params)))
         if method == "tasks/sendSubscribe":
-            return await self._tasks_send_subscribe(agent_id, params, rpc_id)
+            stream = await self.send_task_streaming(agent_id, **_send_args(params))
+            return A2AStream(_wrap(rpc_id, stream))
         if method == "tasks/get":
-            return await self._tasks_get(agent_id, params, rpc_id)
+            return await self._envelope(rpc_id, self.get_task(agent_id, params.get("id")))
         if method == "tasks/cancel":
-            return await self._tasks_cancel(agent_id, params, rpc_id)
+            return await self._envelope(rpc_id, self.cancel_task(agent_id, params.get("id")))
         return _error(rpc_id, METHOD_NOT_FOUND, f"method not found: {method}")
 
-    # ---- methods
+    async def _envelope(self, rpc_id: Any, coro) -> dict[str, Any]:
+        """RunNotFound is A2A's "task not found" error rather than an
+        exception, since a caller asking about an unknown task is an ordinary
+        answer, not a failure of the call."""
+        try:
+            return _result(rpc_id, await coro)
+        except RunNotFound:
+            return _error(rpc_id, TASK_NOT_FOUND, "task not found")
 
-    async def _tasks_send(self, agent_id: str, params: dict, rpc_id: Any) -> dict[str, Any]:
-        run_id, thread_id, is_live = await self._start_run(agent_id, params)
+    # ---- semantic rung: A2A without the envelope
+
+    async def send_task(
+        self,
+        agent_id: str,
+        message: dict[str, Any],
+        *,
+        context_id: str | None = None,
+        reference_task_ids: list[str] | None = None,
+        actor_chain: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Run a task to completion and return the resulting A2A Task.
+
+        `context_id` continues an existing conversation; `reference_task_ids`
+        records lineage back to the caller's own task; `actor_chain` carries
+        caller identity forward (see souk.identity.extend_actor_chain — a hop
+        that doesn't extend it is where provenance stops).
+        """
+        run_id, thread_id, is_live = await self._start_run(
+            agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
+        )
         run = self._souk.broker.get(run_id) if is_live else None
         if run is not None:
             # No cleanup on early exit, deliberately: a caller disconnecting
@@ -116,17 +165,29 @@ class A2AAdapter:
             # current persisted state instead.
             events = await self._souk.get_run_events(run_id)
         stored = await self._souk.get_run(run_id)
-        task = build_task(
+        return build_task(
             run_id,
             thread_id,
             await self._display_name(agent_id),
             stored["status"] if stored else "completed",
             events,
         )
-        return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
-    async def _tasks_send_subscribe(self, agent_id: str, params: dict, rpc_id: Any) -> A2AStream:
-        run_id, thread_id, is_live = await self._start_run(agent_id, params)
+    async def send_task_streaming(
+        self,
+        agent_id: str,
+        message: dict[str, Any],
+        *,
+        context_id: str | None = None,
+        reference_task_ids: list[str] | None = None,
+        actor_chain: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Same as send_task, but yields A2A status/artifact updates as they
+        arrive instead of waiting for the task to finish."""
+        run_id, thread_id, is_live = await self._start_run(
+            agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
+        )
         run = self._souk.broker.get(run_id) if is_live else None
 
         async def results() -> AsyncIterator[dict[str, Any]]:
@@ -136,10 +197,10 @@ class A2AAdapter:
                 # then close.
                 stored = await self._souk.get_run(run_id)
                 status = stored["status"] if stored else "completed"
-                yield _result(rpc_id, status_update_for_run_status(run_id, thread_id, status))
+                yield status_update_for_run_status(run_id, thread_id, status)
                 return
             async for item in drain_run(run):
-                yield _result(rpc_id, agui_event_to_a2a_update(item, run_id, thread_id))
+                yield agui_event_to_a2a_update(item, run_id, thread_id)
             # Corrects the record: the loop above already sent whatever the
             # raw RUN_FINISHED translated to (always "completed", see
             # agui_event_to_a2a_update) — this overrides it with the real
@@ -147,28 +208,24 @@ class A2AAdapter:
             # "completed" as the last word.
             stored = await self._souk.get_run(run_id)
             if stored is not None and stored["status"] != "completed":
-                yield _result(rpc_id, status_update_for_run_status(run_id, thread_id, stored["status"]))
+                yield status_update_for_run_status(run_id, thread_id, stored["status"])
 
-        return A2AStream(results())
+        return results()
 
-    async def _tasks_get(self, agent_id: str, params: dict, rpc_id: Any) -> dict[str, Any]:
-        # `params.id` is a run_id — A2A's Task.id is not a separate concept.
-        # Scoped to agent_id too, so a request against one agent's endpoint
-        # can't read another agent's run.
-        run_id = params.get("id")
-        run = await self._souk.get_run(run_id)
-        if run is None or run["agent_id"] != agent_id:
-            return _error(rpc_id, TASK_NOT_FOUND, "task not found")
-        task = build_task(
-            run_id,
+    async def get_task(self, agent_id: str, task_id: str) -> dict[str, Any]:
+        """A task's current state. `task_id` is a run_id — A2A's Task.id is
+        not a separate concept. Scoped to agent_id, so a request against one
+        agent's endpoint can't read another agent's run."""
+        run = await self._run_of(agent_id, task_id)
+        return build_task(
+            task_id,
             run["thread_id"],
             await self._display_name(agent_id),
             run["status"],
-            await self._souk.get_run_events(run_id),
+            await self._souk.get_run_events(task_id),
         )
-        return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
-    async def _tasks_cancel(self, agent_id: str, params: dict, rpc_id: Any) -> dict[str, Any]:
+    async def cancel_task(self, agent_id: str, task_id: str) -> dict[str, Any]:
         """Requests cancellation and reports the run's *real* state.
 
         Deliberately not hardcoded to "canceled": souk asks a provider to
@@ -180,25 +237,26 @@ class A2AAdapter:
         actually reports (typically `cancelling` while the provider is still
         winding down).
         """
-        run_id = params.get("id")
-        run = await self._souk.get_run(run_id)
-        if run is None or run["agent_id"] != agent_id:
-            return _error(rpc_id, TASK_NOT_FOUND, "task not found")
-
-        self._souk.cancel_run(run_id)
+        run = await self._run_of(agent_id, task_id)
+        self._souk.cancel_run(task_id)
         # Re-read: the request may already have settled the run (nothing had
         # claimed it), or moved it to `cancelling`.
-        current = await self._souk.get_run(run_id) or run
-        task = build_task(
-            run_id,
+        current = await self._souk.get_run(task_id) or run
+        return build_task(
+            task_id,
             run["thread_id"],
             await self._display_name(agent_id),
             current["status"],
-            await self._souk.get_run_events(run_id),
+            await self._souk.get_run_events(task_id),
         )
-        return {"jsonrpc": "2.0", "id": rpc_id, "result": task}
 
     # ---- internals
+
+    async def _run_of(self, agent_id: str, task_id: str) -> dict[str, Any]:
+        run = await self._souk.get_run(task_id) if task_id else None
+        if run is None or run["agent_id"] != agent_id:
+            raise RunNotFound(f"no task '{task_id}' for agent '{agent_id}'")
+        return run
 
     async def _display_name(self, agent_id: str) -> str:
         agent = await self._souk.get_agent(agent_id)
@@ -321,6 +379,44 @@ async def _lineage_parent(session, params: dict) -> str | None:
         return None
     referenced = await repo.get_run(session, reference_task_ids[0])
     return referenced["thread_id"] if referenced is not None else None
+
+
+def _send_args(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC params to the semantic methods' keyword arguments. `params.id`
+    is accepted as part of the wire shape and ignored — souk mints task ids."""
+    message = params.get("message", {})
+    metadata = params.get("metadata", {}) or {}
+    return {
+        "message": message,
+        "context_id": params.get("contextId"),
+        "reference_task_ids": message.get("referenceTaskIds") or None,
+        "actor_chain": metadata.get("actorChain"),
+        "metadata": {k: v for k, v in metadata.items() if k != "actorChain"} or None,
+    }
+
+
+def _params(
+    message: dict[str, Any],
+    context_id: str | None,
+    reference_task_ids: list[str] | None,
+    actor_chain: list[str] | None,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """The inverse: semantic arguments back into the params shape _start_run
+    reads. One shape, so both rungs go through identical handling."""
+    message = dict(message)
+    if reference_task_ids:
+        message["referenceTaskIds"] = reference_task_ids
+    combined = dict(metadata or {})
+    if actor_chain:
+        combined["actorChain"] = actor_chain
+    return {"message": message, "contextId": context_id, "metadata": combined}
+
+
+async def _wrap(rpc_id: Any, stream: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    """Put each semantic update into a JSON-RPC envelope for the wire."""
+    async for item in stream:
+        yield _result(rpc_id, item)
 
 
 def _result(rpc_id: Any, result: Any) -> dict[str, Any]:
