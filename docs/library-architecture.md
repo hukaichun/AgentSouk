@@ -154,6 +154,10 @@ relay's multiplexed `AgentSession` stream as one iterator per run. The
 connection is held by the provider, not per run, which is why "one `start`
 per run" says nothing about how many connections a transport opens.
 
+**This shape is known to be wrong, and the replacement is decided but not
+built — see "The provider should be a worker, not something core calls"
+below. Read that before extending anything here.**
+
 This port is what removed souk's one genuine transport leak. `broker.py` was
 already transport-agnostic, and the run handlers are pure domain logic —
 persist an event, decide a status, reduce a reply — but three of them built
@@ -382,6 +386,67 @@ Deliberately a supervised set rather than an `asyncio.TaskGroup`: a TaskGroup
 cancels every sibling when one task fails, and runs must be isolated — one
 agent blowing up cannot take down every other run in flight.
 
+## The provider should be a worker, not something core calls
+
+Decided, not implemented. The port above has core *call* a provider and pull
+its events; it should be inverted, so that a provider is a task that consumes
+runs and pushes back.
+
+**What the pull model costs today.** A single event now crosses three queues
+and two routing tables:
+
+```
+agent event ─wire→ handle_incoming
+                     → GrpcProvider._runs[run_id]   ← routing table 1 (transport)
+                     → _pump iterates the generator
+                     → broker._runs[run_id].in_queue ← routing table 2 (core)
+                     → pipeline persists
+                     → out_queue → SSE
+```
+
+Before the provider port existed it was two queues and one table:
+`handle_incoming` looked the run up in the broker and pushed straight into
+its `in_queue`. The second table and the `_pump` task exist purely to turn a
+push (events arriving on a wire) into a pull (core iterating a generator).
+
+So an earlier version of this document was wrong to call that table a
+property of the wire and conclude it belongs in the transport. It is a
+property of the *pull model*. Core already has the only routing table
+needed — the broker's run registry.
+
+**What it also costs: backpressure.** A remote provider can say
+`max_claim=2`. An in-process one has no equivalent: attaching a provider and
+starting five runs starts all five at once, measured. That asymmetry is the
+same root cause — the remote side pulls to claim, then core pushes the input
+back to it, and the in-process side only has the push half.
+
+**The shape.** A provider becomes a worker loop, identical in-process and
+remote:
+
+```python
+while True:
+    runs = await souk.claim_work(token, agent_ids, max_claim=capacity)
+    for run in runs:
+        spawn(execute(run))      # events pushed back per run
+```
+
+The agent stays exactly what AG-UI says it is (`run_stream(input) -> events`).
+What changes is that a *provider* stops being conflated with an *agent*: the
+provider is the worker hosting one, which is why it is the thing that should
+own concurrency and claiming.
+
+Consequences: `_pump`, the `Claim` command's provider payload, and
+`GrpcProvider._runs` all disappear; `claim_work` hands back runs with their
+input; core gains a way to report events for a run.
+
+**It also makes an acknowledgement worth having.** souk removed the old
+completion `ack` because it arrived after the agent had already produced and
+discarded its events, so the only possible response was a log line. In a push
+model the worker still holds what it sent, so a confirmation is something it
+can act on — retry, or don't advance its cursor. At-least-once delivery
+becomes expressible, where under the pull model there is no moment at which
+the worker could ask.
+
 ## What this leaves open: horizontal scaling
 
 Not a goal now, but the layering should not foreclose it. Where souk's state
@@ -527,7 +592,10 @@ Steps 1–4 are done; each landed with the suite green on SQLite and Postgres.
 4. ✅ **Protocols.** AG-UI and A2A translation extracted into
    `souk/protocols/`, with every rung published. The routers dropped from
    ~830 lines to ~300 of pure serving.
-5. ⬜ **Split `souk-server`.** Move the HTTP surface, the gRPC
+5. ⬜ **Invert the provider into a worker.** See the section below — the
+   current port has core calling providers, which cost an extra queue, an
+   extra routing table and in-process backpressure. Decided; not built.
+6. ⬜ **Split `souk-server`.** Move the HTTP surface, the gRPC
    servicer/provider, the KYOK endpoints and the process bootstrap into a
    sibling subproject, leaving `souk` network-free. The dependency split is
    already clean: core needs only sqlalchemy, pydantic, pydantic-settings,
