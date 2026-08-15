@@ -40,18 +40,7 @@ jobs:
           SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
           SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
 
-  # The serving layer, the SDKs and the reference providers live in their
-  # own repository (AgentSoukServer), which carries its own CI — including
-  # the app-builds probe, since it is the only place that can build the app.
+  # Everything else — the gateway, both SDKs, the reference providers and
+  # the directory UI — lives in AgentSoukServer, which carries its own CI,
+  # including the app-builds probe only it can run.
 
-  souk-directory:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - run: npm install
-        working-directory: souk-directory
-      - run: npm run build
-        working-directory: souk-directory

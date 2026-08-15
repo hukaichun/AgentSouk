@@ -69,7 +69,7 @@ That is precisely the runtime architecture:
 - 🔗 **Auditable Multi-Hop Actor Chains**: Multi-agent delegation embeds tamper-evident, signed JWT EdDSA provenance chains to prevent privilege escalation and trace delegation lineages.
 - 💾 **Durable State & Human-in-the-Loop (HITL)**: Persistent threads, execution logs, and native `input-required` async pause & resume flows — on a zero-config local **SQLite** file by default, or **Postgres / ParadeDB** for a concurrent multi-writer deployment (one `SOUK_DATABASE_URL` switch, no code change).
 - 🔑 **Keep Your Own Key (KYOK)** *(experimental)*: Privacy relay allowing callers to pay for LLM inference with their own API keys without handing raw credentials to agent hosts.
-- 🖥️ **Zero-Backend Directory UI**: Pure static browser client (`souk-directory`) to browse active agents, inspect capabilities, and chat live.
+- 🖥️ **Zero-Backend Directory UI**: Pure static browser client (`souk-directory`, in AgentSoukServer) to browse active agents, inspect capabilities, and chat live.
 
 ---
 
@@ -134,10 +134,9 @@ Modular, independent distributions — no shared workspace, each stands alone:
 | Module Path | Description |
 |---|---|
 | [`souk/`](souk/) | **The core library.** Agents, threads, runs, identity, the AG-UI/A2A/KYOK adapters, and SQLite/Postgres persistence. Network-free: it depends on no web framework, no gRPC, no WebSocket library — and cannot, by packaging and by test |
-| [`souk-directory/`](souk-directory/) | Zero-backend Web Directory & live Chat UI (compiled TS/ES modules) — a standard-protocols caller, kept here as the reference client |
 | [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
 
-The SDKs (`souk-agent-sdk`, `souk-client-sdk`) and the reference providers (`agent-template`, `providers/*`) moved to [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer): the gateway repo owns both ends of every wire it defines, and the examples live with the SDK they teach.
+The SDKs (`souk-agent-sdk`, `souk-client-sdk`), the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`) moved to [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer): the gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
 
 ---
 
