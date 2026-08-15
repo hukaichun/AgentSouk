@@ -7,9 +7,9 @@ identity, so souk passes `agent_id` alongside it, on the port's own method.
 
 Before that, a provider received only the run input: one attached to two
 agents got runs it could not distinguish, making it effectively single-agent,
-while the gRPC one papered over the same gap with a private run_id ->
+while a remote one papered over the same gap with a private run_id ->
 agent_id side-table populated out of band — the tell that the port was
-missing something rather than that gRPC was special.
+missing something rather than that being behind a wire was special.
 
 The worker model kept this, and moved the identity one level out: a provider
 is attached *as* a provider, with the list of its agents it is here to serve,

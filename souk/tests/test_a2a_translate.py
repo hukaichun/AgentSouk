@@ -1,13 +1,28 @@
 """Pure-function unit tests for souk.protocols.a2a_translate — no DB, no HTTP.
-Covers the RUN_ERROR -> failed mapping the offline-handling sweep (A7b,
-souk.health) relies on to give live SSE subscribers an explicit terminal
+
+Two jobs. One is the RUN_ERROR -> failed mapping the offline-handling sweep
+(A7b, souk.health) relies on to give live subscribers an explicit terminal
 event instead of the stream just closing.
+
+The other is pinning the exact wire shapes, whole dicts at a time. souk
+hand-wrote A2A for a long time and drifted two protocol versions without
+anything failing — `tasks/send`, `{"type": "text"}` parts, `{"id": ...}` on
+update events — until a real client got -32601. Everything below is now built
+from `a2a.types.a2a_pb2`, so these assertions are less "here is the format we
+chose" than "here is what the SDK's own descriptors serialise to". Comparing
+whole dicts is deliberate: an extra or renamed field fails here, not at a
+caller.
 """
 
 from __future__ import annotations
 
+from a2a.types import a2a_pb2 as pb
+
 from souk.protocols.a2a_translate import (
+    a2a_message_to_agui_messages,
     agui_event_to_a2a_update,
+    build_task,
+    state_for_run_status,
     status_update_for_run_status,
 )
 
@@ -16,34 +31,132 @@ def test_run_error_event_maps_to_failed_status_with_message():
     update = agui_event_to_a2a_update(
         {"type": "RUN_ERROR", "message": "no_provider_online"}, "task_1", "session_1"
     )
-    assert update["status"]["state"] == "failed"
-    assert update["status"]["message"] == "no_provider_online"
-    assert update["final"] is True
 
-
-def test_run_finished_is_final_completed():
-    update = agui_event_to_a2a_update({"type": "RUN_FINISHED"}, "task_1", "session_1")
+    # v1.0 wraps every stream item in a StreamResponse, rather than putting a
+    # bare update on the wire with a `kind` discriminator.
     assert update == {
-        "id": "task_1",
-        "contextId": "session_1",
-        "status": {"state": "completed"},
-        "final": True,
+        "statusUpdate": {
+            "taskId": "task_1",
+            "contextId": "session_1",
+            "status": {
+                "state": "TASK_STATE_FAILED",
+                # TaskStatus.message is a Message, not a string — an AG-UI
+                # RUN_ERROR carries the string, so it is wrapped rather than
+                # put in a field it doesn't fit.
+                "message": {
+                    "messageId": "task_1-error",
+                    "role": "ROLE_AGENT",
+                    "parts": [{"text": "no_provider_online"}],
+                },
+            },
+        }
     }
 
 
-def test_unmodeled_event_falls_back_to_nonfinal_working_update():
+def test_run_finished_is_completed():
+    update = agui_event_to_a2a_update({"type": "RUN_FINISHED"}, "task_1", "session_1")
+
+    assert update == {
+        "statusUpdate": {
+            "taskId": "task_1",
+            "contextId": "session_1",
+            "status": {"state": "TASK_STATE_COMPLETED"},
+        }
+    }
+
+
+def test_text_content_becomes_an_appending_artifact_update():
+    """Keyed by AG-UI's messageId so the deltas of one assistant message are
+    one artifact, and `append` says so. Note the part carries no
+    discriminator at all in v1.0 — `Part` is a oneof, so the field name *is*
+    the type."""
+    update = agui_event_to_a2a_update(
+        {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "hel"}, "task_1", "session_1"
+    )
+
+    assert update == {
+        "artifactUpdate": {
+            "taskId": "task_1",
+            "contextId": "session_1",
+            "artifact": {"artifactId": "m1", "parts": [{"text": "hel"}]},
+            "append": True,
+        }
+    }
+
+
+def test_unmodeled_event_falls_back_to_a_working_update():
     event = {"type": "CUSTOM", "name": "sub_agent_progress", "value": {"sub_agent": "translator"}}
-    update = agui_event_to_a2a_update(event, "task_1", "session_1")
-    assert update["status"]["state"] == "working"
-    assert update["final"] is False
-    assert update["status"]["metadata"]["agui_event"] == event
+
+    update = agui_event_to_a2a_update(event, "task_1", "session_1")["statusUpdate"]
+
+    assert update["status"]["state"] == "TASK_STATE_WORKING"
+    assert update["metadata"]["agui_event"] == event
 
 
-def test_status_update_for_run_status_marks_terminal_states_final():
-    assert status_update_for_run_status("t1", "s1", "queued")["final"] is False
-    assert status_update_for_run_status("t1", "s1", "running")["final"] is False
-    assert status_update_for_run_status("t1", "s1", "input-required")["final"] is False
-    assert status_update_for_run_status("t1", "s1", "completed")["final"] is True
-    assert status_update_for_run_status("t1", "s1", "failed")["final"] is True
-    assert status_update_for_run_status("t1", "s1", "cancelled")["final"] is True
-    assert status_update_for_run_status("t1", "s1", "cancelled")["status"]["state"] == "canceled"
+def test_run_statuses_map_to_a2a_states():
+    assert state_for_run_status("queued") == pb.TaskState.TASK_STATE_SUBMITTED
+    assert state_for_run_status("running") == pb.TaskState.TASK_STATE_WORKING
+    assert state_for_run_status("input-required") == pb.TaskState.TASK_STATE_INPUT_REQUIRED
+    assert state_for_run_status("completed") == pb.TaskState.TASK_STATE_COMPLETED
+    assert state_for_run_status("failed") == pb.TaskState.TASK_STATE_FAILED
+    assert state_for_run_status("cancelled") == pb.TaskState.TASK_STATE_CANCELED
+    # souk asked and does not yet know the answer. A2A has no state for that,
+    # and claiming one would be souk deciding on the provider's behalf.
+    assert state_for_run_status("cancelling") == pb.TaskState.TASK_STATE_UNSPECIFIED
+
+
+def test_status_update_from_a_persisted_status_has_no_final_flag():
+    """v0.3 had `final` on an update; v1.0 does not. Finality is the stream
+    ending, plus the terminal state in the last status."""
+    update = status_update_for_run_status("t1", "s1", "completed")
+
+    assert update == {
+        "statusUpdate": {
+            "taskId": "t1",
+            "contextId": "s1",
+            "status": {"state": "TASK_STATE_COMPLETED"},
+        }
+    }
+
+
+def test_inbound_parts_are_read_under_every_spec_version():
+    """Lenient inbound on purpose. A text part is `{"text": ...}` in v1.0,
+    `{"kind": "text", ...}` in v0.3 and `{"type": "text", ...}` in the
+    original — all three carry the text under the same key, so souk reads the
+    key and ignores the discriminator. Roles gained a prefix in v1.0."""
+    current = a2a_message_to_agui_messages({"role": "ROLE_USER", "parts": [{"text": "hi"}]})
+    v0_3 = a2a_message_to_agui_messages({"role": "user", "parts": [{"kind": "text", "text": "hi"}]})
+    original = a2a_message_to_agui_messages({"role": "user", "parts": [{"type": "text", "text": "hi"}]})
+
+    assert current == v0_3 == original == [{"role": "user", "content": "hi"}]
+
+
+def test_an_agent_role_is_recognised_under_either_spelling():
+    assert a2a_message_to_agui_messages({"role": "ROLE_AGENT", "parts": []})[0]["role"] == "assistant"
+    assert a2a_message_to_agui_messages({"role": "agent", "parts": []})[0]["role"] == "assistant"
+
+
+def test_build_task_merges_a_message_into_one_artifact():
+    """A finished Task carries the text whole — one artifact per assistant
+    message, deltas joined. It used to carry one artifact per streamed token,
+    which is a faithful transcript of the stream and a useless answer to
+    GetTask."""
+    events = [
+        {"type": "RUN_STARTED"},
+        {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "Hello "},
+        {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "world"},
+        {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m2", "delta": "and again"},
+        {"type": "RUN_FINISHED"},
+    ]
+
+    task = build_task("task_1", "session_1", "translator", "completed", events)
+
+    assert task == {
+        "id": "task_1",
+        "contextId": "session_1",
+        "status": {"state": "TASK_STATE_COMPLETED"},
+        "artifacts": [
+            {"artifactId": "m1", "parts": [{"text": "Hello world"}]},
+            {"artifactId": "m2", "parts": [{"text": "and again"}]},
+        ],
+    }

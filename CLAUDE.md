@@ -37,6 +37,9 @@ times over.
 - one provider attached to two agents couldn't tell its runs apart
 - AG-UI has no cancelled event or outcome — checked against the installed
   package before designing around it, which changed the design
+- `docker compose up` didn't start, a provider failure reached callers as an
+  empty 200, and A2A answered `-32601` to every spec-current client. All
+  three were live the whole time 204 tests were green — see Testing below
 
 When you catch yourself about to write "this should work" or "X is
 transport-specific", write eight lines that prove it instead.
@@ -52,13 +55,34 @@ transport-specific", write eight lines that prove it instead.
   build the app: `create_app(Souk())`.
 - `tests/test_core_is_network_free.py` is a hard constraint, not a
   suggestion. If it fails, the fix is almost never to widen its allow-list.
+- **Every test provider is a stub, so nothing here proves souk works.** The
+  suite has never called a model. `docker compose up` with a real key in
+  `.env` is the check that does, and the first time it was run it found three
+  defects in a row: the stack wouldn't start (host `.venv` copied into the
+  image, so `uv` re-downloaded everything at container start), a failing
+  provider reached callers as a 200 with zero events, and A2A only answered
+  to method names the spec had renamed. Run it after touching the wire.
+- **A protocol souk hand-writes will silently rot, and reading the package
+  is not enough on its own — check *which version* you are reading.** A2A had
+  moved twice; the first fix landed on v0.3 because its shapes were read out
+  of a module called `a2a.compat.v0_3` without asking what it was
+  compatibility *for* (answer, in its own README's first line: for v1.0
+  systems talking to legacy v0.3 ones). Both protocols now come from a
+  package — `ag-ui-protocol` and `a2a-sdk` — and A2A's method names are read
+  off the `A2AService` descriptor so a rename fails at import. Keep it that
+  way: no A2A field name, enum value or method name gets typed by hand.
 
 ## Design invariants
 
 These are load-bearing; breaking one has caused a real bug here.
 
-- **Core is network-free.** It knows a database and nothing else. Which
-  protocol something arrives over is a serving-layer choice.
+- **Core is network-free — including its vocabulary.** It knows a database
+  and nothing else. Which protocol something arrives over is a serving-layer
+  choice, so core must not *name* one either: `broker.py`, `identity.py`,
+  `repo.py` and `kyok.py` all described themselves in terms of `PollForWork`
+  and `AgentSession` until the transport changed and every one of those
+  sentences became a lie. The contract is `claim_work` / `report_event` /
+  `finish_run` plus a cancel notification; a transport frames those.
 - **souk never decides on a provider's behalf.** It can *ask* an agent to
   stop; it cannot make it. Never record an outcome souk hasn't observed —
   recording `cancelled` at request time was a lie the run's own output could

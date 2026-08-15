@@ -3,7 +3,7 @@
 A provider says *what* it can run (see souk/providers.py). This says *how it
 gets work*, and it is the same loop whether the provider shares souk's
 process or sits behind a wire — `souk_agent_sdk.client` runs it on the far
-side of gRPC:
+side of one, and which wire that is has no bearing on anything here:
 
     while True:
         runs = await souk.claim_work(token, agent_ids, max_claim=capacity)

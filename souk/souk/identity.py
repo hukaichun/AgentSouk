@@ -1,5 +1,5 @@
 """Minimal provider identity: proves whoever registers under a public_key
-actually holds the matching private key, and gates gRPC calls on a
+actually holds the matching private key, and gates every worker call on a
 short-lived bearer token issued only after that proof.
 
 Deliberately not a full account system — no signup flow, no stored
@@ -18,8 +18,9 @@ Two independent checks, at two different points:
      public_key it presents (see repo.register_agents). Expensive-ish
      (Ed25519 verify), so it only happens at registration, not on every
      poll.
-  2. Every gRPC call (PollForWork/AgentSession): must present a bearer
-     token issued by step 1 (see issue_session_token/verify_session_token).
+  2. Every worker call (claiming runs, reporting their events, ending
+     them): must present a bearer token issued by step 1 (see
+     issue_session_token/verify_session_token).
      Cheap (HMAC verify), stateless (no session store — the token itself
      carries the public_key + an expiry, signed so it can't be forged
      without token_signing_secret).
@@ -292,9 +293,9 @@ def issue_session_token(public_key: str, signing_secret: str) -> str:
 
 def verify_session_token(token: str, signing_secret: str) -> str | None:
     """Returns the public_key this token was issued to if it is valid
-    (correct signature, not expired), else None. Called on every
-    PollForWork/AgentSession — see souk_server.grpc_server — and by every worker
-    before it claims (see souk.worker).
+    (correct signature, not expired), else None. Called by every worker
+    before it claims (see souk.worker), and by whatever serving layer carries
+    a remote one's calls.
 
     That returned key *is* the provider: what it may claim, and which runs it
     may report events for, are both decided from it.

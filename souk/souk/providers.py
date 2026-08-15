@@ -15,7 +15,7 @@ of events out. The only thing added is which agent a run is for:
 RunAgentInput carries thread and run ids and no agent identity, and souk does
 not widen someone else's schema. Without it a provider serving a translator
 and a summarizer cannot tell which of them a run is for — which made
-in-process providers effectively single-agent, while the gRPC one papered
+in-process providers effectively single-agent, while the remote one papered
 over the same gap with a private side-table.
 
 Nothing here is network-shaped. A provider may be a local Python object with

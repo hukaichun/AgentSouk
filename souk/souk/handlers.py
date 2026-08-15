@@ -5,12 +5,12 @@ see its module docstring for why exactly one task per run applies them, and
 why nothing else may touch a Run's fields. `make_handlers` builds the
 dispatch table for one Souk.
 
-This module used to live in grpc_server.py, and was the one genuine transport
-leak in souk: three of these handlers constructed `souk_pb2.AgentEventEnvelope`
-protobuf messages directly. Everything they do is domain logic — persist,
-reduce, decide a status — so they belong in core. Nothing here imports a
-transport, and nothing here calls out to a worker either: events arrive as
-commands, pushed by whoever holds the run (see souk/worker.py).
+This module used to live in the serving layer, and was the one genuine
+transport leak in souk: three of these handlers built wire frames directly.
+Everything they do is domain logic — persist, reduce, decide a status — so
+they belong in core. Nothing here imports a transport, and nothing here calls
+out to a worker either: events arrive as commands, pushed by whoever holds the
+run (see souk/worker.py).
 """
 
 from __future__ import annotations
@@ -72,6 +72,10 @@ async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
         interrupts = interrupt_outcome_of(event)
         if interrupts is not None:
             run.pause_payload = {"interrupts": interrupts}
+    elif event.get("type") == "RUN_ERROR":
+        # The agent reported its own failure, so the caller has been told.
+        # See _handle_finish, which speaks up only when nobody did.
+        run.saw_run_error = True
     run.seq += 1
     async with souk.session() as session:
         await repo.append_run_event(session, run.run_id, run.seq, event)
@@ -101,6 +105,18 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
                                             requested — it finished anyway)
         no RUN_FINISHED, cancel asked    -> cancelled
         no RUN_FINISHED, nothing asked   -> failed
+
+    A `failed` verdict is also *told to the caller*, as a terminal RUN_ERROR,
+    when nothing else has. Recording it and staying quiet was the observable
+    bug: a provider whose run_stream raised produced an HTTP 200 with an
+    empty event stream that closed in 0.1s — indistinguishable, to a client,
+    from an agent with nothing to say. This is not souk deciding anything on
+    a provider's behalf; the verdict above is already souk's own and already
+    persisted. It is souk saying out loud what it just wrote down.
+
+    `cancelled` deliberately gets no such event: AG-UI has no cancelled
+    event or outcome to send (see this docstring's second paragraph), and the
+    party that would read it is the same party that asked.
     """
     if run.pause_payload is not None:
         status, metadata = "input-required", run.pause_payload
@@ -110,6 +126,19 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
         status, metadata = "cancelled", None
     else:
         status, metadata = "failed", {"failureReason": "provider_stream_ended_without_finishing"}
+
+    # RunErrorEvent's own schema is just type/message/code — no thread_id or
+    # run_id fields to fill in, same as the agent-offline event in
+    # protocols/agui.
+    failure_event = (
+        {
+            "type": "RUN_ERROR",
+            "message": "the agent's stream ended without finishing",
+            "code": "provider_stream_ended_without_finishing",
+        }
+        if status == "failed" and not run.saw_run_error
+        else None
+    )
 
     async with souk.session() as session:
         await repo.mark_run_status(session, run.run_id, status, metadata=metadata)
@@ -126,14 +155,23 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
             reply_messages = reduce_events_to_messages(round_events)
             if reply_messages:
                 await repo.append_thread_messages(session, run.thread_id, run.run_id, reply_messages)
+        if failure_event is not None:
+            # Persisted as a real run event, not only relayed: a caller that
+            # reconnects and reads the run's stored events must get the same
+            # account as one that stayed on the stream. It also reaches A2A
+            # for free — RUN_ERROR is already translated to a final `failed`
+            # status update (see protocols/a2a_translate).
+            run.seq += 1
+            await repo.append_run_event(session, run.run_id, run.seq, failure_event)
         await session.commit()
     # Nothing goes back to the agent here. souk used to send an `ack=true`
-    # envelope at this point, once everything was persisted; it was removed
-    # because the agent could only ever log it — it has already produced and
-    # discarded its events, so there is no recovery action available to it if
-    # souk failed to persist. Whether a run is durable is a question its
-    # *caller* asks, via the run's own status. See proto/souk.proto's
-    # reserved field 5.
+    # acknowledgement at this point, once everything was persisted; it was
+    # removed because the agent could only ever log it — it has already
+    # produced and discarded its events, so there is no recovery action
+    # available to it if souk failed to persist. Whether a run is durable is a
+    # question its *caller* asks, via the run's own status.
+    if failure_event is not None:
+        await run.out_queue.put(failure_event)
     await run.out_queue.put(END_OF_STREAM)
 
 

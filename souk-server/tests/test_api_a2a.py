@@ -24,12 +24,28 @@ async def test_name_and_id_routes_return_the_same_card(client, new_identity):
     identity = new_identity()
     agent_id = await _register(client, identity, "greeter", description="hi")
 
-    by_name = await client.get("/a2a/greeter/.well-known/agent.json")
-    by_id = await client.get(f"/a2a/id/{agent_id}/.well-known/agent.json")
+    by_name = await client.get("/a2a/greeter/.well-known/agent-card.json")
+    by_id = await client.get(f"/a2a/id/{agent_id}/.well-known/agent-card.json")
 
     assert by_name.status_code == by_id.status_code == 200
     assert by_name.json() == by_id.json()
-    assert by_name.json()["url"].endswith(f"/a2a/id/{agent_id}/rpc")
+    # v1.0 replaced the card's single `url` with a list of interfaces, each
+    # stating its own binding and protocol version.
+    assert by_name.json()["supportedInterfaces"][0]["url"].endswith(f"/a2a/id/{agent_id}/rpc")
+
+
+async def test_the_pre_v1_card_path_is_still_served(client, new_identity):
+    """A card is what a client finds souk *with*. v1.0 moved the well-known
+    path from `/.well-known/agent.json` to `/.well-known/agent-card.json`, and
+    404ing the old one would make souk undiscoverable to every client that
+    predates the move, for no gain."""
+    agent_id = await _register(client, new_identity(), "greeter", description="hi")
+
+    old = await client.get(f"/a2a/id/{agent_id}/.well-known/agent.json")
+    new = await client.get(f"/a2a/id/{agent_id}/.well-known/agent-card.json")
+
+    assert old.status_code == 200
+    assert old.json() == new.json()
 
 
 async def test_ambiguous_name_409s_with_candidates_while_id_routes_still_work(client, new_identity):
@@ -75,7 +91,7 @@ async def test_offline_target_fails_fast_instead_of_queueing(client, new_identit
     )
     assert resp.status_code == 200
     result = resp.json()["result"]
-    assert result["status"]["state"] == "failed"
+    assert result["status"]["state"] == "TASK_STATE_FAILED"
 
     run = (
         await session.execute(
@@ -129,7 +145,7 @@ async def test_a2a_can_never_bypass_a_paused_run_even_with_a_resume_flag(client,
     result = second.json()["result"]
     # Still the *original* run — a new one never started.
     assert result["id"] == created["run_id"]
-    assert result["status"]["state"] == "input-required"
+    assert result["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
 
     still_one_run = (
         await session.execute(

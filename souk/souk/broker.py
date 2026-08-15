@@ -1,4 +1,11 @@
-"""In-memory hand-off between the HTTP gateway and the gRPC relay.
+"""In-memory hand-off between a run's caller and the worker holding it.
+
+Neither side is named by transport here, deliberately. A caller reaches a
+run through a protocol adapter, and a worker reaches it through core's three
+methods (`claim_work` / `report_event` / `finish_run`); what carried either
+of them is a serving-layer choice this module must not encode. It once
+said "the HTTP gateway and the gRPC relay", which was true of exactly one
+deployment.
 
 Each run is modeled like a tiny OS process: a `Run` is pure data (no
 methods — see its docstring), with two queues attached to it playing the
@@ -23,7 +30,7 @@ role of stdin/stdout:
 Exactly one task per run (`_pipeline`, spawned by `enqueue_run`) reads
 `in_queue` and is the *only* code that ever mutates a Run's fields —
 dispatching each command to a handler function ("function objects", see
-grpc_server.py's HANDLERS) supplied by the caller — with one deliberate
+souk/handlers.py) supplied by the caller — with one deliberate
 exception: `Run.cancel_requested` (see its own docstring below). Everything
 *else* about cancelling a run — the DB write, telling the agent to stop —
 is genuinely multi-step, has to happen in order relative to this run's
@@ -53,10 +60,10 @@ and what would let a distributed implementation substitute here without
 touching any caller (see docs/library-architecture.md on horizontal
 scaling).
 
-souk runs as a single process holding both the HTTP server and the gRPC
-server on one event loop, so all of this is implemented with plain
-asyncio primitives rather than round-tripping through the database. The
-database (souk/schema.py) is the durable record for anything that needs to survive a
+One souk is one process on one event loop — callers and workers alike
+reach it in-process, whatever carried them there — so all of this is
+implemented with plain asyncio primitives rather than round-tripping
+through the database. The database (souk/schema.py) is the durable record for anything that needs to survive a
 restart or be queried after the fact (roster, thread history, run
 status, run_events) — it is not on the live event-relay hot path.
 """
@@ -175,7 +182,8 @@ class Run:
     # How to *ask* the worker holding this run to stop — supplied by
     # whoever claimed it (souk.core.claim_work's `on_cancel`), because
     # only the claimer knows how to reach itself: an in-process worker
-    # cancels its own task, a gRPC one writes a frame. Called by
+    # cancels its own task, a remote one puts a frame on its own wire.
+    # Called by
     # handlers._handle_cancel, synchronously and at most once; it must
     # not block, and what the worker does about it is the worker's
     # business, not souk's.
@@ -201,6 +209,13 @@ class Run:
     # stream simply stopped. Absence is the only "it didn't finish" signal
     # AG-UI has — there is no cancelled event or outcome in the protocol.
     saw_run_finished: bool = False
+    # Likewise for RUN_ERROR, which is a *different* question: RUN_FINISHED
+    # decides the outcome, this one only records that the caller has already
+    # been told something went wrong. _handle_finish emits a terminal
+    # RUN_ERROR of its own when a run ends failed and nothing said so — this
+    # is what keeps it from saying it twice for an agent that reported its
+    # own failure properly.
+    saw_run_error: bool = False
     in_queue: asyncio.Queue[Command] = field(default_factory=asyncio.Queue)
     out_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
 
@@ -336,10 +351,10 @@ class RunBroker:
         self._spawn = spawn or self._spawn_unsupervised
         self._runs: dict[str, Run] = {}
         self._pending_by_agent: dict[str, deque[str]] = defaultdict(deque)
-        # Lets a long-polling PollForWork call block until a run actually
+        # Lets a long-polling claim block until a run actually
         # shows up for one of its agent_ids instead of sleeping through a
-        # fixed poll interval — see grpc_server.PollForWork. Plain
-        # asyncio.Event rather than anything grpc/pb2-shaped, so this stays
+        # fixed poll interval — see core.claim_work. A plain asyncio.Event
+        # rather than anything shaped like a wire frame, so this stays
         # a swap-in seam for a distributed backend (e.g. Postgres
         # LISTEN/NOTIFY) if souk is ever split across multiple processes;
         # nothing above this depends on wakes being in-process.
@@ -359,7 +374,7 @@ class RunBroker:
         """`handlers=None` skips spawning this run's pipeline task — only
         useful for tests exercising pure registry/poll/wake logic in
         isolation. Every real caller (api_agui.py, api_a2a.py,
-        grpc_server.py's auto-resume path) must pass handlers.make_handlers,
+        core's auto-resume path) must pass handlers.make_handlers,
         or nothing will ever consume commands pushed for this run.
 
         `seq` defaults to 0 for a fresh run_id. A run_id being *reopened*

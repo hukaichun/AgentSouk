@@ -9,7 +9,7 @@ this be relayed to". Same signing mechanism as souk.identity.
 issue_session_token/verify_session_token (HMAC over a base64 JSON body,
 same token_signing_secret) — deliberately not reusing that pair directly
 since the payload shape (and what a forged one could be used for —
-routing a completion, not authenticating a gRPC call) is different enough
+routing a completion, not authenticating a worker call) is different enough
 to be worth keeping separate.
 
 Also carries `agent_id` — souk already knows, at the moment it mints this
@@ -19,8 +19,8 @@ token says so explicitly rather than leaving that implicit. See
 protocols.kyok's KyokAdapter.complete for where this gets checked against
 souk.broker's live view of who's actually running run_id right now — a
 provider's identity is real (its Ed25519 keypair, souk_agent_sdk.
-identity) even though this HTTP endpoint itself, unlike PollForWork/
-AgentSession, carries no bearer proving it on the wire (staying
+identity) even though this HTTP endpoint itself, unlike a worker's own
+calls, carries no bearer proving it on the wire (staying
 OpenAI-wire-compatible rules that out) — this is how the binding still
 happens without needing one.
 """

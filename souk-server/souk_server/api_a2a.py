@@ -23,6 +23,7 @@ Two ways to address an agent:
 
 from __future__ import annotations
 
+from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH
 from fastapi import APIRouter, Depends, Request
 from sse_starlette.sse import EventSourceResponse
 
@@ -38,7 +39,17 @@ def _adapter(souk: Souk, serving: ServingSettings) -> A2AAdapter:
     return A2AAdapter(souk, public_base_url=serving.public_http_url)
 
 
-@router.get("/a2a/id/{agent_id}/.well-known/agent.json")
+# A2A renamed the well-known path along with everything else: v1.0 publishes
+# at `/.well-known/agent-card.json` (a2a.utils.constants'
+# AGENT_CARD_WELL_KNOWN_PATH, which is where this string comes from rather
+# than being typed here), where earlier versions used `/.well-known/agent.json`.
+# Both are served — a card is what a client finds souk *with*, so 404ing the
+# path an older client knows would make souk undiscoverable to it for no gain.
+CARD_PATHS = (AGENT_CARD_WELL_KNOWN_PATH, "/.well-known/agent.json")
+
+
+@router.get("/a2a/id/{agent_id}" + CARD_PATHS[0])
+@router.get("/a2a/id/{agent_id}" + CARD_PATHS[1])
 async def agent_card_by_id(
     agent_id: str,
     souk: Souk = Depends(get_souk),
@@ -47,7 +58,8 @@ async def agent_card_by_id(
     return await _adapter(souk, serving).agent_card(agent_id)
 
 
-@router.get("/a2a/{name}/.well-known/agent.json")
+@router.get("/a2a/{name}" + CARD_PATHS[0])
+@router.get("/a2a/{name}" + CARD_PATHS[1])
 async def agent_card_by_name(
     name: str,
     souk: Souk = Depends(get_souk),

@@ -20,9 +20,14 @@ leaving each integrator to re-derive:
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from a2a.types import a2a_pb2 as pb
+from a2a.utils.constants import PROTOCOL_VERSION_CURRENT, TransportProtocol
+from google.protobuf.json_format import ParseDict, ParseError
 
 from souk import repo
 from souk.agui import build_run_agent_input
@@ -34,13 +39,49 @@ from souk.protocols.a2a_translate import (
     agui_event_to_a2a_update,
     build_task,
     status_update_for_run_status,
+    to_wire,
 )
 
 if TYPE_CHECKING:
     from souk.core import Souk
 
+logger = logging.getLogger("souk.protocols.a2a")
+
 METHOD_NOT_FOUND = -32601
 TASK_NOT_FOUND = -32001
+
+# What the agent card advertises, taken from the SDK rather than typed here:
+# it is a claim about which vocabulary the methods below speak, and a claim
+# souk got wrong once already by reading shapes out of a module named
+# `compat.v0_3` without checking what it was compatibility *for*.
+PROTOCOL_VERSION = PROTOCOL_VERSION_CURRENT
+
+# A2A v1.0's JSON-RPC method names are its gRPC service method names, so they
+# are read off the service descriptor instead of spelled out. A method souk
+# implements that the spec renames now fails this module at import, which is
+# the whole reason for taking the dependency.
+_A2A_METHODS = {method.name for method in pb.DESCRIPTOR.services_by_name["A2AService"].methods}
+
+
+def _method(name: str) -> str:
+    if name not in _A2A_METHODS:
+        raise RuntimeError(
+            f"A2AService has no method {name!r} — the spec moved and souk's dispatch is stale. "
+            f"It offers: {sorted(_A2A_METHODS)}"
+        )
+    return name
+
+
+# Every spelling souk answers to. It emits v1.0 and only v1.0, but a method
+# name is free to accept: `message/send` is v0.3's name for SendMessage and
+# `tasks/send` was the original, and refusing them buys nothing. The SDK
+# itself ships exactly this accommodation (`enable_v0_3_compat` on its own
+# dispatcher), so it is the spec's own idea of politeness, not souk's.
+SEND = frozenset({_method("SendMessage"), "message/send", "tasks/send"})
+STREAM = frozenset({_method("SendStreamingMessage"), "message/stream", "tasks/sendSubscribe"})
+GET = frozenset({_method("GetTask"), "tasks/get"})
+CANCEL = frozenset({_method("CancelTask"), "tasks/cancel"})
+SUBSCRIBE = frozenset({_method("SubscribeToTask"), "tasks/resubscribe"})
 
 
 @dataclass
@@ -88,14 +129,30 @@ class A2AAdapter:
             raise AgentNotFound(f"agent '{agent_id}' is not registered")
         card = dict(agent["agent_card"])
         base = f"{self._public_base_url}/a2a/id/{agent_id}"
-        return {
-            "name": card.get("name", agent["name"]),
-            "description": card.get("description", ""),
-            "url": f"{base}/rpc",
-            "version": "0.1.0",
-            "capabilities": {"streaming": True},
-            "skills": card.get("skills", []),
-        }
+        return to_wire(
+            pb.AgentCard(
+                name=card.get("name", agent["name"]),
+                description=card.get("description", ""),
+                version="0.1.0",
+                # v1.0 replaced the card's single `url` + `preferredTransport`
+                # with a list of interfaces, each stating its own binding and
+                # protocol version. This is where a client learns to call
+                # `SendMessage` rather than probing for a method name and
+                # getting -32601 — which is exactly how souk's own drift went
+                # unnoticed, since nothing else on the card stated a version.
+                supported_interfaces=[
+                    pb.AgentInterface(
+                        url=f"{base}/rpc",
+                        protocol_binding=TransportProtocol.JSONRPC.value,
+                        protocol_version=PROTOCOL_VERSION,
+                    )
+                ],
+                capabilities=pb.AgentCapabilities(streaming=True),
+                default_input_modes=["text/plain"],
+                default_output_modes=["text/plain"],
+                skills=_skills(card.get("skills", [])),
+            )
+        )
 
     async def handle_rpc(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any] | A2AStream:
         """The wire rung: a JSON-RPC envelope in, a JSON-RPC envelope out.
@@ -111,16 +168,35 @@ class A2AAdapter:
         params = payload.get("params", {})
         rpc_id = payload.get("id")
 
-        if method == "tasks/send":
-            return _result(rpc_id, await self.send_task(agent_id, **_send_args(params)))
-        if method == "tasks/sendSubscribe":
-            stream = await self.send_task_streaming(agent_id, **_send_args(params))
-            return A2AStream(_wrap(rpc_id, stream))
-        if method == "tasks/get":
+        if method in SEND:
+            return await self._envelope(rpc_id, self.send_task(agent_id, **_send_args(params)))
+        if method in STREAM:
+            return await self._envelope_stream(rpc_id, params, agent_id)
+        if method in GET:
             return await self._envelope(rpc_id, self.get_task(agent_id, params.get("id")))
-        if method == "tasks/cancel":
+        if method in CANCEL:
             return await self._envelope(rpc_id, self.cancel_task(agent_id, params.get("id")))
+        if method in SUBSCRIBE:
+            return await self._envelope_resubscribe(rpc_id, params, agent_id)
         return _error(rpc_id, METHOD_NOT_FOUND, f"method not found: {method}")
+
+    async def _envelope_stream(
+        self, rpc_id: Any, params: dict[str, Any], agent_id: str
+    ) -> dict[str, Any] | A2AStream:
+        try:
+            stream = await self.send_task_streaming(agent_id, **_send_args(params))
+        except RunNotFound:
+            return _error(rpc_id, TASK_NOT_FOUND, "task not found")
+        return A2AStream(_wrap(rpc_id, stream))
+
+    async def _envelope_resubscribe(
+        self, rpc_id: Any, params: dict[str, Any], agent_id: str
+    ) -> dict[str, Any] | A2AStream:
+        try:
+            stream = await self.resubscribe_task(agent_id, params.get("id"))
+        except RunNotFound:
+            return _error(rpc_id, TASK_NOT_FOUND, "task not found")
+        return A2AStream(_wrap(rpc_id, stream))
 
     async def _envelope(self, rpc_id: Any, coro) -> dict[str, Any]:
         """RunNotFound is A2A's "task not found" error rather than an
@@ -139,19 +215,23 @@ class A2AAdapter:
         message: dict[str, Any],
         *,
         context_id: str | None = None,
+        task_id: str | None = None,
         reference_task_ids: list[str] | None = None,
         actor_chain: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Run a task to completion and return the resulting A2A Task.
 
-        `context_id` continues an existing conversation; `reference_task_ids`
-        records lineage back to the caller's own task; `actor_chain` carries
-        caller identity forward (see souk.identity.extend_actor_chain — a hop
-        that doesn't extend it is where provenance stops).
+        `context_id` continues an existing conversation; `task_id` continues
+        a specific task (its context is looked up, so a caller holding only a
+        task id doesn't have to have kept the contextId too);
+        `reference_task_ids` records lineage back to the caller's own task;
+        `actor_chain` carries caller identity forward (see
+        souk.identity.extend_actor_chain — a hop that doesn't extend it is
+        where provenance stops).
         """
         run_id, thread_id, is_live = await self._start_run(
-            agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
+            agent_id, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
         live = is_live and self._souk.broker.get(run_id) is not None
         if live:
@@ -178,6 +258,7 @@ class A2AAdapter:
         message: dict[str, Any],
         *,
         context_id: str | None = None,
+        task_id: str | None = None,
         reference_task_ids: list[str] | None = None,
         actor_chain: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
@@ -185,7 +266,7 @@ class A2AAdapter:
         """Same as send_task, but yields A2A status/artifact updates as they
         arrive instead of waiting for the task to finish."""
         run_id, thread_id, is_live = await self._start_run(
-            agent_id, _params(message, context_id, reference_task_ids, actor_chain, metadata)
+            agent_id, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
         live = is_live and self._souk.broker.get(run_id) is not None
         # Subscribed before `results` is iterated, for the same reason as
@@ -212,6 +293,33 @@ class A2AAdapter:
             stored = await self._souk.get_run(run_id)
             if stored is not None and stored["status"] != "completed":
                 yield status_update_for_run_status(run_id, thread_id, stored["status"])
+
+        return results()
+
+    async def resubscribe_task(self, agent_id: str, task_id: str) -> AsyncIterator[dict[str, Any]]:
+        """`tasks/resubscribe`: rejoin a task's stream after losing the
+        connection it was started on.
+
+        Only what happens *from now on*: the spec's own framing is resuming a
+        stream, and souk has `tasks/get` for the whole story so far — a
+        reconnecting caller that also wants the backlog asks for it. A task
+        that is no longer live gets one final status update rather than an
+        empty stream, so a caller reconnecting a moment too late still learns
+        the outcome instead of watching nothing.
+        """
+        run = await self._run_of(agent_id, task_id)
+        thread_id = run["thread_id"]
+        events = self._souk.broker.subscribe(task_id) if self._souk.broker.get(task_id) else None
+
+        async def results() -> AsyncIterator[dict[str, Any]]:
+            if events is None:
+                yield status_update_for_run_status(task_id, thread_id, run["status"])
+                return
+            async for item in events:
+                yield agui_event_to_a2a_update(item, task_id, thread_id)
+            stored = await self._souk.get_run(task_id)
+            if stored is not None and stored["status"] != "completed":
+                yield status_update_for_run_status(task_id, thread_id, stored["status"])
 
         return results()
 
@@ -287,6 +395,7 @@ class A2AAdapter:
 
             metadata = params.get("metadata", {})
             parent_thread_id = await _lineage_parent(session, params)
+            context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
 
             # Opt-in caller identity, same mechanism as AG-UI's: unsigned
             # calls are allowed, but a chain that is present and fails to
@@ -311,7 +420,7 @@ class A2AAdapter:
             # is optional, so omitting it still yields a fresh thread, but
             # supplying an unrecognized one is a caller error (ThreadNotFound).
             thread_id = await repo.ensure_thread(
-                session, agent_id, params.get("contextId"), parent_thread_id, metadata=metadata
+                session, agent_id, context_id, parent_thread_id, metadata=metadata
             )
 
             active = await repo.get_active_run_for_thread(session, thread_id)
@@ -367,6 +476,44 @@ class A2AAdapter:
         return run_id, thread_id, True
 
 
+def _skills(raw_skills: list[dict[str, Any]]) -> list[pb.AgentSkill]:
+    """A provider registers skills as free-form dicts (see the registration
+    model), so they are put through A2A's own `AgentSkill` before souk
+    advertises them — a card souk publishes should be a card, not whatever
+    shape a provider happened to send.
+
+    Unknown keys are dropped rather than rejected: a provider carrying its own
+    extra fields is not a reason to refuse to serve its card, and there is
+    nowhere in `AgentSkill` to keep them. One unparseable skill is skipped,
+    not fatal, for the same reason.
+    """
+    skills = []
+    for raw in raw_skills:
+        try:
+            skills.append(ParseDict(raw, pb.AgentSkill(), ignore_unknown_fields=True))
+        except ParseError:
+            logger.warning("agent card: skipping a skill that is not an A2A AgentSkill: %r", raw)
+    return skills
+
+
+async def _context_of_task(session, task_id: str | None) -> str | None:
+    """`Message.taskId` — the current spec's way to say "this message
+    continues that task". A2A's Task.id *is* souk's run_id, so the task's
+    context is simply its run's thread.
+
+    Unlike `referenceTaskIds` (informational, so an unknown id is ignored),
+    this one is a claim about where the message belongs: an id souk doesn't
+    know is a caller error, and quietly opening a fresh thread instead would
+    strand the conversation the caller thought it was continuing.
+    """
+    if not task_id:
+        return None
+    run = await repo.get_run(session, task_id)
+    if run is None:
+        raise RunNotFound(f"no task '{task_id}'")
+    return run["thread_id"]
+
+
 async def _lineage_parent(session, params: dict) -> str | None:
     """Real A2A `Message.referenceTaskIds` — "other task IDs this message
     references for additional context" — not a souk invention. A caller
@@ -385,13 +532,25 @@ async def _lineage_parent(session, params: dict) -> str | None:
 
 
 def _send_args(params: dict[str, Any]) -> dict[str, Any]:
-    """JSON-RPC params to the semantic methods' keyword arguments. `params.id`
-    is accepted as part of the wire shape and ignored — souk mints task ids."""
+    """JSON-RPC params to the semantic methods' keyword arguments.
+
+    `contextId` and `taskId` live on the *message* in the current spec
+    (MessageSendParams is `{message, configuration?, metadata?}` — nothing
+    else). souk's first A2A implementation read `contextId` from the top
+    level and took a caller-assigned `id` there too, so both are still
+    read, message first.
+
+    A caller-assigned task id remains ignored as an *identifier* — souk mints
+    those — but `taskId` naming an existing task is not the same thing: that
+    is a caller continuing a task, and it is honoured by resolving the task's
+    thread (see `_start_run`).
+    """
     message = params.get("message", {})
     metadata = params.get("metadata", {}) or {}
     return {
         "message": message,
-        "context_id": params.get("contextId"),
+        "context_id": message.get("contextId") or params.get("contextId"),
+        "task_id": message.get("taskId"),
         "reference_task_ids": message.get("referenceTaskIds") or None,
         "actor_chain": metadata.get("actorChain"),
         "metadata": {k: v for k, v in metadata.items() if k != "actorChain"} or None,
@@ -401,6 +560,7 @@ def _send_args(params: dict[str, Any]) -> dict[str, Any]:
 def _params(
     message: dict[str, Any],
     context_id: str | None,
+    task_id: str | None,
     reference_task_ids: list[str] | None,
     actor_chain: list[str] | None,
     metadata: dict[str, Any] | None,
@@ -413,7 +573,7 @@ def _params(
     combined = dict(metadata or {})
     if actor_chain:
         combined["actorChain"] = actor_chain
-    return {"message": message, "contextId": context_id, "metadata": combined}
+    return {"message": message, "contextId": context_id, "taskId": task_id, "metadata": combined}
 
 
 async def _wrap(rpc_id: Any, stream: AsyncIterator[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:

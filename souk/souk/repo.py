@@ -654,7 +654,7 @@ async def reopen_run(
     keep pointing at the same task for its whole life (see api_a2a.py's
     tasks/get, tasks/cancel) instead of needing to chase a resume chain.
 
-    Sets status back to 'queued' so PollForWork can hand it out again;
+    Sets status back to 'queued' so a claim can hand it out again;
     deliberately does not touch started_at (this run's *first* claim is
     still when it truly started, not this round) or completed_at (this
     round isn't done either — mirrors mark_run_status's 'input-required'
@@ -747,7 +747,7 @@ async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str
 
 async def touch_run_activity(session: AsyncSession, run_id: str) -> None:
     """Called whenever an event is relayed for a run — see
-    souk_server's AgentSession relay — so a run that's producing output
+    a worker reporting events — so a run that's producing output
     doesn't look stalled even without a status change.
     """
     await session.execute(
@@ -795,7 +795,7 @@ async def fail_orphaned_runs(session: AsyncSession) -> list[str]:
     """Called once on souk startup. souk's live dispatch state (souk.broker)
     is pure in-memory — a restart loses it entirely, so any run still
     'queued' or 'running' in the DB at that point will never be picked up
-    or completed again (PollForWork only ever consults the broker, not the
+    or completed again (claiming only ever consults the broker, not the
     DB). Mark them 'failed' so the DB stops claiming they're still live.
 
     Deliberately narrow: the WHERE clause only ever touches rows still in

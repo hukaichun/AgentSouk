@@ -62,6 +62,10 @@ async def _register(souk, name: str) -> tuple[str, str]:
 
 
 def _message(text: str) -> dict:
+    """Deliberately still the *original* part spelling (`type`, not v1.0's
+    bare `text` key). souk emits v1.0 but accepts every version it has ever
+    offered, and these tests are where that stays true — every delegation
+    below is an old-shaped caller getting a correct answer."""
     return {"role": "user", "parts": [{"type": "text", "text": text}]}
 
 
@@ -72,7 +76,7 @@ async def test_delegate_without_building_a_json_rpc_envelope(souk):
 
     task = await A2AAdapter(souk).send_task(callee_id, _message("do the thing"))
 
-    assert task["status"]["state"] == "completed"
+    assert task["status"]["state"] == "TASK_STATE_COMPLETED"
     assert task["id"].startswith("run_")
 
 
@@ -152,14 +156,14 @@ async def test_the_wire_rung_and_the_semantic_rung_agree(souk):
     direct = await adapter.send_task(callee_id, _message("hi"))
     envelope = await adapter.handle_rpc(
         callee_id,
-        {"jsonrpc": "2.0", "id": "1", "method": "tasks/send", "params": {"message": _message("hi")}},
+        {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": {"message": _message("hi")}},
     )
 
     assert envelope["jsonrpc"] == "2.0" and envelope["id"] == "1"
     via_wire = envelope["result"]
     # Same shape and outcome; only the ids differ, being separate tasks.
     assert via_wire.keys() == direct.keys()
-    assert via_wire["status"]["state"] == direct["status"]["state"] == "completed"
+    assert via_wire["status"]["state"] == direct["status"]["state"] == "TASK_STATE_COMPLETED"
 
 
 async def test_get_and_cancel_are_callable_without_an_envelope(souk):
@@ -172,7 +176,7 @@ async def test_get_and_cancel_are_callable_without_an_envelope(souk):
 
     # Already finished, so cancelling changes nothing — and says so honestly.
     cancelled = await adapter.cancel_task(callee_id, task["id"])
-    assert cancelled["status"]["state"] == "completed"
+    assert cancelled["status"]["state"] == "TASK_STATE_COMPLETED"
 
     with pytest.raises(RunNotFound):
         await adapter.get_task(callee_id, "run_does_not_exist")
