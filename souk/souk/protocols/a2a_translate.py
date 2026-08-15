@@ -1,163 +1,180 @@
-"""Translation between A2A (JSON-RPC task protocol) and AG-UI (event stream).
+"""Translation between A2A (task protocol) and AG-UI (event stream).
 
-This is a pragmatic mapping, not a byte-for-byte implementation of every
-corner of either spec: A2A Message.parts are reduced to plain text (no
-file/data parts), and every AG-UI event that isn't one of the handful of
-lifecycle/text-content types funnels into a generic "working" status update
-carrying the raw AG-UI event as metadata — so nothing silently disappears
-(this is exactly how sub-agent CUSTOM progress events stay visible to A2A
-callers, not just AG-UI ones), even if it isn't specially modeled yet.
+Every A2A shape here is built from `a2a.types.a2a_pb2` — the SDK's own v1.0
+definitions — and serialised with protobuf's JSON mapping. Nothing in this
+file spells a field name or an enum value by hand, which is the entire point:
+souk used to, and went two protocol versions without noticing. It answered
+`tasks/send`, emitted `{"type": "text"}` parts and `{"id": ...}` on update
+events, and nothing failed until a real client got `-32601`. A rename in the
+spec now breaks this file loudly, at import or at build time, instead of
+becoming a silent incompatibility.
 
-**Wire vocabulary is the current A2A spec's** (`kind` discriminators,
-`taskId`/`contextId` on stream events, `artifactId` on artifacts). souk used
-to emit the original spelling — `{"type": "text"}` parts and `{"id": ...}`
-on update events — which no longer matches any client built against the
-published schema. What souk *accepts* is deliberately wider than what it
-emits: an older caller sending `{"type": "text"}` still works, because
-being lenient inbound costs one `or` and being strict inbound breaks
-callers for nothing.
+What souk *emits* is v1.0 and only v1.0. What it accepts is wider — v1.0,
+v0.3 and souk's own original spelling — because being lenient inbound costs
+an `or` and being strict inbound breaks callers for nothing. That asymmetry
+is deliberate; see `a2a_message_to_agui_messages`.
 
-None of these shapes are checked against a library, because there isn't one
-here: souk depends on `ag-ui-protocol` for AG-UI and hand-writes A2A, so
-nothing tells you the spec moved. Everything below was read off
-`a2a-sdk`'s published models rather than from memory — see
-tests/test_a2a_translate.py, which pins the exact wire shapes.
+Still a pragmatic mapping rather than a complete one: A2A `Part`s are reduced
+to text (no file/data parts), and every AG-UI event that isn't one of the
+handful of lifecycle/text types funnels into a generic `WORKING` status
+update carrying the raw AG-UI event in `metadata` — so nothing silently
+disappears (this is how sub-agent CUSTOM progress events stay visible to A2A
+callers), even where it isn't specially modelled.
+
+One thing v0.3 had and v1.0 does not: `final` on an update. Finality is the
+stream ending, plus the terminal state in the last status — so souk no longer
+sends a flag for it.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from a2a.types import a2a_pb2 as pb
+from google.protobuf.json_format import MessageToDict
+
 # souk's run statuses <-> A2A's own task states. 'input-required' is
 # already A2A vocabulary (a task legitimately paused waiting on more
 # input) — reused as-is rather than inventing a souk-specific name, see
 # souk/pause.py.
 RUN_STATUS_TO_A2A_STATE = {
-    "queued": "submitted",
-    "running": "working",
-    "input-required": "input-required",
+    "queued": pb.TaskState.TASK_STATE_SUBMITTED,
+    "running": pb.TaskState.TASK_STATE_WORKING,
+    "input-required": pb.TaskState.TASK_STATE_INPUT_REQUIRED,
     # souk-specific bookkeeping status with no A2A equivalent (see
     # souk/schema.py) — from an external A2A caller's perspective its wait
     # did resolve, just via a new run/task rather than this one, so
-    # 'completed' is the closest honest answer to tasks/get on this id.
-    "resumed": "completed",
-    "completed": "completed",
-    "failed": "failed",
-    "cancelled": "canceled",
+    # COMPLETED is the closest honest answer to GetTask on this id.
+    "resumed": pb.TaskState.TASK_STATE_COMPLETED,
+    "completed": pb.TaskState.TASK_STATE_COMPLETED,
+    "failed": pb.TaskState.TASK_STATE_FAILED,
+    "cancelled": pb.TaskState.TASK_STATE_CANCELED,
+    # 'cancelling' is deliberately absent: souk has asked and does not yet
+    # know the answer, and A2A has no state for that. UNSPECIFIED is the
+    # honest one — see protocols/a2a's cancel_task.
 }
+
+# Terminal from A2A's point of view. Not sent on the wire (v1.0 has no
+# `final` field); souk uses it to decide whether a live watcher needs the
+# real outcome after the raw event stream ends.
+TERMINAL_STATES = frozenset(
+    {pb.TaskState.TASK_STATE_COMPLETED, pb.TaskState.TASK_STATE_FAILED, pb.TaskState.TASK_STATE_CANCELED}
+)
+
+
+def to_wire(message) -> dict[str, Any]:
+    """A protobuf message as the JSON A2A puts on the wire. Field names and
+    enum spellings come from the descriptor, so they cannot drift from the
+    spec without this failing."""
+    return MessageToDict(message)
+
+
+def state_for_run_status(run_status: str):
+    return RUN_STATUS_TO_A2A_STATE.get(run_status, pb.TaskState.TASK_STATE_UNSPECIFIED)
 
 
 def status_update_for_run_status(task_id: str, context_id: str, run_status: str) -> dict[str, Any]:
-    """Builds a TaskStatusUpdateEvent directly from a persisted run status,
-    for when there's no live AG-UI event stream to translate from (e.g.
-    a tasks/sendSubscribe call on a run that's already paused or finished
-    — see api_a2a.rpc's tasks/sendSubscribe handler).
+    """A StreamResponse carrying one status update, built straight from a
+    persisted run status — for when there is no live AG-UI event stream to
+    translate from (a subscribe on a run that is already paused or finished).
     """
-    state = RUN_STATUS_TO_A2A_STATE.get(run_status, "unknown")
-    return _status_update(task_id, context_id, state, final=state in ("completed", "failed", "canceled"))
+    return _status_update(task_id, context_id, state_for_run_status(run_status))
 
 
 def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, Any]]:
-    """No `id` here on purpose — repo.append_thread_messages assigns the
-    real, database-generated one for whatever it stores this under; an id
-    minted here would just be discarded.
+    """Inbound, and deliberately lenient about which spec version wrote it.
+
+    A text part is `{"text": ...}` in v1.0, `{"kind": "text", "text": ...}` in
+    v0.3 and `{"type": "text", "text": ...}` in the original — all three carry
+    the text under the same key, so souk reads the key and ignores the
+    discriminator entirely. Roles are `ROLE_USER`/`ROLE_AGENT` in v1.0 and
+    `user`/`agent` before it.
+
+    No `id` here on purpose — repo.append_thread_messages assigns the real,
+    database-generated one for whatever it stores this under; an id minted
+    here would just be discarded.
     """
-    role = "assistant" if a2a_message.get("role") == "agent" else "user"
+    raw_role = str(a2a_message.get("role", "")).upper()
+    role = "assistant" if raw_role in ("ROLE_AGENT", "AGENT") else "user"
     text = "".join(
-        # `kind` is the current spec's discriminator; `type` was the
-        # original one and is still what souk's own older clients send.
-        part.get("text", "")
-        for part in a2a_message.get("parts", [])
-        if (part.get("kind") or part.get("type")) == "text"
+        part["text"] for part in a2a_message.get("parts", []) if isinstance(part.get("text"), str)
     )
     return [{"role": role, "content": text}]
+
+
+def text_delta_of(event: dict[str, Any]) -> tuple[str, str] | None:
+    """(artifact_id, text) for an AG-UI event that carries assistant text,
+    None for anything else.
+
+    The artifact id is AG-UI's own messageId, so every delta of one assistant
+    message lands in one artifact instead of a new artifact per token.
+    """
+    if event.get("type") not in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
+        return None
+    return event.get("messageId") or "text", event.get("delta") or event.get("content") or ""
 
 
 def agui_event_to_a2a_update(event: dict[str, Any], task_id: str, context_id: str) -> dict[str, Any]:
     event_type = event.get("type")
 
     if event_type == "RUN_STARTED":
-        return _status_update(task_id, context_id, "working", final=False)
+        return _status_update(task_id, context_id, pb.TaskState.TASK_STATE_WORKING)
 
     if event_type == "RUN_FINISHED":
-        return _status_update(task_id, context_id, "completed", final=True)
+        return _status_update(task_id, context_id, pb.TaskState.TASK_STATE_COMPLETED)
 
     if event_type == "RUN_ERROR":
-        return _status_update(task_id, context_id, "failed", final=True, message=event.get("message"))
+        return _status_update(
+            task_id, context_id, pb.TaskState.TASK_STATE_FAILED, message=event.get("message")
+        )
 
-    if event_type in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
-        delta = event.get("delta") or event.get("content") or ""
-        return {
-            "kind": "artifact-update",
-            "taskId": task_id,
-            "contextId": context_id,
-            "artifact": {
-                # AG-UI's own messageId, so every delta of one assistant
-                # message lands in one artifact instead of a new artifact per
-                # token. `append` says exactly that: each chunk extends the
-                # artifact this id already named, and the first one creates
-                # it. Falls back to a per-task id for an event that carries
-                # no messageId, which keeps those chunks together too.
-                "artifactId": event.get("messageId") or f"{task_id}-text",
-                "parts": [{"kind": "text", "text": delta}],
-            },
-            "append": True,
-        }
+    delta = text_delta_of(event)
+    if delta is not None:
+        artifact_id, text = delta
+        # `append` is what says these chunks extend the artifact this id
+        # already named; the first one creates it.
+        return to_wire(
+            pb.StreamResponse(
+                artifact_update=pb.TaskArtifactUpdateEvent(
+                    task_id=task_id,
+                    context_id=context_id,
+                    artifact=pb.Artifact(artifact_id=artifact_id, parts=[pb.Part(text=text)]),
+                    append=True,
+                )
+            )
+        )
 
     # Fallback: surface every other AG-UI event (tool calls, state deltas,
-    # CUSTOM sub-agent progress, ...) as a non-final working update instead
+    # CUSTOM sub-agent progress, ...) as a non-terminal working update instead
     # of dropping it.
-    return _status_update(task_id, context_id, "working", final=False, agui_event=event)
+    return _status_update(task_id, context_id, pb.TaskState.TASK_STATE_WORKING, agui_event=event)
 
 
 def _status_update(
     task_id: str,
     context_id: str,
-    state: str,
+    state,
     *,
-    final: bool,
     message: Any = None,
     agui_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    status: dict[str, Any] = {"state": state}
+    status = pb.TaskStatus(state=state)
     if message is not None:
-        # A2A's TaskStatus.message is a Message, not a string — an AG-UI
-        # RUN_ERROR's `message` is the string, so it gets wrapped rather
-        # than dropped into a field whose schema it doesn't fit. The id is
-        # derived from the task so it stays stable if the same status is
-        # rebuilt from persisted state.
-        status["message"] = {
-            "kind": "message",
-            "messageId": f"{task_id}-error",
-            "role": "agent",
-            "parts": [{"kind": "text", "text": str(message)}],
-        }
+        # TaskStatus.message is a Message, not a string — an AG-UI RUN_ERROR
+        # carries the string, so it is wrapped rather than dropped into a
+        # field whose type it doesn't fit. The id is derived from the task so
+        # it stays stable if the same status is rebuilt from persisted state.
+        status.message.CopyFrom(
+            pb.Message(
+                message_id=f"{task_id}-error",
+                role=pb.Role.ROLE_AGENT,
+                parts=[pb.Part(text=str(message))],
+            )
+        )
+    update = pb.TaskStatusUpdateEvent(task_id=task_id, context_id=context_id, status=status)
     if agui_event is not None:
-        status["metadata"] = {"agui_event": agui_event}
-    return {
-        "kind": "status-update",
-        "taskId": task_id,
-        "contextId": context_id,
-        "status": status,
-        "final": final,
-    }
-
-
-def _join_text(parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Adjacent text parts become one. The stream sends a part per delta
-    because that is what arrived; a *finished* Task holding one part per
-    token is a transcript of the streaming, not the answer. Only adjacent
-    ones, so a future file/data part between two runs of text keeps them
-    apart.
-    """
-    joined: list[dict[str, Any]] = []
-    for part in parts:
-        previous = joined[-1] if joined else None
-        if previous is not None and previous.get("kind") == "text" and part.get("kind") == "text":
-            joined[-1] = {**previous, "text": previous["text"] + part["text"]}
-        else:
-            joined.append(part)
-    return joined
+        update.metadata.update({"agui_event": agui_event})
+    return to_wire(pb.StreamResponse(status_update=update))
 
 
 def build_task(
@@ -169,25 +186,28 @@ def build_task(
     echoed back here (A2A's own `Task.id`/`Task.contextId` fields)
     regardless of whatever the caller originally sent — the only way a
     caller learns the real ones to reuse on its next call.
+
+    Text is merged per assistant message, not per event: the stream sends a
+    delta at a time because that is what arrived, but a finished Task holding
+    one artifact per token is a transcript of the streaming rather than the
+    answer.
     """
-    # Merged by artifactId, in first-seen order: the stream sends one
-    # append-update per delta, but a finished Task should carry one artifact
-    # per assistant message with its text whole. A caller reading `artifacts`
-    # here used to get one artifact per token.
-    merged: dict[str, dict[str, Any]] = {}
+    merged: dict[str, list[str]] = {}
     for event in run_events:
-        artifact = agui_event_to_a2a_update(event, task_id, context_id).get("artifact")
-        if not artifact:
+        delta = text_delta_of(event)
+        if delta is None:
             continue
-        existing = merged.get(artifact["artifactId"])
-        if existing is None:
-            merged[artifact["artifactId"]] = dict(artifact)
-        else:
-            existing["parts"] = _join_text(existing["parts"] + artifact["parts"])
-    return {
-        "kind": "task",
-        "id": task_id,
-        "contextId": context_id,
-        "status": {"state": RUN_STATUS_TO_A2A_STATE.get(run_status, "unknown")},
-        "artifacts": list(merged.values()),
-    }
+        artifact_id, text = delta
+        merged.setdefault(artifact_id, []).append(text)
+
+    return to_wire(
+        pb.Task(
+            id=task_id,
+            context_id=context_id,
+            status=pb.TaskStatus(state=state_for_run_status(run_status)),
+            artifacts=[
+                pb.Artifact(artifact_id=artifact_id, parts=[pb.Part(text="".join(chunks))])
+                for artifact_id, chunks in merged.items()
+            ],
+        )
+    )

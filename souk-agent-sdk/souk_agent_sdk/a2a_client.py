@@ -1,16 +1,22 @@
-"""Minimal streaming A2A client: calls another agent's `message/stream`
-and yields each TaskStatusUpdateEvent/TaskArtifactUpdateEvent as it
-arrives. Used by agent-template's sub-agent-calling tool so a "main agent"
-can watch a sub-agent's progress live instead of only seeing its final
-result.
+"""Minimal streaming A2A client: calls another agent's `SendStreamingMessage`
+and yields each `StreamResponse` as it arrives. Used by agent-template's
+sub-agent-calling tool so a "main agent" can watch a sub-agent's progress live
+instead of only seeing its final result.
 
-`message/stream` is the current spec's name for what was `tasks/sendSubscribe`,
-and `contextId`/`taskId` now travel on the message rather than beside it.
-The task id is no longer the caller's to assign either: the callee's Task
-comes back with its own id, which is what a later `tasks/get` uses. This
-client sent the original spelling for a long time, and nothing here noticed —
-A2A is hand-written on both sides of this repo (see souk/protocols/a2a.py),
-so there is no dependency whose upgrade would have said so.
+Speaks A2A v1.0, which renamed nearly everything this file used to say. The
+JSON-RPC method names are the gRPC service's method names (`SendMessage`,
+`SendStreamingMessage`, `GetTask`, ...); `contextId`/`taskId` travel on the
+message rather than beside it; a text part is a bare `{"text": ...}` with no
+discriminator; and each streamed item is wrapped in a `StreamResponse` whose
+single key says what it is (`statusUpdate` / `artifactUpdate`).
+
+This client sent the original spelling for a long time and nothing noticed,
+which is why souk now takes `a2a-sdk` as a dependency — see
+souk/protocols/a2a_translate.py. This file deliberately does *not*: it is a
+15-line JSON-RPC POST, and making a provider SDK carry protobuf to send one
+would cost more than it protects. What protects it instead is the souk end,
+which builds every shape from the SDK's descriptors and would reject or fail
+to produce these if they drifted.
 """
 
 from __future__ import annotations
@@ -77,7 +83,9 @@ async def call_agent_streaming(
     if actor_chain is not None:
         metadata["actorChain"] = actor_chain
 
-    message: dict[str, Any] = {"role": "user", "parts": [{"kind": "text", "text": message_text}]}
+    # v1.0 `Part` is a oneof, so the field name is the type — no `kind`, no
+    # `type`. Role gained its enum prefix in the same move.
+    message: dict[str, Any] = {"role": "ROLE_USER", "parts": [{"text": message_text}]}
     if reference_task_ids:
         message["referenceTaskIds"] = reference_task_ids
     if context_id:
@@ -87,7 +95,7 @@ async def call_agent_streaming(
     if metadata:
         params["metadata"] = metadata
 
-    body = {"jsonrpc": "2.0", "id": request_id, "method": "message/stream", "params": params}
+    body = {"jsonrpc": "2.0", "id": request_id, "method": "SendStreamingMessage", "params": params}
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with aconnect_sse(client, "POST", a2a_rpc_url, json=body) as event_source:

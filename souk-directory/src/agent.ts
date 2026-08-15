@@ -195,21 +195,23 @@ function handleAguiEvent(event: any): void {
     clearTyping();
     const value = event.value || {};
     const subAgent = value.sub_agent || "sub-agent";
-    // `taskId` is where the current A2A spec carries it on a status/artifact
-    // update; `id` was the original spelling, kept as a fallback so this UI
-    // still groups correctly against an older souk.
-    const taskId = value.taskId || value.id || subAgent;
-    const state = value.status?.state;
+    // A2A v1.0 wraps every streamed item in a StreamResponse whose single
+    // key says what it is, rather than a bare update carrying a
+    // discriminator field.
+    const statusUpdate = value.statusUpdate || {};
+    const artifactUpdate = value.artifactUpdate || {};
+    const taskId = statusUpdate.taskId || artifactUpdate.taskId || subAgent;
+    const state = statusUpdate.status?.state;
 
-    if (state === "completed" || state === "failed") {
+    if (state === "TASK_STATE_COMPLETED" || state === "TASK_STATE_FAILED") {
       subAgentEls.delete(taskId);
       subAgentRaw.delete(taskId);
       return;
     }
 
-    const textParts = (value.artifact?.parts || []).filter(
-      (p: any) => (p.kind || p.type) === "text" && p.text,
-    );
+    // `Part` is a oneof, so a text part is just `{text}` — nothing else to
+    // match on.
+    const textParts = (artifactUpdate.artifact?.parts || []).filter((p: any) => p.text);
     if (textParts.length === 0) {
       // A status-only tick (e.g. the initial "working") — show a
       // placeholder once so the delegation is visible before any text

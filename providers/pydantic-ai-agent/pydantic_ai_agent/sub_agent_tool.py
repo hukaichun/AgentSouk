@@ -96,22 +96,25 @@ def _make_tool(sub: SubAgentConfig) -> Tool:
                     "value": {"sub_agent": sub.name, **update},
                 }
             )
-            returned_context_id = update.get("contextId")
+            # A2A v1.0 wraps every streamed item in a StreamResponse whose
+            # single key says what it is, rather than putting a bare update on
+            # the wire with a discriminator field inside it.
+            status_update = update.get("statusUpdate") or {}
+            artifact_update = update.get("artifactUpdate") or {}
+
+            returned_context_id = status_update.get("contextId") or artifact_update.get("contextId")
             if returned_context_id:
                 ctx.deps.sub_agent_context_ids[sub.name] = returned_context_id
-            state = update.get("status", {}).get("state")
-            if state == "failed":
+            state = status_update.get("status", {}).get("state")
+            if state == "TASK_STATE_FAILED":
                 failed = True
-            elif state == "input-required":
+            elif state == "TASK_STATE_INPUT_REQUIRED":
                 pending = True
-            artifact = update.get("artifact")
-            if artifact:
-                for part in artifact.get("parts", []):
-                    # `kind` is the current A2A discriminator; `type` was the
-                    # original one, still read so this tool keeps working
-                    # against a souk that hasn't been updated yet.
-                    if (part.get("kind") or part.get("type")) == "text":
-                        final_text += part["text"]
+            for part in (artifact_update.get("artifact") or {}).get("parts", []):
+                # `Part` is a oneof: a text part is `{"text": ...}` and
+                # anything else (file, data) simply has no `text` key.
+                if isinstance(part.get("text"), str):
+                    final_text += part["text"]
         if failed:
             return f"({sub.name} is currently unavailable — the call failed or timed out)"
         if pending:

@@ -16,6 +16,22 @@ dependencies = [
     "aiosqlite>=0.20",
     "pydantic-settings>=2.6",
     "ag-ui-protocol>=0.1.19",
+    # A2A's own types, for the same reason ag-ui-protocol is here: souk used
+    # to hand-write both sides of this protocol as string literals, and a
+    # spec that nothing imports rots silently — souk was still answering
+    # `tasks/send` and emitting `{"type": "text"}` parts two protocol
+    # versions after they were renamed, and nothing failed until a real
+    # client got -32601.
+    #
+    # Only the types are used (a2a.types.a2a_pb2 — the v1.0 protobuf
+    # definitions and the A2AService descriptor the method names are read
+    # from). None of the SDK's client, server or transport code is imported;
+    # those live behind extras (`http-server`, `grpc`, `fastapi`) that are
+    # deliberately not requested, so core stays free of a framework. Its base
+    # install does bring httpx and protobuf along, which is the one real cost
+    # here — see tests/test_core_is_network_free.py, which is now the only
+    # thing keeping core from importing them.
+    "a2a-sdk>=1.1,<2",
     "cryptography>=42.0",
     "pyjwt>=2.9",
     # Schema migrations — run as `alembic upgrade head` (see

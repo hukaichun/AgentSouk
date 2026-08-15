@@ -62,11 +62,15 @@ transport-specific", write eight lines that prove it instead.
   image, so `uv` re-downloaded everything at container start), a failing
   provider reached callers as a 200 with zero events, and A2A only answered
   to method names the spec had renamed. Run it after touching the wire.
-- **A protocol souk hand-writes will silently rot.** AG-UI comes from
-  `ag-ui-protocol`, so its shapes track the spec; A2A is string literals.
-  When changing either, read the shapes off the published package
-  (`a2a-sdk`'s models, `ag_ui.core`) rather than from memory or from what
-  the neighbouring code already does.
+- **A protocol souk hand-writes will silently rot, and reading the package
+  is not enough on its own — check *which version* you are reading.** A2A had
+  moved twice; the first fix landed on v0.3 because its shapes were read out
+  of a module called `a2a.compat.v0_3` without asking what it was
+  compatibility *for* (answer, in its own README's first line: for v1.0
+  systems talking to legacy v0.3 ones). Both protocols now come from a
+  package — `ag-ui-protocol` and `a2a-sdk` — and A2A's method names are read
+  off the `A2AService` descriptor so a rename fails at import. Keep it that
+  way: no A2A field name, enum value or method name gets typed by hand.
 
 ## Design invariants
 

@@ -38,7 +38,7 @@ docker compose --profile hermes-demo up -d --build hermes openai-compat-demo
 ```bash
 curl -X POST http://localhost:8000/a2a/hermes/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}'
+  -d '{"jsonrpc":"2.0","id":"1","method":"SendMessage","params":{"message":{"role":"ROLE_USER","parts":[{"text":"hi"}]}}}'
 ```
 
 ### Configuration gotchas (all discovered the hard way — see git history)

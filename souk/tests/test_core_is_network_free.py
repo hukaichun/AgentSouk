@@ -13,6 +13,13 @@ uvicorn, sse-starlette or grpcio, so an import would not even resolve) and by
 this test, which still runs because packaging protects against the accident
 and not against someone adding the dependency back.
 
+**`httpx` is the exception, and this test is now the only thing holding it.**
+souk depends on `a2a-sdk` for A2A's own types (see souk/protocols/
+a2a_translate.py — hand-writing that protocol drifted two versions without
+anything failing), and its base install brings httpx along. So `import httpx`
+in a core module would now resolve perfectly well. Nothing but the assertion
+below stops it.
+
 If it fails, the fix is that whatever needed a transport type belongs in
 souk-server, or needs a port (souk/worker.py is the example: a worker reaches
 core through plain method calls, so core never learns what carried them) so

@@ -247,7 +247,7 @@ curl http://localhost:8000/a2a/translator/.well-known/agent.json
 # 4. A2A: Trigger JSON-RPC task delegation
 curl -N -X POST http://localhost:8000/a2a/translator/rpc \
   -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":"1","method":"message/stream","params":{"message":{"role":"user","parts":[{"kind":"text","text":"Bonjour"}]}}}'
+  -d '{"jsonrpc":"2.0","id":"1","method":"SendStreamingMessage","params":{"message":{"role":"ROLE_USER","parts":[{"text":"Bonjour"}]}}}'
 ```
 
 ---

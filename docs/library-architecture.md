@@ -481,9 +481,9 @@ handle.cancel()
 a run has to be addressable three different ways at once and an iterator
 only covers one of them:
 
-- **Streaming** — AG-UI, and A2A's `message/stream`, consume events as
+- **Streaming** — AG-UI, and A2A's `SendStreamingMessage`, consume events as
   they arrive.
-- **Collect-and-return** — A2A's `message/send` drains the whole run and
+- **Collect-and-return** — A2A's `SendMessage` drains the whole run and
   answers with one `Task` object. Not streaming, but still needs every event.
 - **Address it later by id** — A2A's `tasks/get` and `tasks/cancel` come back
   to a run long after the call that started it. `Task.id` *is* the `run_id`,
@@ -492,8 +492,8 @@ only covers one of them:
 `is_live` marks a call that resolved to a run with nothing live to consume —
 already paused, already finished, or fast-failed because the target was
 offline. The answer has to be reconstructed from persisted state instead, and
-the two A2A methods reconstruct it *differently* (`message/send` replays
-stored events; `message/stream` emits one status update and closes), so the
+the two A2A methods reconstruct it *differently* (`SendMessage` replays
+stored events; `SendStreamingMessage` emits one status update and closes), so the
 condition is exposed rather than papered over.
 
 State queries, which is what makes souk usable as an embedded component
@@ -787,7 +787,7 @@ async for data in result.encode(): ...
 
 Publishing only the middle rung made in-process delegation absurd: one agent
 calling another inside the same process had to construct
-`{"jsonrpc": "2.0", "method": "message/send", ...}` to talk to itself, because
+`{"jsonrpc": "2.0", "method": "SendMessage", ...}` to talk to itself, because
 the envelope was the only way in. The envelope exists for transmission.
 `handle_rpc` is now a thin wrapper over the semantic methods — not a second
 implementation, which a test pins directly, since otherwise a remote caller
@@ -825,41 +825,79 @@ A2A client never has to deviate from its own spec to talk to souk.
 `cancelled`, for the same reason the database does — see the cancellation
 section above.
 
-### The A2A side has no library, and it showed
+### A2A comes from a library now, because hand-writing it failed twice
 
-AG-UI arrives as a dependency: souk requires `ag-ui-protocol`, so
+AG-UI always arrived as a dependency: souk requires `ag-ui-protocol`, so
 `RunAgentInput` and the event types come from the spec's own package and an
-upgrade is a version bump. A2A is hand-written here — method names are string
-literals in `souk/protocols/a2a.py`. Nothing tells you the spec moved.
+upgrade is a version bump. A2A was hand-written — method names as string
+literals, wire shapes as dict literals. Nothing tells you the spec moved.
 
-It had moved. `tasks/send` / `tasks/sendSubscribe` became `message/send` /
-`message/stream` when sending a message stopped being modelled as creating a
-task, `contextId` and `taskId` moved onto the message, parts changed their
-discriminator from `type` to `kind`, update events gained `kind` and renamed
-`id` to `taskId`, and artifacts gained a required `artifactId`. souk emitted
-and accepted none of it, so a client built against the published schema got
-`-32601 method not found` on its first call — found by pointing a real client
-at it, not by reading anything.
+It had moved twice.
 
-What is there now:
+| | souk shipped | v0.3 | v1.0 (current) |
+|---|---|---|---|
+| send | `tasks/send` | `message/send` | `SendMessage` |
+| stream | `tasks/sendSubscribe` | `message/stream` | `SendStreamingMessage` |
+| text part | `{"type": "text", ...}` | `{"kind": "text", ...}` | `{"text": ...}` — `Part` is a oneof, the field name *is* the type |
+| stream item | bare update, `{"id": ...}` | bare update, `{"kind": ..., "taskId": ...}` | wrapped in a `StreamResponse` (`statusUpdate` / `artifactUpdate`) |
+| terminal | `final: true` | `final: true` | no such field — the stream ending is the signal |
+| state | `"completed"` | `"completed"` | `"TASK_STATE_COMPLETED"` |
+| role | `"user"` | `"user"` | `"ROLE_USER"` |
+| card path | `/.well-known/agent.json` | same | `/.well-known/agent-card.json` |
+| card url | one `url` + `preferredTransport` | same | `supportedInterfaces[]`, each with its own binding and version |
 
-- both spellings accepted inbound, current spelling emitted. Old callers keep
-  working for a set lookup; new ones work at all.
-- `Message.taskId` resolves to that task's thread, and an unknown one is
-  `-32001`, not a quietly-fresh conversation.
-- `tasks/resubscribe`, which souk never had.
-- the agent card states `protocolVersion`, so the next client discovers the
-  method set instead of probing for it.
-- `tests/test_a2a_translate.py` compares whole dicts against shapes read off
-  `a2a-sdk`'s published models. That file is the substitute for the
-  dependency souk doesn't have.
+A client built from the published schema got `-32601` on its first call. That
+was found by pointing a real client at a running souk — and the *first* fix
+was wrong too, targeting v0.3, because its shapes were read out of a module
+named `a2a.compat.v0_3` without asking what it was compatibility *for*. Its
+README's opening line says: for v1.0 systems to interoperate with legacy v0.3
+ones.
 
-The dependency itself stays out: `a2a-sdk`'s types are import-clean pydantic,
-but installing it pulls `httpx`, `requests`, `protobuf` and `google-api-core`
-into core — precisely the transport weight packaging is used here to keep out
-(see "What `souk-server` is"). Re-check that trade if the SDK ever splits its
-types out; the reason to want it is that this whole section describes a
-rename nobody noticed for months.
+So souk now depends on `a2a-sdk` and holds no A2A vocabulary of its own:
+
+- every emitted shape is built from `a2a.types.a2a_pb2` and serialised with
+  protobuf's JSON mapping, so field names and enum spellings come from the
+  descriptor
+- the JSON-RPC method names are read off the `A2AService` descriptor —
+  `_method("SendMessage")` raises at import if the service stops offering it
+- `PROTOCOL_VERSION` is the SDK's `PROTOCOL_VERSION_CURRENT`, and the
+  well-known card path is its `AGENT_CARD_WELL_KNOWN_PATH`
+
+souk emits v1.0 and only v1.0, and accepts every spelling it has ever
+offered — v1.0, v0.3, and its own original. That asymmetry is deliberate:
+lenient inbound costs an `or`, strict inbound breaks callers for nothing. The
+SDK ships the same accommodation (`enable_v0_3_compat`), so it is the spec's
+own idea of politeness rather than souk's invention. The pre-v1 card path is
+served for the same reason — a card is what a client finds souk *with*.
+
+Also gained, since the spec had them and souk didn't: `Message.taskId`
+resolves to that task's thread (an unknown one is `-32001`, not a quietly
+fresh conversation), and `SubscribeToTask` for rejoining a stream.
+
+**The cost is real and was paid knowingly.** `a2a-sdk`'s base install brings
+`httpx`, `requests`, `protobuf` and `google-api-core` into core — the sort of
+weight the packaging split exists to keep out. Two consequences:
+
+- `tests/test_core_is_network_free.py` is now the *only* thing stopping a
+  core module importing `httpx`; packaging no longer backs it up. Its
+  docstring says so.
+- `protobuf<7` is now pinned transitively, which downgraded `grpcio-tools`
+  and made previously-generated `souk.proto` stubs unloadable
+  (gencode 7.35.1 against runtime 6.33.6). They are gitignored and
+  regenerated by `scripts/gen_proto.sh`, so this bites a stale working tree
+  rather than CI — but a protobuf major in either direction will bite again.
+
+None of the SDK's client, server or transport code is imported; those live
+behind extras (`http-server`, `grpc`, `fastapi`) that are deliberately not
+requested. `a2a.types.a2a_pb2` imports nothing from the forbidden list, which
+is what makes this survivable at all.
+
+**Where this rule is not yet applied:** A2A also defines a gRPC binding, and
+souk serves A2A over JSON-RPC only. If that changes, the stubs must come from
+`a2a-sdk`, not from a hand-written `.proto`. souk's own `proto/souk.proto` is
+a different hop entirely — provider-to-souk work claiming, which A2A has no
+concept of — and its envelopes carry opaque `json_payload`, so it duplicates
+no A2A type.
 
 ## What `souk-server` is
 
