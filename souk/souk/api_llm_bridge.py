@@ -28,8 +28,6 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -37,24 +35,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk import repo
-from souk.broker import broker
-from souk.db import get_session
+from souk.core import Souk
+from souk.deps import get_session, get_souk
 from souk.identity import is_timestamp_fresh, verify_signature
-from souk.ids import new_id
-from souk.kyok import KyokToken, verify_kyok_token
+from souk.kyok import COMPLETION_DONE, KyokToken, verify_kyok_token
 
 logger = logging.getLogger("souk.api_llm_bridge")
 
 router = APIRouter()
 
-# Sentinel put on a completion's response_queue once its bridge finishes
-# sending chunks (or the /kyok/respond connection drops) — mirrors
-# broker.END_OF_STREAM.
-_DONE = object()
-
 # How long a provider's completion request waits, queued, for the
 # caller's bridge to notice it via /kyok/poll before souk gives up —
-# same purpose as souk.config.settings.queued_timeout_seconds for
+# same purpose as CoreSettings.queued_timeout_seconds for
 # ordinary runs, kept local rather than shared since a KYOK completion is
 # expected to be claimed far faster than a run (the caller's bridge is
 # meant to be polling continuously for the run's whole duration, not
@@ -62,74 +54,15 @@ _DONE = object()
 CLAIM_TIMEOUT_SECONDS = 30.0
 
 
-@dataclass
-class PendingCompletion:
-    session_id: str
-    body: dict[str, Any]
-    response_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
-    claimed: bool = False
-
-
-class KyokBridge:
-    """In-memory registry connecting a provider's queued completion
-    requests to whichever caller session they belong to — same
-    single-process assumption as broker.RunBroker (see its module
-    docstring), for the same reason: none of this needs to survive a
-    restart.
-    """
-
-    def __init__(self) -> None:
-        self._pending_by_session: dict[str, deque[str]] = defaultdict(deque)
-        self._requests: dict[str, PendingCompletion] = {}
-        self._wake_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
-
-    def submit(self, session_id: str, body: dict[str, Any]) -> tuple[str, asyncio.Queue[Any]]:
-        request_id = new_id("kyokreq")
-        pending = PendingCompletion(session_id=session_id, body=body)
-        self._requests[request_id] = pending
-        self._pending_by_session[session_id].append(request_id)
-        for event in self._wake_subscribers.get(session_id, ()):
-            event.set()
-        return request_id, pending.response_queue
-
-    async def poll_one(self, session_id: str, wait_seconds: float) -> dict[str, Any] | None:
-        """Returns `{"requestId": ..., "body": ...}` for the next
-        completion queued for `session_id`, waiting up to `wait_seconds`
-        if none is queued yet (0 means return immediately either way).
-        None if nothing showed up within the wait.
-        """
-        queue = self._pending_by_session[session_id]
-        if not queue and wait_seconds > 0:
-            event = asyncio.Event()
-            self._wake_subscribers[session_id].add(event)
-            try:
-                await asyncio.wait_for(event.wait(), timeout=wait_seconds)
-            except asyncio.TimeoutError:
-                pass
-            finally:
-                self._wake_subscribers[session_id].discard(event)
-        if not queue:
-            return None
-        request_id = queue.popleft()
-        pending = self._requests.get(request_id)
-        if pending is None:
-            return None
-        pending.claimed = True
-        return {"requestId": request_id, "body": pending.body}
-
-    def get(self, request_id: str) -> PendingCompletion | None:
-        return self._requests.get(request_id)
-
-    def forget(self, request_id: str) -> None:
-        self._requests.pop(request_id, None)
-
-
-bridge = KyokBridge()
 
 
 @router.get("/kyok/poll")
-async def poll(session_id: str = Query(..., alias="sessionId"), wait_seconds: float = Query(25.0, alias="waitSeconds")) -> dict:
-    result = await bridge.poll_one(session_id, wait_seconds)
+async def poll(
+    session_id: str = Query(..., alias="sessionId"),
+    wait_seconds: float = Query(25.0, alias="waitSeconds"),
+    souk: Souk = Depends(get_souk),
+) -> dict:
+    result = await souk.kyok_bridge.poll_one(session_id, wait_seconds)
     return {"requests": [result] if result else []}
 
 
@@ -178,13 +111,17 @@ async def _verify_caller_identity(
 
 
 @router.post("/kyok/v1/chat/completions", response_model=None)
-async def chat_completions(request: Request, session: AsyncSession = Depends(get_session)) -> StreamingResponse | JSONResponse:
-    token = verify_kyok_token(_bearer_token(request))
+async def chat_completions(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+    souk: Souk = Depends(get_souk),
+) -> StreamingResponse | JSONResponse:
+    token = verify_kyok_token(_bearer_token(request), souk.settings.token_signing_secret)
     if token is None:
         raise HTTPException(status_code=401, detail="invalid or expired KYOK token")
 
-    run = broker.get(token.run_id)
-    if run is None or run.cancelled or run.agent_id != token.agent_id:
+    run = souk.broker.get(token.run_id)
+    if run is None or run.cancel_requested or run.agent_id != token.agent_id:
         # Either this run has already finished/been forgotten (broker.
         # RunBroker.forget — souk's pipeline task calls this the moment a
         # run terminates, see broker.py's _pipeline), was cancelled, or
@@ -205,13 +142,13 @@ async def chat_completions(request: Request, session: AsyncSession = Depends(get
 
     body = json.loads(raw_body)
     stream_requested = bool(body.get("stream"))
-    request_id, response_queue = bridge.submit(token.session_id, body)
+    request_id, response_queue = souk.kyok_bridge.submit(token.session_id, body)
 
     async def drain():
         try:
             while True:
                 item = await asyncio.wait_for(response_queue.get(), timeout=CLAIM_TIMEOUT_SECONDS)
-                if item is _DONE:
+                if item is COMPLETION_DONE:
                     return
                 yield item
         except asyncio.TimeoutError as e:
@@ -219,7 +156,7 @@ async def chat_completions(request: Request, session: AsyncSession = Depends(get
                 status_code=502, detail="no KYOK bridge claimed this completion in time"
             ) from e
         finally:
-            bridge.forget(request_id)
+            souk.kyok_bridge.forget(request_id)
 
     if stream_requested:
 
@@ -238,7 +175,7 @@ async def chat_completions(request: Request, session: AsyncSession = Depends(get
 
 
 @router.post("/kyok/respond/{request_id}")
-async def respond(request_id: str, request: Request) -> dict:
+async def respond(request_id: str, request: Request, souk: Souk = Depends(get_souk)) -> dict:
     """The caller's bridge streams the real LLM's response back here as
     newline-delimited JSON chunks (one OpenAI-shaped streaming chunk per
     line) — read incrementally off the request body as they arrive
@@ -248,7 +185,7 @@ async def respond(request_id: str, request: Request) -> dict:
     done sending (EOF), which is also the moment souk stops relaying to
     the provider — see chat_completions' drain().
     """
-    pending = bridge.get(request_id)
+    pending = souk.kyok_bridge.get(request_id)
     if pending is None:
         raise HTTPException(status_code=404, detail=f"no pending KYOK completion '{request_id}'")
 
@@ -268,7 +205,7 @@ async def respond(request_id: str, request: Request) -> dict:
                 pending.response_queue.put_nowait({"error": message["error"]})
                 break
             pending.response_queue.put_nowait(message)
-    pending.response_queue.put_nowait(_DONE)
+    pending.response_queue.put_nowait(COMPLETION_DONE)
     return {"ok": True}
 
 

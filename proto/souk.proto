@@ -33,11 +33,12 @@ service SoukAgentGateway {
   //   3. sdk->souk: zero or more envelopes, each carrying one AG-UI event
   //      JSON for that run_id.
   //   4. sdk->souk: a final envelope for that run_id with end_of_stream
-  //      true.
-  //   5. souk->sdk: an envelope for that run_id with ack true, once souk
-  //      has fully persisted and relayed every event for that run_id —
-  //      the SDK's confirmation that the call was fully consumed, not
-  //      just sent.
+  //      true. Nothing comes back for that run_id afterwards — souk owns
+  //      durability from the moment it has the events, and an agent has
+  //      no recovery action available if that fails (it has already
+  //      produced and discarded them), so there is deliberately no
+  //      completion acknowledgement here. Whether a run persisted is a
+  //      question its *caller* asks, via the run's own status.
   // Multiple run_ids can be in flight concurrently on the same stream.
   rpc AgentSession(stream AgentEventEnvelope) returns (stream AgentEventEnvelope);
 }
@@ -77,7 +78,12 @@ message AgentEventEnvelope {
   string agent_id = 2;
   string json_payload = 3;
   bool end_of_stream = 4;
-  bool ack = 5;
+  // 5 was `bool ack`: souk->sdk confirmation that a finished run had been
+  // fully persisted. Removed — the SDK could only ever log it (it has no
+  // replay path if souk failed), while it cost a round trip per run and a
+  // 5s stall whenever the frame went astray. Reserved rather than reused
+  // so an old SDK's field 5 can never be misread as something else.
+  reserved 5;
   // souk->sdk only: the run's consumer is gone (HTTP/SSE caller
   // disconnected, or an explicit A2A tasks/cancel) and souk will never
   // read another event for this run_id. The SDK should stop iterating

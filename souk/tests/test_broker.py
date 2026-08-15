@@ -75,8 +75,8 @@ async def test_pipeline_dispatches_commands_to_the_right_handler_in_order():
 
     handlers = {Claim: on_claim, RelayEvent: on_relay, FinishStream: on_finish}
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui", handlers)
-    run.in_queue.put_nowait(Claim(outbound=asyncio.Queue()))
-    run.in_queue.put_nowait(RelayEvent(json_payload="{}"))
+    run.in_queue.put_nowait(Claim(provider=object()))
+    run.in_queue.put_nowait(RelayEvent({}))
     run.in_queue.put_nowait(FinishStream())
 
     await _until(lambda: calls == ["claim", "relay", "finish"])
@@ -108,7 +108,7 @@ async def test_pipeline_terminates_immediately_on_cancel_before_any_claim():
         seen.append("cancel")
 
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui", {RequestCancel: on_cancel})
-    assert run.agent_outbound is None
+    assert run.provider is None
     run.in_queue.put_nowait(RequestCancel())
 
     await _until(lambda: broker.get("run_1") is None)
@@ -119,15 +119,16 @@ async def test_pipeline_terminates_immediately_on_cancel_before_any_claim():
 async def test_pipeline_stays_alive_after_cancel_once_claimed_waiting_for_finish():
     """Mirrors the real fix this whole pipeline exists for: once claimed,
     a cancel must not end the pipeline by itself — it has to wait for the
-    agent's own FinishStream (its unwind-after-cancel acknowledgment), or
-    a straggler end_of_stream from the agent would arrive at an
-    already-forgotten run and never get an ack back to it.
+    agent's own FinishStream (its unwind-after-cancel signal). Ending
+    early would forget the run while the agent is still unwinding, so its
+    straggler events and end_of_stream would arrive at an unknown run_id
+    and be logged as errors rather than absorbed.
     """
     broker = RunBroker()
     seen: list[str] = []
 
     async def on_claim(run, cmd):
-        run.agent_outbound = cmd.outbound
+        run.provider = cmd.provider
 
     async def on_cancel(run, cmd):
         seen.append("cancel")
@@ -137,7 +138,7 @@ async def test_pipeline_stays_alive_after_cancel_once_claimed_waiting_for_finish
 
     handlers = {Claim: on_claim, RequestCancel: on_cancel, FinishStream: on_finish}
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui", handlers)
-    run.in_queue.put_nowait(Claim(outbound=asyncio.Queue()))
+    run.in_queue.put_nowait(Claim(provider=object()))
     run.in_queue.put_nowait(RequestCancel())
 
     await _until(lambda: seen == ["cancel"])
@@ -159,9 +160,9 @@ def test_request_cancel_marks_the_run_synchronously_before_any_pipeline_processi
     """
     broker = RunBroker()
     run = broker.enqueue_run("run_1", "agent_1", "thread_1", {}, "ag-ui")
-    assert not run.cancelled
+    assert not run.cancel_requested
     request_cancel(run)
-    assert run.cancelled
+    assert run.cancel_requested
     assert run.in_queue.qsize() == 1
 
 

@@ -20,7 +20,7 @@ Exactly one task per run (`_pipeline`, spawned by `enqueue_run`) reads
 `in_queue` and is the *only* code that ever mutates a Run's fields —
 dispatching each command to a handler function ("function objects", see
 grpc_server.py's HANDLERS) supplied by the caller — with one deliberate
-exception: `Run.cancelled` (see its own docstring below). Everything
+exception: `Run.cancel_requested` (see its own docstring below). Everything
 *else* about cancelling a run — the DB write, telling the agent to stop —
 is genuinely multi-step, has to happen in order relative to this run's
 other commands, and belongs on the pipeline like everything else. Whether
@@ -43,10 +43,16 @@ broker.poll() hands out already-cancelled runs because it can't see
 `cancelled` go true until the pipeline processes a queued command that
 just hasn't run yet. See git history on this file for both.)
 
+A RunBroker instance belongs to one Souk (see souk/core.py) rather than
+being a module-level singleton — same reasoning as its settings and engine,
+and what would let a distributed implementation substitute here without
+touching any caller (see docs/library-architecture.md on horizontal
+scaling).
+
 souk runs as a single process holding both the HTTP server and the gRPC
 server on one event loop, so all of this is implemented with plain
-asyncio primitives rather than round-tripping through Postgres. Postgres
-(souk/db.py) is the durable record for anything that needs to survive a
+asyncio primitives rather than round-tripping through the database. The
+database (souk/schema.py) is the durable record for anything that needs to survive a
 restart or be queried after the fact (roster, thread history, run
 status, run_events) — it is not on the live event-relay hot path.
 """
@@ -68,25 +74,30 @@ END_OF_STREAM = object()
 
 # ---- Commands: pure data, pushed onto a run's in_queue. What each one
 # means and who's allowed to handle it lives in whoever supplies the
-# HandlerMap (see grpc_server.HANDLERS) — broker.py only needs to know
-# these exist, not what they do.
+# HandlerMap (see souk.handlers) — broker.py only needs to know these
+# exist, not what they do.
 
 
 @dataclass
 class Claim:
     """An agent has claimed this run and is ready to receive its input —
-    carries the specific AgentSession connection's outbound queue that
-    owns it from here on (see grpc_server._handle_claim).
+    carries the AgentProvider (see souk/providers.py) that owns it from
+    here on. Deliberately a provider rather than a transport-specific
+    channel: a run is claimed the same way whether the agent is a local
+    Python object or a remote one reached over a wire.
     """
 
-    outbound: asyncio.Queue[Any]
+    provider: Any
 
 
 @dataclass
 class RelayEvent:
-    """The agent relayed one AG-UI event JSON for this run."""
+    """One AG-UI event the agent produced for this run — as its own
+    payload, not a wire frame; whatever transport carried it has already
+    been peeled off by the time this exists (see souk.handlers._pump).
+    """
 
-    json_payload: str
+    event: Any
 
 
 @dataclass
@@ -103,7 +114,7 @@ class RequestCancel:
     the agent to stop, sending out_queue its END_OF_STREAM — handled by
     grpc_server._handle_cancel on the run's own pipeline task. Pushed by
     `request_cancel` below, never directly — see that function for the
-    synchronous half (`Run.cancelled`) this doesn't cover.
+    synchronous half (`Run.cancel_requested`) this doesn't cover.
     """
 
 
@@ -145,26 +156,36 @@ class Run:
     # pause/resume round under the same run_id — see repo.reopen_run.
     round_starting_seq: int = 0
     pause_payload: dict[str, Any] | None = None
-    agent_outbound: asyncio.Queue[Any] | None = None
-    # The one field anyone may set directly, synchronously, from any
-    # thread of control — see request_cancel() below. Everything that
-    # reacts to a run being cancelled reads this rather than waiting on
-    # RequestCancel to reach the front of in_queue:
-    #   - broker.poll() won't hand an already-cancelled run to an agent
-    #     in the first place.
-    #   - grpc_server._handle_claim double-checks it for the narrow race
-    #     poll() can't close (already handed out, cancelled before the
-    #     agent's claim envelope arrives) and bounces a cancel signal
-    #     back immediately instead of delivering input nobody wants.
-    #   - grpc_server._handle_finish checks it so the agent's own
-    #     end_of_stream (sent once it unwinds from the cancel) doesn't
-    #     overwrite the "cancelled" DB status back to "completed".
-    # That last one *was* a real race in an earlier version of this
-    # (_handle_cancel and _handle_finish running concurrently) — not
-    # anymore: both are only ever invoked from this run's own pipeline
-    # task, serialized like every other command, so by the time
-    # _handle_finish runs, _handle_cancel (if it ran at all) already has.
-    cancelled: bool = False
+    # The claimed run's agent, set by the Claim handler. None until an
+    # agent takes the run — which several places test for, since "never
+    # claimed" and "claimed then cancelled" need different handling.
+    provider: Any | None = None
+    # The task draining `provider`'s event stream into this run's in_queue
+    # (see souk.handlers._pump). Cancelling it is how a cancel reaches the
+    # agent: the pump closes the stream on its way out, which is the
+    # provider's signal to stop.
+    pump_task: asyncio.Task | None = None
+    # "Someone asked for this run to stop" — NOT "this run was cancelled".
+    # souk knows the first for certain; the second is only knowable once
+    # the agent's stream actually ends, because a provider is free to
+    # ignore the request and run to completion, and then the honest
+    # outcome is `completed` (see handlers._handle_finish's decision).
+    #
+    # The one field anyone may set directly, synchronously, from any thread
+    # of control — see request_cancel() below. Read by:
+    #   - poll(), which won't hand out a run whose cancel was already
+    #     requested.
+    #   - handlers._handle_claim, for the narrow race poll() can't close
+    #     (already handed out, request arrived before the claim); it
+    #     declines to hand the run over at all.
+    #   - handlers._handle_finish, which needs it to tell "stopped early
+    #     because we asked" apart from "stopped early because it broke".
+    cancel_requested: bool = False
+    # Set by _handle_relay when the agent emits a terminal event, so
+    # _handle_finish can tell a run that genuinely finished from one whose
+    # stream simply stopped. Absence is the only "it didn't finish" signal
+    # AG-UI has — there is no cancelled event or outcome in the protocol.
+    saw_run_finished: bool = False
     in_queue: asyncio.Queue[Command] = field(default_factory=asyncio.Queue)
     out_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
 
@@ -172,7 +193,7 @@ class Run:
 def request_cancel(run: Run) -> None:
     """The one correct way to cancel a run — call this, don't push
     RequestCancel directly. Splits into exactly the two halves described
-    on `Run.cancelled` and `RequestCancel`: flips the flag immediately so
+    on `Run.cancel_requested` and `RequestCancel`: flips the flag immediately so
     the rest of the system (chiefly broker.poll(), and
     grpc_server._handle_claim's narrower fallback check for the case
     poll() already handed the run out) can react without delay, then
@@ -187,7 +208,7 @@ def request_cancel(run: Run) -> None:
     is an `await`), so this would still be safe to call from a context
     that was mid-teardown, if one ever needs to again.
     """
-    run.cancelled = True
+    run.cancel_requested = True
     run.in_queue.put_nowait(RequestCancel())
 
 
@@ -222,7 +243,7 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
       grpc_server._handle_fail); no FinishStream is ever coming for one
       of these either.
     - RequestCancel, but only if the run was never claimed
-      (`agent_outbound is None`) — an explicit tasks/cancel (the only
+      (`provider is None`) — an explicit tasks/cancel (the only
       thing that ever pushes this; see broker.request_cancel) arriving
       before any agent claimed the run means no FinishStream will ever
       come for it. If it *was* already claimed, this does not terminate
@@ -243,13 +264,18 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
             logger.exception("run %s: error handling %s", run.run_id, type(cmd).__name__)
         if isinstance(cmd, (FinishStream, Fail)):
             break
-        if isinstance(cmd, RequestCancel) and run.agent_outbound is None:
+        if isinstance(cmd, RequestCancel) and run.provider is None:
             break
     owner.forget(run.run_id)
 
 
 class RunBroker:
-    def __init__(self) -> None:
+    def __init__(self, spawn=None) -> None:
+        # How a run's pipeline task gets started. A Souk passes its own
+        # spawn (see souk/core.py) so the task is supervised and can be
+        # cancelled and awaited at shutdown; the default keeps this class
+        # usable on its own, which its tests rely on.
+        self._spawn = spawn or self._spawn_unsupervised
         self._runs: dict[str, Run] = {}
         self._pending_by_agent: dict[str, deque[str]] = defaultdict(deque)
         # Lets a long-polling PollForWork call block until a run actually
@@ -302,17 +328,21 @@ class RunBroker:
         for event in self._wake_subscribers.get(agent_id, ()):
             event.set()
         if handlers is not None:
-            # asyncio.create_task() doesn't itself keep the task alive —
-            # nothing else in this process holds a reference to a run's
-            # pipeline task otherwise, which makes it a candidate for
-            # garbage collection mid-run (a real, not hypothetical,
-            # failure mode: this is exactly what silently killed it under
-            # test). _pipeline_tasks is that reference; the done-callback
-            # is just bookkeeping so the set doesn't grow unbounded.
-            task = asyncio.create_task(_pipeline(run, handlers, self))
-            self._pipeline_tasks.add(task)
-            task.add_done_callback(self._pipeline_tasks.discard)
+            self._spawn(_pipeline(run, handlers, self), name=f"pipeline:{run_id}")
         return run
+
+    def _spawn_unsupervised(self, coro, *, name: str | None = None) -> asyncio.Task:
+        # asyncio.create_task() doesn't itself keep the task alive — nothing
+        # else in this process holds a reference to a run's pipeline task
+        # otherwise, which makes it a candidate for garbage collection
+        # mid-run (a real, not hypothetical, failure mode: this is exactly
+        # what silently killed it under test). _pipeline_tasks is that
+        # reference; the done-callback is just bookkeeping so the set
+        # doesn't grow unbounded.
+        task = asyncio.create_task(coro, name=name)
+        self._pipeline_tasks.add(task)
+        task.add_done_callback(self._pipeline_tasks.discard)
+        return task
 
     def subscribe_wake(self, agent_ids: list[str]) -> asyncio.Event:
         event = asyncio.Event()
@@ -335,7 +365,7 @@ class RunBroker:
         caller explicitly reported "no spare capacity right now", so
         nothing is claimed — distinct from None, not a stand-in for it.
 
-        Filters out already-cancelled runs (see Run.cancelled) rather
+        Filters out runs already asked to stop (see Run.cancel_requested) rather
         than ever handing one to an agent — dropped silently here, not
         counted against max_claim, same as an already-forgotten run_id.
         This is what actually closes the "cancelled before ever being
@@ -361,7 +391,7 @@ class RunBroker:
                 run_id = queue.popleft()
                 progressed = True
                 run = self._runs.get(run_id)
-                if run is not None and not run.cancelled:
+                if run is not None and not run.cancel_requested:
                     found.append(run)
             if not progressed:
                 break
@@ -370,8 +400,11 @@ class RunBroker:
     def get(self, run_id: str) -> Run | None:
         return self._runs.get(run_id)
 
+    def active_run_ids(self) -> list[str]:
+        """Every run currently in dispatch. Live in-memory state, distinct
+        from the database's view — which also holds runs that already
+        finished."""
+        return list(self._runs)
+
     def forget(self, run_id: str) -> None:
         self._runs.pop(run_id, None)
-
-
-broker = RunBroker()

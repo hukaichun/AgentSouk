@@ -7,6 +7,10 @@ queries are dialect-neutral (see souk/schema.py, souk/repo.py), so both
 backends exercise the same semantics. See CONTRIBUTING.md for the Postgres
 setup.
 
+Settings are constructed explicitly here (see souk/core.py) rather than
+arranged in `os.environ` before the first souk import — that ordering
+constraint is exactly what injecting settings removed.
+
 Tests aren't wrapped in a rolled-back transaction: souk.repo's functions
 call session.commit() internally throughout (e.g. register_agents,
 create_run), so a single outer transaction can't cleanly contain a whole
@@ -24,53 +28,65 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-# Set before importing any souk module: souk.config.Settings loads at import
-# time (souk.db / souk.server pull it in below), so the backend URL and the
-# required signing secret must already be in the environment. Both use
-# setdefault, so exporting SOUK_DATABASE_URL (e.g. a Postgres DSN) before
-# pytest still wins — this only supplies the zero-config SQLite default.
-_DEFAULT_TEST_DB = Path(tempfile.gettempdir()) / "souk_pytest.db"
-os.environ.setdefault("SOUK_DATABASE_URL", f"sqlite+aiosqlite:///{_DEFAULT_TEST_DB}")
-os.environ.setdefault("SOUK_TOKEN_SIGNING_SECRET", "test-signing-secret")
+import jwt
+import pytest
+from alembic import command
+from alembic.config import Config
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncSession
 
-import jwt  # noqa: E402
-import pytest  # noqa: E402
-from alembic import command  # noqa: E402
-from alembic.config import Config  # noqa: E402
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey  # noqa: E402
-from httpx import ASGITransport, AsyncClient  # noqa: E402
-from sqlalchemy.engine import make_url  # noqa: E402
-from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
-
-from souk.db import SessionLocal, engine  # noqa: E402
-from souk.identity import registration_signing_payload  # noqa: E402
-from souk.server import app  # noqa: E402
+from souk.config import CoreSettings
+from souk.core import Souk
+from souk.identity import registration_signing_payload
+from souk.server import create_app
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+
+TEST_SIGNING_SECRET = "test-signing-secret"
+
+# Postgres when a DSN is exported, a throwaway SQLite file otherwise.
+DATABASE_URL = os.environ.get(
+    "SOUK_DATABASE_URL", f"sqlite+aiosqlite:///{Path(tempfile.gettempdir()) / 'souk_pytest.db'}"
+)
 
 # FK-safe teardown order (children before parents) for the SQLite path,
 # where there's no TRUNCATE ... CASCADE. Postgres uses TRUNCATE directly.
 _TABLES_CHILD_FIRST = ("run_events", "thread_history", "threads", "agents", "providers")
 
-_IS_POSTGRES = engine.sync_engine.dialect.name == "postgresql"
+
+@pytest.fixture(scope="session")
+def settings() -> CoreSettings:
+    return CoreSettings(database_url=DATABASE_URL, token_signing_secret=TEST_SIGNING_SECRET)
+
+
+@pytest.fixture(scope="session")
+def souk(settings: CoreSettings) -> Souk:
+    return Souk(settings)
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _schema() -> None:
+def _schema(settings: CoreSettings) -> None:
     # Start each SQLite run from a clean file so a schema change between
     # runs can't leave a stale table lying around (Postgres relies on the
     # migration + per-test cleanup instead — its DB isn't disposable here).
-    url = make_url(os.environ["SOUK_DATABASE_URL"])
+    url = make_url(settings.database_url)
     if url.get_backend_name() == "sqlite" and url.database:
         for suffix in ("", "-wal", "-shm"):
             Path(url.database + suffix).unlink(missing_ok=True)
+    # alembic/env.py reads SOUK_DATABASE_URL from the environment (it
+    # deliberately doesn't import souk.config), so migrations still go
+    # through the environment even though the app itself no longer does.
+    os.environ["SOUK_DATABASE_URL"] = settings.database_url
     command.upgrade(Config(str(ALEMBIC_INI)), "head")
 
 
 @pytest.fixture(autouse=True)
-async def _clean_db() -> AsyncIterator[None]:
-    async with engine.begin() as conn:
-        if _IS_POSTGRES:
+async def _clean_db(souk: Souk) -> AsyncIterator[None]:
+    is_postgres = souk.engine.sync_engine.dialect.name == "postgresql"
+    async with souk.engine.begin() as conn:
+        if is_postgres:
             await conn.exec_driver_sql(
                 "TRUNCATE providers, agents, threads, thread_history, run_events "
                 "RESTART IDENTITY CASCADE"
@@ -82,14 +98,14 @@ async def _clean_db() -> AsyncIterator[None]:
 
 
 @pytest.fixture
-async def session() -> AsyncIterator[AsyncSession]:
-    async with SessionLocal() as s:
+async def session(souk: Souk) -> AsyncIterator[AsyncSession]:
+    async with souk.session() as s:
         yield s
 
 
 @pytest.fixture
-async def client() -> AsyncIterator[AsyncClient]:
-    transport = ASGITransport(app=app)
+async def client(souk: Souk) -> AsyncIterator[AsyncClient]:
+    transport = ASGITransport(app=create_app(souk))
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
 

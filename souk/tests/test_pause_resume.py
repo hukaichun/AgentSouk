@@ -8,8 +8,8 @@
    is decided fresh each time, purely by whether the callee's own thread
    can currently accept a new run (repo.get_active_run_for_thread) — no
    subscription, no auto-resume, nothing for a delegating agent to
-   declare. api_a2a._finalize_delegated_call just reads back the
-   callee's honest status; it registers no interest in it anywhere.
+   declare. Finishing a delegated call just reads back the callee's
+   honest status (protocols.a2a); it registers no interest anywhere.
 """
 
 from __future__ import annotations
@@ -17,12 +17,11 @@ from __future__ import annotations
 import json
 
 from souk import repo
-from souk.api_a2a import _finalize_delegated_call
-from souk.broker import FinishStream, RelayEvent, broker
-from souk.grpc_server import _handle_finish, _handle_relay
+from souk.broker import FinishStream, RelayEvent
+from souk.handlers import _handle_finish, _handle_relay
 
 
-async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity):
+async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_identity):
     """A provider's own RUN_FINISHED outcome (AG-UI's native interrupt
     mechanism, no souk-specific CUSTOM event involved) end-to-end through
     the real handlers _handle_relay/_handle_finish, not just
@@ -37,7 +36,7 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity
     run_id = created["run_id"]
     await session.commit()
 
-    run = broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
+    run = souk.broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
     interrupt = {"id": "int_1", "reason": "tool_call", "message": "Approve foo(1)?"}
     finished_event = {
         "type": "RUN_FINISHED",
@@ -45,16 +44,16 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, new_identity
         "runId": run_id,
         "outcome": {"type": "interrupt", "interrupts": [interrupt]},
     }
-    await _handle_relay(run, RelayEvent(json_payload=json.dumps(finished_event)))
-    await _handle_finish(run, FinishStream())
+    await _handle_relay(souk, run, RelayEvent(finished_event))
+    await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
     assert reread["status"] == "input-required"
     assert reread["metadata"]["interrupts"] == [interrupt]
-    broker.forget(run_id)
+    souk.broker.forget(run_id)
 
 
-async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, new_identity):
+async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, souk, new_identity):
     """Regression guard: a plain RUN_FINISHED (outcome absent, or
     {"type": "success"}) must still complete normally — the interrupt
     check must not fire on the common case.
@@ -67,23 +66,24 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, ne
     run_id = created["run_id"]
     await session.commit()
 
-    run = broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
+    run = souk.broker.enqueue_run(run_id, agent_b, thread_b, {}, "ag-ui")
     finished_event = {"type": "RUN_FINISHED", "threadId": thread_b, "runId": run_id}
-    await _handle_relay(run, RelayEvent(json_payload=json.dumps(finished_event)))
-    await _handle_finish(run, FinishStream())
+    await _handle_relay(souk, run, RelayEvent(finished_event))
+    await _handle_finish(souk, run, FinishStream())
 
     reread = await repo.get_run(session, run_id)
     assert reread["status"] == "completed"
-    broker.forget(run_id)
+    souk.broker.forget(run_id)
 
 
 async def test_finalize_delegated_call_reports_honestly_without_registering_any_interest(
     session, new_identity
 ):
-    """The callee (C) paused (input-required) — _finalize_delegated_call
-    must report that honestly, but must not write any bookkeeping onto
-    the delegating run (B) or anywhere else. There is nothing left in
-    this codebase called "waitingOnRunId" for it to write.
+    """The callee (C) paused (input-required) — finishing a delegated call
+    must report that honestly, but must not write any bookkeeping onto the
+    delegating run (B) or anywhere else. Reading the callee's status back
+    is the whole of it (see protocols.a2a's tasks/send): there is nothing
+    left in this codebase called "waitingOnRunId" for it to write.
     """
     identity = new_identity()
     agent_ids = await repo.register_agents(
@@ -100,7 +100,7 @@ async def test_finalize_delegated_call_reports_honestly_without_registering_any_
         session, run_c["run_id"], "input-required", metadata={"reason": "hitl_approval"}
     )
 
-    db_run = await _finalize_delegated_call(session, run_c["run_id"])
+    db_run = await repo.get_run(session, run_c["run_id"])
     assert db_run["status"] == "input-required"
 
     # B was never touched — still whatever it was before this call.

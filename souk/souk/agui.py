@@ -40,7 +40,7 @@ def rewrite_message_ids(event: dict[str, Any], id_map: dict[str, str]) -> dict[s
     provider uuid leaking through here is the one inconsistency left. Not
     a database id itself — an assistant reply is never persisted as a
     thread_history message row (see that table's module docstring in
-    souk/db.py), only relayed live — so there's no row for a database
+    souk/schema.py), only relayed live — so there's no row for a database
     default to generate this from; `new_id` is the same souk-assigned
     scheme applied in memory instead. `id_map` is a per-stream dict the
     caller keeps across the whole run so every event for the same
