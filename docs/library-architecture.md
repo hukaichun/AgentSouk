@@ -627,29 +627,83 @@ dispatch it.
 
 Inverting the provider shrank that. A worker is not dispatched *to*; it comes
 and claims, over a plain call that any node can answer, and it reports back
-by run_id rather than down the connection the run arrived on. So a worker
-connected to node A can claim and serve a run created on node B as soon as
-the claim queue is shared — the first item below — with no forwarding layer
-and no per-node provider registry. What is left of the affinity problem is
-one message in one direction: souk's cancel request has to reach whichever
-node holds that worker's stream (`WorkerSessions`, keyed by client), which is
-a notification, not a data path.
+by run_id rather than down the connection the run arrived on. Nothing is
+bound to the connection a run arrived on any more.
 
-The SSE side keeps the mirror problem unchanged — events are produced
-wherever `out_queue` lives.
+**What two replicas actually do today**, measured against one database rather
+than argued about — every line here is something a load balancer will do to
+you by accident:
 
-Two things would still be required, and neither is built here:
+| | |
+|---|---|
+| the roster | shared, both nodes agree |
+| a run created on A | invisible to a provider claiming on B; only A can hand it out |
+| that run's events reported to B | `report_event` returns False, nothing persisted, and the worker never learns — it pushed and moved on |
+| the SSE consumer | reads `out_queue` on whichever node owns the run |
+| a third replica booting | `fail_orphaned_runs` is DB-wide, so it marks A's *live* runs `failed` while A keeps relaying them |
 
-1. **`RunBroker` behind an interface**, so a Postgres `SKIP LOCKED` or Redis
-   implementation can substitute. This design does the cheap half now: the
-   broker becomes an instance owned by a `Souk` rather than a module-level
-   singleton, injected like settings and the engine. `broker.py` already
-   anticipated this — its wake mechanism is deliberately a plain
-   `asyncio.Event` and documents itself as a swap-in seam.
-2. **Cross-node fan-out for `out_queue`**, so an SSE consumer on one node can
-   read a run produced on another.
+The last row is the one that bites first: it needs two nodes, not many, and
+it is silent. The stall and unclaimed sweeps have the same shape — every
+replica reaps every run.
 
-Building either now would be premature. Leaving the door shut would not.
+So the failure mode is not slowness, it is two nodes disagreeing. Three
+things would be required, in this order:
+
+1. **Ownership on the sweeps.** Either one elected sweeper, or a lease on the
+   run so a node reaps only what it owns and only what has genuinely expired.
+   Small, no API change, and the only item here that is already doing damage.
+2. **A shared claim queue**, so `enqueue_run` on A is claimable on B — an
+   INSERT plus a notify, and a `SELECT … FOR UPDATE SKIP LOCKED` where
+   `RunBroker.claim` is now. Runs are already rows; this is mostly a query.
+3. **Cross-node relay for a run's output**, so an SSE consumer on A receives
+   what a worker reported to B. This one is a decision before it is code:
+   notify-and-tail `run_events` (no new infrastructure, but it puts the
+   database on the read path `broker.py` deliberately keeps it off), a
+   pub/sub bus (keeps the hot path clear, adds a dependency), or routing the
+   consumer to the node that owns the run (nothing new to install, but souk
+   stops being stateless behind a plain load balancer). The same mechanism
+   carries souk's cancel request to whichever node holds that worker's
+   stream, which is the last of the affinity problem.
+
+**What is already in place, stated exactly**, because an earlier version of
+this document oversold it and the overstatement was believed:
+
+- The broker is an instance owned by a `Souk` and accepted in its
+  constructor, not a module-level singleton. That part is real.
+- Its wake mechanism is a plain `asyncio.Event`, not anything transport-
+  shaped, so a `LISTEN/NOTIFY` implementation could sit behind it.
+- There is **no interface**. Nothing declares what a broker must provide; a
+  substitute would be duck-typing against a concrete class.
+- And the substitutable unit is not `RunBroker` — it is `Run`. Around
+  thirty-five places outside `broker.py` read or write a `Run`'s fields
+  directly, `handlers.py` most of all: it bumps `seq`, sets
+  `saw_run_finished` and `pause_payload`, and pushes to `out_queue` itself.
+  A `Run` carries two `asyncio.Queue`s, which are precisely the things that
+  do not cross a process boundary, so the injection point takes an object
+  whose *return values* are the part that cannot be distributed.
+
+The prerequisite is therefore to make `Run` an implementation detail of the
+broker — operations (`emit`, `subscribe`, `next_seq`) where field access is
+now — and it is worth noticing what that would reveal: a `Run` currently
+mixes three separable things. Its identity and input are immutable facts. Its
+round state (`seq`, `saw_run_finished`, `pause_payload`,
+`round_starting_seq`) belongs to whichever node runs that run's pipeline and
+never needs to travel. Only the two queues and the registry are genuinely
+distributed state. Today all three are one mutable object that everyone
+holds, which is why the seam looks bigger than it is.
+
+**Provider-side scaling is deliberately not souk's problem.** A provider
+running several processes shares one keypair, and souk cannot tell those
+processes apart: any of them may claim that provider's work, and any of them
+may report events for a run another one claimed. That is not a gap to close —
+souk's contract is with the *identity*, and how a provider divides work
+between its own processes is its own business, exactly like how it divides
+work between threads. The consequence to know is that souk will not move a
+run between instances: if the instance holding a run dies, nobody finishes
+it, and the run ends as `failed` when the stall sweep notices
+(`run_stall_timeout_seconds`, 120s by default).
+
+Building 2 and 3 now would be premature. Leaving the door shut would not.
 
 ## Protocol adapters (core)
 
