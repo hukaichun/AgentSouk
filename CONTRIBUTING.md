@@ -7,9 +7,10 @@ that section before assuming a change belongs where you'd first guess.
 
 ## What lives here, and what doesn't
 
-This tree is the library (`souk/`) and the reference caller UI
-(`souk-directory/`). The gateway, both SDKs and the reference providers
-live in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer),
+This tree is the library (`souk/`) and its design record (`docs/`).
+Everything else — the gateway, both SDKs, the reference providers and
+the directory UI — lives in
+[AgentSoukServer](https://github.com/hukaichun/AgentSoukServer),
 which consumes `souk` through a submodule and owns both ends of every
 wire it defines — anything network-facing belongs there (see issue #27
 for the boundary).
@@ -64,21 +65,17 @@ that step). If you change the schema, add a new revision under
 `souk/alembic/versions/` rather than editing the initial one —
 `uv run alembic revision -m "..."` from `souk/`.
 
-`souk-directory/` has no test suite (static TS/HTML, no backend logic to
-unit test) — `npm run build` failing on a type error is its CI check.
-
-CI (`.github/workflows/ci.yml`) runs one job per subproject and must pass
-before a PR merges.
+CI (`.github/workflows/ci.yml`) runs the `souk` suite (SQLite and
+Postgres) and must pass before a PR merges.
 
 ## Where a change belongs
 
 - Domain behavior (routing, identity, run dispatch, persistence, protocol
   translation) → `souk/`.
 - Anything that needs a socket — endpoints, transports, TLS, wire framing
-  — and the SDKs and reference providers that speak them → the
-  [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer) repo,
-  not here (issue #27).
-- The human-browsable directory/chat UI → `souk-directory/`.
+  — and the SDKs, reference providers and directory UI that speak them →
+  the [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)
+  repo, not here (issue #27).
 
 ## Commits / PRs
 
