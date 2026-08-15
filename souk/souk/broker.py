@@ -511,15 +511,6 @@ class RunBroker:
         _request_cancel(run)
         return True
 
-    def owned_run_ids(self) -> list[str]:
-        """Which runs this broker is responsible for — the question the
-        health sweeps have to ask before they reap anything. Here that is
-        simply what is in memory; a distributed broker answers with the runs
-        recorded against this instance, which is the same question at a
-        different scope, and is what stops one node reaping another's work.
-        """
-        return list(self._runs)
-
     def active_run_ids(self) -> list[str]:
         """Every run currently in dispatch. Live in-memory state, distinct
         from the database's view — which also holds runs that already

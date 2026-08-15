@@ -675,6 +675,10 @@ things would be required, in this order:
 1. **Ownership on the sweeps.** Either one elected sweeper, or a lease on the
    run so a node reaps only what it owns and only what has genuinely expired.
    Small, no API change, and the only item here that is already doing damage.
+   Note where it belongs when it happens: "which runs am I responsible for"
+   is the broker's question — in memory the answer is its registry, and
+   distributed it is the runs recorded against this instance — so it is an
+   operation on whatever the broker becomes, not a rule in `health.py`.
 2. **A shared claim queue**, so `enqueue_run` on A is claimable on B — an
    INSERT plus a notify, and a `SELECT … FOR UPDATE SKIP LOCKED` where
    `RunBroker.claim` is now. Runs are already rows; this is mostly a query.
@@ -697,8 +701,8 @@ this document oversold it and the overstatement was believed:
   shaped, so a `LISTEN/NOTIFY` implementation could sit behind it.
 - `Run` is now the broker's own. Nothing outside `broker.py` holds one: a
   caller gets a `RunSnapshot` (a copy of the facts, no live references) and
-  affects a run through operations — `push`, `subscribe`, `request_cancel`,
-  `owned_run_ids`. The one exception is deliberate: `handlers.py` receives
+  affects a run through operations — `push`, `subscribe`, `request_cancel`.
+  The one exception is deliberate: `handlers.py` receives
   the live object, because the handlers *are* the pipeline's inner loop and
   the broker is what dispatches them. A different broker implementation
   brings its own.
