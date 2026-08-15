@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from souk.core import Souk
-from souk.deps import get_souk
+from souk_server.deps import get_souk
 from souk.errors import KyokRejected
 from souk.protocols.kyok import KyokAdapter
 

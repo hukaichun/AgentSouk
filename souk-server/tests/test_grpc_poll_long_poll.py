@@ -1,4 +1,4 @@
-"""PollForWork's long-poll branch (souk.grpc_server) — a provider that
+"""PollForWork's long-poll branch (souk_server.grpc_server) — a provider that
 finds nothing queued and sets wait_seconds should get a response as soon as
 a run is enqueued for it, not have to wait out the full timeout. Backs the
 souk<->provider latency fix: idle providers long-poll instead of holding a
@@ -11,8 +11,8 @@ import asyncio
 import time
 
 from souk import repo
-from souk.grpc_gen import souk_pb2
-from souk.grpc_server import SoukAgentGatewayServicer
+from souk_server.grpc_gen import souk_pb2
+from souk_server.grpc_server import SoukAgentGatewayServicer
 from souk.identity import issue_session_token
 
 

@@ -1,4 +1,13 @@
-"""Test fixtures for souk's test suite.
+"""Test fixtures for souk-server's test suite.
+
+Deliberately a copy of souk/tests/conftest.py rather than an import of it:
+these are two independent distributions (see CONTRIBUTING.md's "no shared
+workspace"), and a test-only dependency from the server back into souk's
+test package would be the first thread of exactly the coupling the split
+exists to remove. What is shared is a database and a schema, not fixtures.
+
+The one addition is the `client` fixture — an ASGI client over
+`create_app`, which is the whole reason these tests live here.
 
 Runs against SQLite by default — zero configuration, no database to stand
 up first. The same suite runs against Postgres by exporting SOUK_DATABASE_URL
@@ -33,14 +42,16 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import CoreSettings
 from souk.core import Souk
 from souk.identity import registration_signing_payload
+from souk_server.server import create_app
 
-ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+ALEMBIC_INI = Path(__file__).resolve().parent.parent.parent / "souk" / "alembic.ini"
 
 TEST_SIGNING_SECRET = "test-signing-secret"
 
@@ -101,9 +112,16 @@ async def session(souk: Souk) -> AsyncIterator[AsyncSession]:
         yield s
 
 
+@pytest.fixture
+async def client(souk: Souk) -> AsyncIterator[AsyncClient]:
+    transport = ASGITransport(app=create_app(souk))
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
 class Identity:
     """A throwaway Ed25519 keypair plus a helper to build a signed
-    registration — mirrors souk_agent_sdk.identity's
+    /agents/register body — mirrors souk_agent_sdk.identity's
     sign/public_key_hex/registration_signing_payload exactly (souk doesn't
     depend on souk_agent_sdk, so this is reimplemented directly against
     `cryptography` rather than pulled in as a cross-project test-only

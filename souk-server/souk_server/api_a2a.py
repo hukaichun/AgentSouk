@@ -26,9 +26,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from sse_starlette.sse import EventSourceResponse
 
-from souk.config import ServingSettings
+from souk_server.config import ServingSettings
 from souk.core import Souk
-from souk.deps import get_serving_settings, get_souk
+from souk_server.deps import get_serving_settings, get_souk
 from souk.protocols.a2a import A2AAdapter, A2AStream
 
 router = APIRouter()

@@ -33,19 +33,28 @@ applies to registration (see `docs/federation-and-anti-abuse.md`).
 ## Package layout
 
 ```
-souk/                 # the library. Network-free.
-  core/               #   ① Souk class, broker, handlers, repo, schema
-  providers/          #   the Provider port (agent_id + the AG-UI shape)
-  worker/             #   the loop that claims work and drives a provider
-  protocols/          #   ② agui, a2a — pure translation, in-process usable
-souk-server/          # ③ separate subproject: the reference gateway
-  http/               #   FastAPI/uvicorn wiring of souk.protocols
-  relay/              #   gRPC servicer (NAT-traversal relay)
+souk/souk/            # the library. Network-free.
+  core.py             #   ① Souk: the domain surface an embedder uses
+  broker.py           #     live dispatch: one queue pair and one task per run
+  handlers.py         #     what a command does to a run (persist, decide)
+  providers.py        #   the Provider port (agent_id + the AG-UI shape)
+  worker.py           #   the loop that claims work and drives a provider
+  repo.py schema.py   #   the database, and the only thing core knows about
+  protocols/          #   ② agui, a2a, kyok — pure translation, no I/O
+souk-server/souk_server/   # ③ the reference gateway, a separate distribution
+  server.py           #   process bootstrap, CORS, TLS, both listeners
+  api_*.py deps.py    #   FastAPI wiring of souk.protocols, and the models
+  grpc_server.py      #   gRPC servicer (the NAT-traversal relay)
 ```
 
-`souk`'s only hard dependency is SQLAlchemy (plus a driver). It must not
-import `fastapi`, `uvicorn`, or `grpcio` — that's the invariant this whole
-design exists to protect, and it should be enforced by a test.
+`souk` depends on SQLAlchemy (plus a driver), pydantic-settings,
+ag-ui-protocol, cryptography, pyjwt and alembic — and on no transport at all.
+It cannot import `fastapi`, `uvicorn`, `sse-starlette` or `grpcio`, because
+none of them is installed with it: that is the invariant this whole design
+exists to protect, and packaging is what makes it structural rather than a
+matter of discipline. A test enforces it too (see souk/tests/
+test_core_is_network_free.py) — packaging protects against the accident, not
+against someone adding the dependency back on purpose.
 
 `souk-server` is a sibling subproject like `souk-agent-sdk` and
 `souk-client-sdk`, not an extra of `souk`. A separate distribution makes the
@@ -716,9 +725,10 @@ section above.
 ## What `souk-server` is
 
 The reference gateway, assembled from the above and owning every I/O
-decision: reads `SOUK_*` env vars into `Settings`, applies CORS, binds the
-HTTP port, binds the gRPC port, terminates TLS, runs the relay. Behavior
-identical to today's `souk-server` console script.
+decision: reads `SOUK_*` env vars into `CoreSettings` + its own
+`ServingSettings`, applies CORS, binds the HTTP port, binds the gRPC port,
+terminates TLS, runs the relay. Behaviour is what the `souk-server` console
+script always did; what changed is which distribution it ships in.
 
 It is also where the gRPC relay lives — outbound-only NAT traversal is
 souk's headline capability, but architecturally it is a transport, so it
@@ -728,7 +738,7 @@ reach a cancel request on.
 
 ## Migration status
 
-Steps 1–5 are done; each landed with the suite green on SQLite and Postgres.
+All six are done; each landed with the suite green on SQLite and Postgres.
 
 1. ✅ **Settings injection.** `CoreSettings` / `ServingSettings` passed to a
    `Souk`; engine, sessionmaker, broker and KYOK bridge become instance
@@ -748,12 +758,16 @@ Steps 1–5 are done; each landed with the suite green on SQLite and Postgres.
    in-process work is throttled by `max_claim` like remote work, and both run
    the same loop. See the section below for what it cost to keep and what it
    changed on the wire.
-6. ⬜ **Split `souk-server`.** Move the HTTP surface, the gRPC
-   servicer, the KYOK endpoints and the process bootstrap into a
-   sibling subproject, leaving `souk` network-free. The dependency split is
-   already clean: core needs only sqlalchemy, pydantic, pydantic-settings,
-   ag-ui-protocol, cryptography and pyjwt; fastapi, uvicorn, sse-starlette
-   and grpcio appear in serving modules only.
+6. ✅ **Split `souk-server`.** The HTTP surface, the gRPC servicer, the KYOK
+   endpoints, the request/response models, `ServingSettings` and the process
+   bootstrap are a sibling distribution; `souk` declares no transport at all.
+   That turns the invariant from a rule into a fact: core cannot import
+   fastapi or grpcio because they are not installed alongside it, verified by
+   importing `souk.core` in an environment where every one of them is absent.
+   `tests/test_core_is_network_free.py` stays — packaging protects against
+   the accident, not against someone adding the dependency back — and it lost
+   its allow-list, because there is no longer a module under `souk/` that is
+   exempt.
 
 Work done along the way that wasn't in the original plan, because it turned
 out to be wrong rather than merely unfinished:

@@ -47,7 +47,7 @@ transport-specific", write eight lines that prove it instead.
   `SOUK_DATABASE_URL=postgresql+psycopg://…` for the other. A throwaway
   Postgres container is enough. Dialect bugs only appear on one side.
 - **A green suite does not mean the app starts.** Nothing imports
-  `souk/server.py` at test time. A rename sweep once left an import there
+  `souk-server/souk_server/server.py` at test time. A rename sweep once left an import there
   that doesn't even parse, with 167 tests passing. After any broad edit,
   build the app: `create_app(Souk())`.
 - `tests/test_core_is_network_free.py` is a hard constraint, not a

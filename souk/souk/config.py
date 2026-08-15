@@ -1,11 +1,12 @@
-"""souk's configuration, split along the same line as the packages.
+"""souk's configuration: what a network-free souk needs.
 
-`CoreSettings` holds what a network-free souk needs: the database, the
-domain's own timing policy, and the key it signs its tokens with.
-`ServingSettings` holds everything that only means something once there is a
-socket — hosts, ports, TLS, CORS. See docs/library-architecture.md.
+The database, the domain's own timing policy, and the key it signs its
+tokens with. Everything that only means something once there is a socket —
+hosts, ports, TLS, CORS — lives in `souk_server.config.ServingSettings`, in
+the other distribution, which is what stops it drifting back in here. See
+docs/library-architecture.md.
 
-Neither is instantiated at import time. A `Souk` is constructed with a
+Neither class is instantiated at import time. A `Souk` is constructed with a
 `CoreSettings` (see souk/core.py), so nothing here runs as a side effect of
 importing souk, and several souks with different configuration can coexist in
 one process. Both classes are still `pydantic-settings` models reading the
@@ -113,48 +114,3 @@ class CoreSettings(BaseSettings):
     # nuisance, so this must always be set explicitly, via the
     # SOUK_TOKEN_SIGNING_SECRET environment variable or the constructor.
     token_signing_secret: str
-
-
-class ServingSettings(BaseSettings):
-    """Everything that only exists because souk is being exposed on a
-    network. Consumed by whoever actually binds the sockets — today
-    souk.server, and after the split, the souk-server subproject. Core never
-    reads any of this.
-    """
-
-    model_config = SettingsConfigDict(env_prefix="SOUK_")
-
-    http_host: str = "0.0.0.0"
-    http_port: int = 8000
-    grpc_host: str = "0.0.0.0"
-    grpc_port: int = 50051
-
-    # Origins allowed to call souk's HTTP surface cross-origin (e.g. a
-    # souk-directory instance served from a different origin). "*" is fine
-    # for local development; tighten this for any real deployment, same as
-    # token_signing_secret's default is only safe for a single-developer
-    # local souk.
-    cors_allow_origins: list[str] = ["*"]
-
-    # Base URL callers use to reach this souk's HTTP surface, used to build
-    # per-agent Agent Card URLs. Override in deployments behind a proxy/LB.
-    # Deliberately not a core setting even though it ends up in protocol
-    # content: core should not know what it is called on a network, so
-    # whoever serves souk passes this to the protocol layer.
-    public_http_url: str = "http://localhost:8000"
-
-    # TLS for the gRPC server (PollForWork/AgentSession) and the HTTP
-    # server (/agents/register, /agui/*, /a2a/*). Both left unset means
-    # plaintext — fine for same-host development, never for a souk
-    # reachable over a real network: without TLS, session tokens and
-    # signed requests are visible to anyone on the path, and a captured
-    # registration signature is only bounded by
-    # souk.identity.SIGNATURE_FRESHNESS_WINDOW_SECONDS (60s), not
-    # prevented outright. See scripts/gen_dev_tls_cert.py for a
-    # self-signed pair to test with; use a real CA-issued cert (or
-    # terminate TLS at a reverse proxy in front of souk) for anything
-    # else.
-    grpc_tls_cert_path: str | None = None
-    grpc_tls_key_path: str | None = None
-    http_tls_cert_path: str | None = None
-    http_tls_key_path: str | None = None

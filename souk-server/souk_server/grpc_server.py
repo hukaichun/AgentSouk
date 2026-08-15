@@ -39,9 +39,9 @@ from typing import TYPE_CHECKING
 
 import grpc
 
-from souk.config import ServingSettings
+from souk_server.config import ServingSettings
 from souk.errors import InvalidRegistration
-from souk.grpc_gen import souk_pb2, souk_pb2_grpc
+from souk_server.grpc_gen import souk_pb2, souk_pb2_grpc
 from souk.identity import verify_session_token
 
 if TYPE_CHECKING:

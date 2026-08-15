@@ -21,9 +21,9 @@ from fastapi.responses import JSONResponse
 from sse_starlette.sse import EventSourceResponse
 
 from souk.core import Souk
-from souk.deps import get_souk
+from souk_server.deps import get_souk
 from souk.errors import AgentNotFound
-from souk.models import CreateThreadRequest, CreateThreadResponse
+from souk_server.models import CreateThreadRequest, CreateThreadResponse
 from souk.protocols.agui import AGUIAdapter, ThreadSnapshot
 
 router = APIRouter()

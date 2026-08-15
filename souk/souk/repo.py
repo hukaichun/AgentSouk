@@ -649,7 +649,7 @@ async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str
 
 async def touch_run_activity(session: AsyncSession, run_id: str) -> None:
     """Called whenever an event is relayed for a run — see
-    souk.grpc_server._relay_event — so a run that's producing output
+    souk_server's AgentSession relay — so a run that's producing output
     doesn't look stalled even without a status change.
     """
     await session.execute(

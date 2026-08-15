@@ -15,14 +15,16 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from souk import api_a2a, api_agui, api_llm_bridge, api_registry, repo
-from souk.config import CoreSettings, ServingSettings
+from souk import repo
+from souk_server import api_a2a, api_agui, api_llm_bridge, api_registry
+from souk.config import CoreSettings
+from souk_server.config import ServingSettings
 from souk.core import Souk
-from souk.deps import install_error_handlers
-from souk.grpc_server import create_grpc_server
+from souk_server.deps import install_error_handlers
+from souk_server.grpc_server import create_grpc_server
 from souk.health import run_health_sweeps_forever
 
-logger = logging.getLogger("souk.server")
+logger = logging.getLogger("souk_server")
 logging.basicConfig(level=logging.INFO)
 
 

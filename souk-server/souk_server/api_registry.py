@@ -9,8 +9,8 @@ request; a rejection becomes a 401 through the app-wide handler.
 from fastapi import APIRouter, Depends
 
 from souk.core import Souk
-from souk.deps import get_souk
-from souk.models import AgentRosterEntry, RegisterBatchRequest, RegisterBatchResponse, RosterResponse
+from souk_server.deps import get_souk
+from souk_server.models import AgentRosterEntry, RegisterBatchRequest, RegisterBatchResponse, RosterResponse
 
 router = APIRouter()
 

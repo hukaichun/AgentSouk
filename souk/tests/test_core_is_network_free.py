@@ -7,11 +7,16 @@ rather than something baked into souk. That property is easy to state and
 easy to erode — one convenient import of `grpc` or `fastapi` in a core module
 and it is quietly gone — so it is asserted here rather than left to reviews.
 
-If this fails, the fix is almost never "add the module to the allowed list".
-It is that whatever needed a transport type belongs in the serving layer, or
-needs a port (souk/worker.py is the example: a worker reaches core through
-plain method calls, so core never learns what carried them) so core can stay
-ignorant of it.
+Since the serving layer moved out into the `souk-server` distribution, this
+is enforced twice over: by packaging (souk does not depend on fastapi,
+uvicorn, sse-starlette or grpcio, so an import would not even resolve) and by
+this test, which still runs because packaging protects against the accident
+and not against someone adding the dependency back.
+
+If it fails, the fix is that whatever needed a transport type belongs in
+souk-server, or needs a port (souk/worker.py is the example: a worker reaches
+core through plain method calls, so core never learns what carried them) so
+core can stay ignorant of it.
 """
 
 from __future__ import annotations
@@ -26,30 +31,13 @@ SOUK_PACKAGE = Path(__file__).resolve().parent.parent / "souk"
 # Transport/framework packages core may never import, directly or otherwise.
 FORBIDDEN_ROOTS = {"grpc", "fastapi", "uvicorn", "starlette", "sse_starlette", "httpx"}
 
-# The serving layer: allowed to import all of the above, and expected to.
-# Everything else under souk/ is core. Kept as an explicit list so adding a
-# module to it is a deliberate act with a diff, not an accident.
-SERVING_MODULES = {
-    "server.py",
-    "deps.py",
-    "grpc_server.py",
-    "api_registry.py",
-    "api_agui.py",
-    "api_a2a.py",
-    "api_llm_bridge.py",
-}
-
-
 def _core_modules() -> list[Path]:
-    """Every core module, subpackages included — souk/protocols/ holds the
-    protocol adapters, which are exactly the code most tempted to reach for a
-    framework type and must not."""
+    """Every module in the package. There is no allow-list any more: the
+    serving layer is a different distribution (souk-server), so nothing under
+    souk/ is exempt — including souk/protocols/, which is the code most
+    tempted to reach for a framework type and must not."""
     return sorted(
-        path
-        for path in SOUK_PACKAGE.rglob("*.py")
-        if path.name not in SERVING_MODULES
-        and not path.name.startswith("__")
-        and "grpc_gen" not in path.parts  # generated stubs, not souk's code
+        path for path in SOUK_PACKAGE.rglob("*.py") if not path.name.startswith("__")
     )
 
 
@@ -85,8 +73,21 @@ def test_grpc_generated_stubs_are_not_reachable_from_core() -> None:
     assert not offenders, f"core modules referencing generated gRPC stubs: {offenders}"
 
 
-def test_the_serving_list_is_not_stale() -> None:
-    """A serving module that no longer exists would silently widen what
-    counts as 'core is allowed to skip'."""
-    missing = sorted(name for name in SERVING_MODULES if not (SOUK_PACKAGE / name).exists())
-    assert not missing, f"SERVING_MODULES lists modules that no longer exist: {missing}"
+def test_no_transport_is_even_installable_as_a_dependency() -> None:
+    """The packaging half of the same invariant. A module cannot import what
+    the distribution does not depend on, so this is what makes the rule
+    structural rather than a matter of everyone remembering it — and it is
+    the reason the module scan above has no allow-list left to keep honest.
+    """
+    pyproject = (SOUK_PACKAGE.parent / "pyproject.toml").read_text()
+    # Comments only, stripped: this file says "no fastapi here" in prose, and
+    # a scan that cannot tell prose from a requirement would fail on it.
+    declared = "\n".join(
+        line for line in pyproject.split("[dependency-groups]")[0].splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    offenders = sorted(root for root in FORBIDDEN_ROOTS | {"sse-starlette"} if root in declared)
+    assert not offenders, (
+        f"souk's own dependencies include {offenders}. Serving belongs in souk-server; "
+        "a transport listed here puts it one import away from core again."
+    )

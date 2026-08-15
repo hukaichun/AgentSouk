@@ -265,7 +265,7 @@ def issue_session_token(public_key: str, signing_secret: str) -> str:
 def verify_session_token(token: str, signing_secret: str) -> str | None:
     """Returns the public_key this token was issued to if it is valid
     (correct signature, not expired), else None. Called on every
-    PollForWork/AgentSession — see souk.grpc_server — and by every worker
+    PollForWork/AgentSession — see souk_server.grpc_server — and by every worker
     before it claims (see souk.worker).
 
     That returned key *is* the provider: what it may claim, and which runs it

@@ -2,7 +2,7 @@
 
 Replaces `souk.db.get_session`, which could only ever hand out sessions from
 one import-time global engine. The Souk is put on the app (see
-souk.server.create_app) and read back off the request here, so the HTTP layer
+souk_server.server.create_app) and read back off the request here, so the HTTP layer
 holds no module-level state of its own and two apps in one process can serve
 two differently-configured souks.
 
@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from souk.config import ServingSettings
+from souk_server.config import ServingSettings
 from souk.core import Souk
 from souk.errors import (
     AgentNotFound,
