@@ -22,7 +22,7 @@ RUN_STATUS_TO_A2A_STATE = {
     "running": "working",
     "input-required": "input-required",
     # souk-specific bookkeeping status with no A2A equivalent (see
-    # souk/db.py) — from an external A2A caller's perspective its wait
+    # souk/schema.py) — from an external A2A caller's perspective its wait
     # did resolve, just via a new run/task rather than this one, so
     # 'completed' is the closest honest answer to tasks/get on this id.
     "resumed": "completed",

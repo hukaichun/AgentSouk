@@ -40,7 +40,7 @@ async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error
     )
     await session.commit()
 
-    failed_run_ids = await repo.fail_unclaimed_runs(session, timeout_seconds=45)
+    failed_run_ids = await repo.fail_unclaimed_runs(session, timeout_seconds=45, online_window_seconds=60)
     assert failed_run_ids == [run_id]
 
     run = await repo.get_run(session, run_id)
@@ -58,7 +58,7 @@ async def test_fail_unclaimed_runs_leaves_recent_or_online_runs_alone(session, n
 
     # Target is still online (last_seen_at untouched, just registered) —
     # even though the run is nominally "queued", nothing should fire.
-    assert await repo.fail_unclaimed_runs(session, timeout_seconds=0) == []
+    assert await repo.fail_unclaimed_runs(session, timeout_seconds=0, online_window_seconds=60) == []
 
     run = await repo.get_run(session, created["run_id"])
     assert run["status"] == "queued"
@@ -127,11 +127,13 @@ async def test_fail_stale_paused_runs_ignores_running_and_queued(session, new_id
     assert run["status"] == "queued"
 
 
-async def test_sweep_once_skips_paused_sweep_when_unconfigured(session, new_identity, monkeypatch):
+async def test_sweep_once_skips_paused_sweep_when_unconfigured(session, souk, new_identity):
     from souk import health
-    from souk.config import settings
 
-    monkeypatch.setattr(settings, "paused_timeout_seconds", None)
+    # paused_timeout_seconds=None (the default) means "no timeout at all" —
+    # stated by constructing the settings, rather than by monkeypatching a
+    # global, now that a Souk carries its own configuration.
+    assert souk.settings.paused_timeout_seconds is None
 
     identity = new_identity()
     agent_ids = await repo.register_agents(session, "sdk_1", identity.public_key, [{"name": "translator"}])
@@ -139,7 +141,7 @@ async def test_sweep_once_skips_paused_sweep_when_unconfigured(session, new_iden
     thread_id = await repo.create_thread(session, agent_id)
     run_id = await _make_paused_run(session, agent_id, thread_id, seconds_stale=10**6)
 
-    await health.sweep_once()
+    await health.sweep_once(souk)
 
     run = await repo.get_run(session, run_id)
     assert run["status"] == "input-required"

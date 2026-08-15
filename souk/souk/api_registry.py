@@ -1,9 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+"""Registration and roster HTTP surface: routes only.
 
-from souk import repo
-from souk.db import get_session
-from souk.identity import is_timestamp_fresh, issue_session_token, registration_signing_payload, verify_signature
+Verifying that a registration really holds the key it claims is domain, not
+HTTP — the same act for a provider across a network and one in this process —
+so it lives on `Souk` (see `Souk.register_agents`). This file parses the
+request, and maps a rejection onto 401.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException
+
+from souk.core import Souk
+from souk.deps import get_souk
+from souk.errors import InvalidRegistration
 from souk.models import AgentRosterEntry, RegisterBatchRequest, RegisterBatchResponse, RosterResponse
 
 router = APIRouter()
@@ -11,31 +18,27 @@ router = APIRouter()
 
 @router.post("/agents/register", status_code=201)
 async def register_agents(
-    body: RegisterBatchRequest, session: AsyncSession = Depends(get_session)
+    body: RegisterBatchRequest, souk: Souk = Depends(get_souk)
 ) -> RegisterBatchResponse:
-    if not is_timestamp_fresh(body.timestamp):
-        raise HTTPException(status_code=401, detail="registration timestamp too far from souk's clock")
-    payload = registration_signing_payload(body.sdk_client_id, [a.name for a in body.agents], body.timestamp)
-    if not verify_signature(body.public_key, body.signature, payload):
-        raise HTTPException(status_code=401, detail="invalid registration signature")
+    try:
+        registration = await souk.register_agents(
+            body.sdk_client_id,
+            body.public_key,
+            body.signature,
+            body.timestamp,
+            [agent.model_dump() for agent in body.agents],
+            provider_name=body.provider_name,
+        )
+    except InvalidRegistration as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
 
-    agent_ids = await repo.register_agents(
-        session,
-        body.sdk_client_id,
-        body.public_key,
-        [agent.model_dump() for agent in body.agents],
-        provider_name=body.provider_name,
-    )
-
-    agents = await repo.list_agents(session)
     return RegisterBatchResponse(
-        agents=[AgentRosterEntry(**a) for a in agents],
-        session_token=issue_session_token(body.sdk_client_id),
-        agent_ids=agent_ids,
+        agents=[AgentRosterEntry(**a) for a in await souk.list_agents()],
+        session_token=registration.session_token,
+        agent_ids=registration.agent_ids,
     )
 
 
 @router.get("/agents")
-async def list_agents(session: AsyncSession = Depends(get_session)) -> RosterResponse:
-    agents = await repo.list_agents(session)
-    return RosterResponse(agents=[AgentRosterEntry(**a) for a in agents])
+async def list_agents(souk: Souk = Depends(get_souk)) -> RosterResponse:
+    return RosterResponse(agents=[AgentRosterEntry(**a) for a in await souk.list_agents()])

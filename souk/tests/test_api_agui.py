@@ -188,14 +188,14 @@ async def test_agui_run_without_actor_chain_is_unaffected(client, session, new_i
 
 
 def test_build_forwarded_props_includes_caller_when_chain_verified():
-    from souk.api_agui import _build_forwarded_props
+    from souk.protocols.agui import build_forwarded_props
 
     subject = {"type": "user", "id": "employee_x"}
     actors = [{"publicKey": "abc", "agentName": None}]
     chain = ["hop0"]
 
-    result = _build_forwarded_props(
-        "run_1", "agent_1", {}, {"appSpecific": True}, subject, actors, chain
+    result = build_forwarded_props(
+        "test-signing-secret", "run_1", "agent_1", {}, {"appSpecific": True}, subject, actors, chain
     )
 
     assert result == {
@@ -205,8 +205,8 @@ def test_build_forwarded_props_includes_caller_when_chain_verified():
 
 
 def test_build_forwarded_props_without_chain_or_kyok_passes_through_untouched():
-    from souk.api_agui import _build_forwarded_props
+    from souk.protocols.agui import build_forwarded_props
 
-    result = _build_forwarded_props("run_1", "agent_1", {}, {"appSpecific": True})
+    result = build_forwarded_props("test-signing-secret", "run_1", "agent_1", {}, {"appSpecific": True})
 
     assert result == {"appSpecific": True}
