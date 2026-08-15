@@ -1,3 +1,19 @@
+# Host build artefacts. `.venv` is the one that bites: uv writes a venv whose
+# bin/python symlinks to an interpreter path that exists on the host and not
+# in the image, so copying it in doesn't just waste layers — `uv run` inside
+# the container finds it, declares it linked to a non-existent interpreter,
+# deletes it, and re-resolves the whole dependency tree from PyPI at *start*
+# time. That turned a transient pythonhosted timeout into `souk-migrate`
+# exiting 1 and taking the stack down with it.
+**/.venv
+**/__pycache__
+**/*.py[co]
+**/.pytest_cache
+**/.ruff_cache
+# The local SQLite database a dev run leaves behind (souk/souk.db). Baking
+# one into the image means a container can silently come up against it.
+**/*.db
+
 # Hermes Agent's own runtime data directory (providers/openai-compat-agent/
 # hermes-data, bind-mounted into the `hermes` demo container) — never
 # needed inside any image we build, and its files end up owned by the

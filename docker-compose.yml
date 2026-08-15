@@ -28,10 +28,15 @@ services:
     build:
       context: .
       dockerfile: souk-server/Dockerfile
-    # The schema belongs to souk (the library owns its tables), so this runs
-    # alembic from there rather than from souk-server; the image carries both.
-    working_dir: /app/souk
-    command: ["uv", "run", "alembic", "upgrade", "head"]
+    # The schema belongs to souk (the library owns its tables), so this points
+    # alembic at souk's alembic.ini — but runs it from souk-server, because
+    # that is the only directory the image ran `uv sync` in. Running it from
+    # /app/souk instead makes `uv run` build a second environment at container
+    # start: a PyPI round-trip on every `up`, and a resolution that can differ
+    # from the one the server itself is running. `script_location` in that ini
+    # is `%(here)s/alembic`, so it still finds /app/souk/alembic.
+    working_dir: /app/souk-server
+    command: ["uv", "run", "alembic", "-c", "/app/souk/alembic.ini", "upgrade", "head"]
     depends_on:
       paradedb:
         condition: service_healthy
