@@ -26,14 +26,14 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
-from sqlalchemy import event
+from sqlalchemy import event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from souk import repo
 from souk.broker import FinishStream, RelayEvent, RunBroker, RunSnapshot
 from souk.config import CoreSettings
-from souk.db_schema import DEFAULT_DB_SCHEMA, quoted_schema
+from souk.db_schema import DEFAULT_DB_SCHEMA, EXPECTED_SCHEMA_REVISION, quoted_schema
 from souk.errors import AgentNotFound, InvalidRegistration
 from souk.handlers import make_handlers
 from souk.health import run_health_sweeps_forever
@@ -57,6 +57,45 @@ class Registration:
 
     agent_ids: dict[str, str]
     session_token: str
+
+
+@dataclass(frozen=True)
+class Health:
+    """Whether this souk can do its job, as facts rather than a verdict.
+
+    Deliberately not a bool: "the process is alive" and "it can serve
+    traffic" are different questions with different answers, and only the
+    caller knows which one it is asking. A gateway maps these onto liveness
+    and readiness probes; an embedder may just log them.
+
+    Carries no connection string, no driver message and no exception text.
+    A readiness endpoint is normally unauthenticated, and a driver's error
+    for an unreachable database routinely contains the host and user it
+    tried — `database_error` is the exception's type name and nothing else.
+    """
+
+    database: bool
+    schema_revision: str | None
+    expected_schema_revision: str
+    background_running: bool
+    database_error: str | None = None
+
+    @property
+    def schema_current(self) -> bool:
+        return self.schema_revision == self.expected_schema_revision
+
+    @property
+    def ready(self) -> bool:
+        """Can this souk serve? The database has to be reachable and at the
+        migration this code was built against — a process pointed at an
+        unmigrated database would otherwise discover it as a missing column
+        halfway through someone's request.
+
+        Background work deliberately does not count. Not running the sweeps
+        is a degraded state, not an unservable one, and it is a legitimate
+        choice for an embedding caller that never calls `start`.
+        """
+        return self.database and self.schema_current
 
 
 @dataclass
@@ -200,6 +239,42 @@ class Souk:
             )
         self.spawn(run_health_sweeps_forever(self), name="health-sweeps")
         return orphaned
+
+    async def health(self, timeout: float = 2.0) -> Health:
+        """Ask the database whether it is there and what schema it is at.
+
+        Bounded, because a health check that hangs is worse than one that
+        fails — a probe blocked on an unreachable database reports nothing at
+        all, while the process it was meant to describe keeps taking traffic.
+        A timeout is reported as unreachable.
+        """
+        revision: str | None = None
+        reachable = True
+        error: str | None = None
+        try:
+            async with asyncio.timeout(timeout):
+                async with self.session() as session:
+                    # Reachability first and on its own: anything after this
+                    # may legitimately answer None, and "no answer" must not
+                    # be able to stand in for "no database".
+                    await session.execute(text("SELECT 1"))
+                    revision = await repo.get_schema_revision(session)
+        except TimeoutError:
+            reachable, error = False, "TimeoutError"
+        except Exception as exc:
+            # The type only: see Health's docstring on what a driver puts in
+            # the message.
+            reachable, error = False, type(exc).__name__
+
+        return Health(
+            database=reachable,
+            schema_revision=revision,
+            expected_schema_revision=EXPECTED_SCHEMA_REVISION,
+            background_running=any(
+                t.get_name() == "health-sweeps" and not t.done() for t in self._tasks
+            ),
+            database_error=error,
+        )
 
     # ---- Background work
 

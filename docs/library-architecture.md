@@ -72,6 +72,15 @@ await souk.start()          # orphan cleanup + health sweeps
 await souk.aclose()         # stop what start() started, release the pool
 ```
 
+`health()` sits beside them: whether the database answers, which migration
+it is at against the one this code was built for, and whether the background
+half is running — reported as facts, because "the process is alive" and "it
+can serve" are different questions and only the caller knows which it is
+asking. souk-server maps them onto `/healthz` (answers from nothing, so a
+database blip cannot restart every replica) and `/readyz` (503 when not
+ready). Both are unauthenticated, so `Health` carries no connection string
+and no driver message — only the exception's type name.
+
 `start` runs once: a second call is a no-op, and that is the point rather
 than a convenience. Reconciling orphans is idempotent over rows from before
 the process began, *not* over a run created since — so a second pass would

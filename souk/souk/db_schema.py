@@ -20,6 +20,18 @@ DEFAULT_DB_SCHEMA = "public"
 # is the default and when to point SOUK_DATABASE_URL at Postgres instead.
 DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///./souk.db"
 
+# The migration this code expects the database to be at — compared against
+# `alembic_version` by Souk.health, which is how a process notices it is
+# pointed at a database nobody has migrated yet, rather than discovering it
+# as a missing column halfway through a request.
+#
+# A literal rather than a lookup, because souk/alembic/ is not shipped inside
+# the package (see pyproject's `packages = ["souk"]`): an installed souk has
+# no migration directory to read a head from. It cannot drift, though —
+# tests/test_schema_revision.py fails if it stops matching alembic's actual
+# head, which is checkable in the repo where the directory does exist.
+EXPECTED_SCHEMA_REVISION = "b1e0d9c73a55"
+
 
 def quoted_schema(db_schema: str) -> str:
     """Double-quote a schema name so Postgres preserves its exact case.

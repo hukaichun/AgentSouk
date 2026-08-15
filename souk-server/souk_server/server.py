@@ -15,7 +15,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from souk_server import api_a2a, api_agui, api_llm_bridge, api_registry
+from souk_server import api_a2a, api_agui, api_health, api_llm_bridge, api_registry
 from souk.config import CoreSettings
 from souk_server.config import ServingSettings
 from souk.core import Souk
@@ -64,6 +64,7 @@ def create_app(souk: Souk, serving: ServingSettings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
     install_error_handlers(app)
+    app.include_router(api_health.router)
     app.include_router(api_registry.router)
     app.include_router(api_agui.router)
     app.include_router(api_a2a.router)
