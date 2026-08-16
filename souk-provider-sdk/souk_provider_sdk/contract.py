@@ -1,37 +1,61 @@
-"""What this SDK reads off souk, written down so souk can check it.
+"""What this package requires of whoever wires it up, written down so they
+can check it.
 
-A provider cannot import souk — that is the boundary — so the two agree by
-duck typing: the loop reads `run.run_id`, `run.agent.name` and
-`run.run_input` off whatever souk hands it when it delivers a run.
+A provider cannot import souk — that is the boundary — and this package no
+longer reaches the other way either. It used to: the loop read `run.run_id`,
+`run.agent.name` and `run.run_input` off whatever souk handed it, and called
+`souk.report_event` / `souk.finish_run` by name. Souk's model fields, method
+names and argument order were all part of this package's interface with
+nothing on either side saying so, and it broke exactly there — souk handed
+over its own dispatch object, whose input field is called `input_json`, and
+the first real provider to be given one died with an AttributeError on its
+first run.
 
-Duck typing across a repository boundary is a promise nobody is holding, and
-it was broken once already: souk handed over its own dispatch object, whose
-input field is called `input_json`, and the first real provider to be given
-one died with an AttributeError on its first run. So the expectations are
-data here, and souk's own suite asserts they still hold
-(`souk/tests/test_provider_sdk_contract.py`). Same device as the signing
-payloads: one side states it, the other checks it, and a change that breaks
-the pair fails at merge time instead of at a customer.
+So the shapes below are this package's own, and an integrator maps onto them.
+That is the trade: one adapter that knowingly names both sides, instead of
+two codebases silently assuming each other. Souk's suite asserts it can still
+build one (`souk/tests/test_provider_sdk_contract.py`), so a change that
+breaks the pair fails at merge time instead of at a customer.
 
-There used to be a third entry, naming souk's refusals so the loop could
-match them by class name. It went with the loop that asked souk for work:
-this SDK makes no call souk can refuse, so a list of refusals it recognises
-would be a list nothing consults — see `RECOGNISED_SOUK_ERRORS` in the
-history, and `souk.errors.NothingOwned`, which was deleted with it.
-
-Deliberately *not* generated from souk. Something derived from souk agrees
-with souk by construction and therefore checks nothing.
+Deliberately *not* generated from souk, for the same reason the signing
+payloads in `identity.py` are not: something derived from souk agrees with
+souk by construction and therefore checks nothing.
 """
 
 from __future__ import annotations
 
-# Every field the loop reads off a delivered run. souk's `ClaimedRun` must
-# have exactly these — not a superset, because a field appearing there that
-# the SDK never reads is a field somebody meant to hand a provider and
-# nothing does.
-CLAIMED_RUN_FIELDS = frozenset({"run_id", "agent", "thread_id", "run_input"})
+# Every field of a run as this package receives one. An adapter fills these
+# from whatever its own side calls them; `run_id`, `agent_name` and
+# `run_input` are the three the loop actually reads, and the rest are carried
+# for the agent's benefit rather than the loop's.
+DELIVERED_RUN_FIELDS = frozenset(
+    {"run_id", "agent_name", "run_input", "thread_id", "metadata"}
+)
 
-# What identifies the agent on a delivered run. The pair is the identity (see
-# `library-architecture.md`); the loop routes on the name because within one
-# provider a name is unique and the provider already knows its own key.
-AGENT_FIELDS = frozenset({"provider_key", "name"})
+# What the runtime reports back through, and with what. Stated as data so the
+# other side can assert its own methods still line up with these arities
+# rather than discovering it at the first event.
+#
+# Both synchronous: an agent must never wait on whatever is downstream, and
+# `on_finish` is called while unwinding a cancellation, where an await would
+# be interrupted before it arrived.
+REPORT_CALLBACKS = {
+    "on_event": ("run_id", "event"),
+    "on_finish": ("run_id",),
+}
+
+# What souk's broker needs from a provider: who it is, how much it will take
+# at once, how to give it a run, how to ask it to stop one. Souk's
+# `ConnectedProvider` protocol is the same four.
+#
+# `SoukConnection` is the base class that supplies them, so a transport that
+# forgets one now fails at construction. This list stays as data anyway,
+# because it is the *cross-repo* check: souk's suite asserts its own protocol
+# still asks for exactly these, and a fourth thing appearing there would
+# otherwise be found by a provider in the field. `max_concurrent_runs` is why
+# it is worth keeping — souk's own docstring calls this trio "three things",
+# and a connection missing it constructs and attaches cleanly, then fails
+# inside the broker at registration.
+CONNECTED_PROVIDER_ATTRS = frozenset(
+    {"public_key", "max_concurrent_runs", "deliver", "cancel"}
+)
