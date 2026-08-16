@@ -62,6 +62,37 @@ The fix parked on `claude/issue-37-nothing-owned` makes that audible
 a database swapped under a live connection still needs someone to say so. But
 it makes the silence audible; it does not remove the class.
 
+### Does #37 disappear once this lands? No — it shrinks and changes character
+
+Worth answering directly, because "the identifiers stop going stale" sounds
+like it should be the whole of it.
+
+**What does go:** the unrecoverability. Names come from the provider's own
+configuration and never change, so re-registering restores service and the
+in-process worker needs no second `attach_provider`. The 30-minute outage
+becomes a 30-second one *for anyone who knows to re-register*.
+
+**What stays: the ambiguity, and three ways to reach it.** A database
+replaced under a live connection — the provider never reconnects, so it never
+re-registers, and goes on claiming names with no rows behind them. A typo or a
+wrong deployment, claiming a name it never registered. And a *new* one that
+`docs/agent-lifecycle.md` introduces: `delete_agent` removes an agent while
+its provider is offline, and the provider comes back still claiming for it.
+All three are silent without the error.
+
+**And the new claim query makes the fix structural rather than optional.**
+Folding ownership into the claim's `WHERE` (see
+`docs/broker-horizontal-scaling.md`) means "0 rows updated" cannot distinguish
+"nothing queued" from "not registered" — the distinction now *requires* a
+second, separate check, which is exactly what `NothingOwned` is.
+
+**The error also gets stronger.** `threads.agent_id` is a NOT NULL foreign key
+to `agents`, and a run cannot exist without a thread (`thread_history.thread_id`
+is NOT NULL too), so an unregistered `(provider_key, name)` provably has no
+work and can never acquire any while it stays unregistered. Today the error
+says waiting is futile, which is a judgement. Afterwards it states something
+the schema guarantees.
+
 **2. souk's own in-process worker cannot recover from it at all.** Found while
 testing #37: re-registering against a replaced database mints *fresh*
 agent_ids, and `Worker` serves the ids it was attached with, so
