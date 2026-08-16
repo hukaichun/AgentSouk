@@ -339,6 +339,20 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
             break
         if isinstance(cmd, RequestCancel) and run.claimed_by is None:
             break
+    # Closing the stream belongs here rather than to the handlers, and the
+    # reason is the `except` just above: a handler that raises is logged and
+    # the pipeline carries on, so a handler that ended a run by putting
+    # END_OF_STREAM itself would skip it exactly when it failed — leaving
+    # every consumer of that run waiting forever on a run nothing will ever
+    # produce for again.
+    #
+    # Not hypothetical. `run_events.run_id` became a real foreign key when
+    # runs got their own table, and the probe that wipes souk's tables mid-run
+    # went from silently writing orphan rows to hanging: _handle_finish raised
+    # on the failed insert, before its own put. The three terminating cases
+    # are already exactly the three this loop breaks on, so there is one place
+    # to put it and it is here.
+    run.out_queue.put_nowait(END_OF_STREAM)
     owner.forget(run.run_id)
 
 

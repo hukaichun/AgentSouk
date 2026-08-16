@@ -1,6 +1,6 @@
 """repo.fail_unclaimed_runs (A7b, the sweep-based fallback for a run that
 went dark mid-queue) — caught a real bug live: the UPDATE joins
-thread_history and agents, both of which have their own `metadata` column,
+runs and agents, both of which have their own `metadata` column,
 and an unqualified `metadata` reference in the SET clause is ambiguous to
 Postgres. None of the other tests exercised this path (they only cover
 the synchronous fast-fail in api_a2a/api_agui), so it only surfaced once
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import update
 
 from souk import repo
-from souk.schema import agents, thread_history
+from souk.schema import agents, runs
 
 
 async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error(session, new_identity):
@@ -34,8 +34,8 @@ async def test_fail_unclaimed_runs_updates_status_and_metadata_without_sql_error
         .values(last_seen_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.execute(
-        update(thread_history)
-        .where(thread_history.c.run_id == run_id)
+        update(runs)
+        .where(runs.c.run_id == run_id)
         .values(created_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()
@@ -69,8 +69,8 @@ async def _make_paused_run(session, agent_id, thread_id, seconds_stale: int) -> 
     run_id = created["run_id"]
     await repo.mark_run_status(session, run_id, "input-required", metadata={"interrupts": []})
     await session.execute(
-        update(thread_history)
-        .where(thread_history.c.run_id == run_id)
+        update(runs)
+        .where(runs.c.run_id == run_id)
         .values(last_activity_at=datetime.now(timezone.utc) - timedelta(seconds=seconds_stale))
     )
     await session.commit()
@@ -115,8 +115,8 @@ async def test_fail_stale_paused_runs_ignores_running_and_queued(session, new_id
 
     created = await repo.create_run(session, thread_id, agent_id, "ag-ui", {"messages": []})
     await session.execute(
-        update(thread_history)
-        .where(thread_history.c.run_id == created["run_id"])
+        update(runs)
+        .where(runs.c.run_id == created["run_id"])
         .values(last_activity_at=datetime.now(timezone.utc) - timedelta(seconds=120))
     )
     await session.commit()

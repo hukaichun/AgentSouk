@@ -39,7 +39,6 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
-    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -154,34 +153,32 @@ threads = Table(
 )
 
 
-# A2A's task state and AG-UI's conversation history are two views onto the
-# same underlying conversation (a souk "thread" == an A2A session), so they
-# live in one table rather than split across a separate task/run table and a
-# separate message table. Each row is either:
-#   kind='message'    — one AG-UI Message, part of the thread's history
-#   kind='run_status' — the state of one run/A2A task within the thread
-# ordered together by `id` so the two interleave in true chronological
-# order. (run_id is NOT this table's primary key: a run_status row is one
-# among many rows sharing that run_id, since the messages it introduced
-# carry the same run_id.)
-thread_history = Table(
-    "thread_history",
+# One run: an AG-UI run and an A2A task are the same thing under two
+# protocols, and A2A's `Task.id` *is* this `run_id` (see protocols.a2a) — so
+# the identifier every caller addresses is this table's primary key.
+#
+# It could not be, until this table existed. Runs and messages used to share
+# one `thread_history` table with a `kind` column saying which a row was, and
+# the messages a run produced carry that run's id too — so `run_id` was not
+# unique in the table and had to be addressed through a partial unique index
+# (`WHERE kind = 'run_status'`) standing in for a key.
+#
+# The merge existed so the two kinds could be interleaved by one
+# autoincrementing `id` and read back in true chronological order. Nothing
+# ever read that interleaving: every query in repo.py filtered by `kind`.
+# What it charged for the ordering nobody used was a NULL half on every row
+# (a message row carried seven NULL run columns), a `kind` predicate that
+# silently matches the wrong rows when forgotten — repo.get_run shipped
+# exactly that bug, returning message columns as facts about a run — and the
+# primary key above.
+runs = Table(
+    "runs",
     metadata,
-    Column("id", _BIGSERIAL, primary_key=True, autoincrement=True),
+    # Minted in Python by repo.create_run (souk.ids.new_id('run')).
+    Column("run_id", String, primary_key=True),
     Column("thread_id", String, ForeignKey("threads.thread_id"), nullable=False),
-    # For a fresh 'run_status' row repo.create_run mints this in Python
-    # (souk.ids.new_id('run')); a 'message' row belonging to an existing run
-    # passes that run's id explicitly.
-    Column("run_id", String, nullable=False),
-    Column("kind", String, nullable=False),
-    # kind = 'message' — minted in Python by repo.append_thread_messages
-    # (souk.ids.new_id('msg')); a caller-supplied id is never trusted. A
-    # 'run_status' row sets this explicitly NULL.
-    Column("message_id", String, nullable=True),
-    Column("message_json", _JSON, nullable=True),
-    # kind = 'run_status'
-    Column("agent_id", String, nullable=True),
-    Column("protocol", String, nullable=True),
+    Column("agent_id", String, nullable=False),
+    Column("protocol", String, nullable=False),
     # 'input-required': the run is paused/resumable instead of finished — a
     # provider signaled this via AG-UI's own native interrupt outcome (see
     # souk/pause.py) rather than completing normally. Not terminal like the
@@ -198,12 +195,8 @@ thread_history = Table(
     # handlers._handle_finish for how the outcome is decided). Counts as
     # active, and as still-running for the stall sweep, so a provider that
     # never answers is eventually reaped instead of hanging here.
-    #
-    # 'resumed' is accepted but no longer written — kept so this CHECK
-    # doesn't reject pre-existing rows from before pause/resume was tracked
-    # this way.
-    Column("status", String, nullable=True),
-    Column("input_json", _JSON, nullable=True),
+    Column("status", String, nullable=False),
+    Column("input_json", _JSON, nullable=False),
     Column("started_at", _TS, nullable=True),
     Column("completed_at", _TS, nullable=True),
     # Bumped on every status change and every event relayed for this run
@@ -211,47 +204,67 @@ thread_history = Table(
     # "provider claimed this and is making progress" apart from "claimed and
     # then went silent" (see the periodic stall sweep in souk.health).
     Column("last_activity_at", _TS, nullable=True),
-    # Free-form extension data, meaning depends on `kind`: for a message
-    # row, whatever metadata the AG-UI Message carried; for a run_status
-    # row, an A2A Task/Message's own `metadata` field.
+    # An A2A Task's own `metadata` field, plus souk's own annotations
+    # (failureReason, pause payloads).
     Column("metadata", _JSON, nullable=False, default=dict),
     Column("created_at", _TS, nullable=False, default=_utcnow),
-    CheckConstraint("kind IN ('message', 'run_status')", name="ck_thread_history_kind"),
-    CheckConstraint("protocol IN ('ag-ui', 'a2a')", name="ck_thread_history_protocol"),
+    # NOT NULL on agent_id/protocol/status/input_json is part of what the
+    # split buys: every one of them is set by repo.create_run and always has
+    # been, and they were nullable only because message rows shared the table
+    # and had nothing to put there.
+    CheckConstraint("protocol IN ('ag-ui', 'a2a')", name="ck_runs_protocol"),
+    # 'resumed' is gone from this list. It was accepted but never written,
+    # kept only so the old CHECK would not reject rows predating the current
+    # pause/resume model — and this is a new table, so there are none.
     CheckConstraint(
-        "status IN ('queued', 'running', 'input-required', 'resumed', 'cancelling', 'completed', 'failed', 'cancelled')",
-        name="ck_thread_history_status",
+        "status IN ('queued', 'running', 'input-required', 'cancelling', 'completed', 'failed', 'cancelled')",
+        name="ck_runs_status",
     ),
-    UniqueConstraint("thread_id", "message_id", name="uq_thread_history_thread_message"),
-    Index("idx_thread_history_thread", "thread_id", "id"),
-)
-
-# A2A's Task.id is just a run_id (see protocols.a2a's _start_run) — no separate
-# task_id concept, so this partial unique index is what both souk's own
-# dispatch and A2A's tasks/get / tasks/cancel lookups rely on. Partial
-# (WHERE kind = 'run_status') because the same run_id also appears on the
-# 'message' rows that run introduced. Both SQLite and Postgres support
-# partial indexes; the predicate is identical, just declared per-dialect.
-Index(
-    "idx_thread_history_run_status_run_id",
-    thread_history.c.run_id,
-    unique=True,
-    sqlite_where=text("kind = 'run_status'"),
-    postgresql_where=text("kind = 'run_status'"),
+    Index("idx_runs_thread", "thread_id", "created_at"),
+    Index("idx_runs_agent_status", "agent_id", "status"),
 )
 
 
-# Finer-grained than thread_history's per-run status/history: the raw AG-UI
-# event stream for a run (tool calls, state deltas, ...), kept separately
-# since it's a different granularity than "conversation history". Not FK'd
-# to thread_history.run_id since that column isn't uniquely constrained
-# across the whole table (only among run_status rows) — enforced at the
-# application layer instead.
+# The thread's conversation: one row per AG-UI Message, in `id` order.
+#
+# `run_id` is a real foreign key here, which it could not be while runs lived
+# in this same table — a message names the run that introduced it, and now
+# the database holds that rather than trusting every caller to.
+thread_messages = Table(
+    "thread_messages",
+    metadata,
+    Column("id", _BIGSERIAL, primary_key=True, autoincrement=True),
+    Column("thread_id", String, ForeignKey("threads.thread_id"), nullable=False),
+    Column("run_id", String, ForeignKey("runs.run_id"), nullable=False),
+    # Minted in Python by repo.append_thread_messages (souk.ids.new_id('msg'));
+    # a caller-supplied id is never trusted as this row's real identity.
+    Column("message_id", String, nullable=False),
+    Column("message_json", _JSON, nullable=False),
+    # Whatever metadata the AG-UI Message carried.
+    Column("metadata", _JSON, nullable=False, default=dict),
+    Column("created_at", _TS, nullable=False, default=_utcnow),
+    UniqueConstraint("thread_id", "message_id", name="uq_thread_messages_thread_message"),
+    Index("idx_thread_messages_thread", "thread_id", "id"),
+)
+
+
+# The raw AG-UI event stream for a run (tool calls, state deltas, …) — a
+# different granularity from `thread_messages`, which holds the conversation
+# those events reduce to (see souk/agui_reduce.py).
+#
+# `run_id` is a foreign key. Its comment used to say the integrity was
+# "enforced at the application layer instead", because runs shared a table
+# with messages and the column it needed to reference was not unique there.
+# Nothing enforced it: wiping souk's tables mid-run and then reporting an
+# event wrote two rows here belonging to a run that did not exist, and the
+# run finished leaving no trace. The database refuses that now, which also
+# means a souk whose database was replaced underneath it finds out on its
+# next write instead of never.
 run_events = Table(
     "run_events",
     metadata,
     Column("id", _BIGSERIAL, primary_key=True, autoincrement=True),
-    Column("run_id", String, nullable=False),
+    Column("run_id", String, ForeignKey("runs.run_id"), nullable=False),
     Column("seq", Integer, nullable=False),
     Column("event_json", _JSON, nullable=False),
     Column("created_at", _TS, nullable=False, default=_utcnow),

@@ -34,7 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from souk.identity import provider_fingerprint
 from souk.ids import new_id
 from souk.models import AgentRecord, AgentSummary, RunRecord
-from souk.schema import agents, providers, run_events, thread_history, threads
+from souk.schema import agents, providers, run_events, runs, thread_messages, threads
 
 
 def _utcnow() -> datetime:
@@ -60,6 +60,16 @@ class ProviderFingerprintTaken(Exception):
     allowed, because two identities sharing an address is the one thing an
     address may not do. Raised from the UNIQUE constraint rather than from a
     check, so two colliding registrations arriving together cannot both pass.
+    """
+
+
+class RunRowMissing(Exception):
+    """souk tried to move a run the database does not have.
+
+    Not a caller error: souk only ever updates runs it is itself dispatching,
+    so this means its in-memory state and the database have diverged — the row
+    deleted underneath it, or the whole database replaced while this process
+    kept running.
     """
 
 
@@ -570,10 +580,9 @@ async def append_thread_messages(
         message_id = new_id("msg")
         final_message = {**message, "id": message_id}
         await session.execute(
-            insert(thread_history).values(
+            insert(thread_messages).values(
                 thread_id=thread_id,
                 run_id=run_id,
-                kind="message",
                 message_id=message_id,
                 message_json=final_message,
                 metadata=message.get("metadata", {}),
@@ -586,9 +595,9 @@ async def append_thread_messages(
 async def get_thread_messages(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
     rows = (
         await session.execute(
-            select(thread_history.c.message_json)
-            .where(thread_history.c.thread_id == thread_id, thread_history.c.kind == "message")
-            .order_by(thread_history.c.id)
+            select(thread_messages.c.message_json)
+            .where(thread_messages.c.thread_id == thread_id)
+            .order_by(thread_messages.c.id)
         )
     ).all()
     return [row.message_json for row in rows]
@@ -608,15 +617,13 @@ async def create_run(
     # just this run_id (see protocols.a2a's _start_run) — no separate task_id.
     run_id = new_id("run")
     await session.execute(
-        insert(thread_history).values(
-            thread_id=thread_id,
-            kind="run_status",
+        insert(runs).values(
             run_id=run_id,
+            thread_id=thread_id,
             agent_id=agent_id,
             protocol=protocol,
             status="queued",
             input_json=input_json,
-            message_id=None,
             metadata=metadata or {},
             last_activity_at=_utcnow(),
         )
@@ -636,9 +643,7 @@ async def _merge_run_metadata(
     """
     existing = (
         await session.execute(
-            select(thread_history.c.metadata).where(
-                thread_history.c.run_id == run_id, thread_history.c.kind == "run_status"
-            )
+            select(runs.c.metadata).where(runs.c.run_id == run_id)
         )
     ).scalars().first()
     return {**(existing or {}), **metadata}
@@ -669,9 +674,7 @@ async def reopen_run(
     if metadata:
         values["metadata"] = await _merge_run_metadata(session, run_id, metadata)
     await session.execute(
-        update(thread_history)
-        .where(thread_history.c.run_id == run_id, thread_history.c.kind == "run_status")
-        .values(**values)
+        update(runs).where(runs.c.run_id == run_id).values(**values)
     )
     await session.commit()
 
@@ -693,18 +696,32 @@ async def mark_run_status(
         "cancelled": "completed_at",
     }.get(status)
     now = _utcnow()
-    # Every status change counts as activity (see thread_history.last_activity_at).
+    # Every status change counts as activity (see runs.last_activity_at).
     values: dict[str, Any] = {"status": status, "last_activity_at": now}
     if timestamp_col:
         values[timestamp_col] = now
     if metadata:
         values["metadata"] = await _merge_run_metadata(session, run_id, metadata)
-    await session.execute(
-        update(thread_history)
-        .where(thread_history.c.run_id == str(run_id), thread_history.c.kind == "run_status")
-        .values(**values)
+    result = await session.execute(
+        update(runs).where(runs.c.run_id == str(run_id)).values(**values)
     )
     await session.commit()
+    # Nothing updated means souk is dispatching a run this database has never
+    # heard of — its row deleted underneath it, or the database itself
+    # replaced while a process kept running. The rowcount was previously
+    # discarded, so that produced a run which reached a verdict, told its
+    # caller a whole story, and left no trace: measured by wiping souk's
+    # tables mid-run, which the run survived without a single complaint.
+    #
+    # Raised rather than logged. The caller here is always souk's own run
+    # pipeline (see handlers), which catches it, logs it, and still terminates
+    # the run's stream — so the run ends visibly instead of continuing to
+    # write into nothing.
+    if result.rowcount == 0:
+        raise RunRowMissing(
+            f"run {run_id}: no such run in the database — souk is dispatching a run "
+            "this database does not have"
+        )
 
 
 async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
@@ -717,13 +734,12 @@ async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> di
     """
     row = (
         await session.execute(
-            select(thread_history)
+            select(runs)
             .where(
-                thread_history.c.thread_id == thread_id,
-                thread_history.c.kind == "run_status",
-                thread_history.c.status.in_(["queued", "running", "cancelling", "input-required"]),
+                runs.c.thread_id == thread_id,
+                runs.c.status.in_(["queued", "running", "cancelling", "input-required"]),
             )
-            .order_by(thread_history.c.id.desc())
+            .order_by(runs.c.created_at.desc())
             .limit(1)
         )
     ).mappings().first()
@@ -752,9 +768,7 @@ async def touch_run_activity(session: AsyncSession, run_id: str) -> None:
     doesn't look stalled even without a status change.
     """
     await session.execute(
-        update(thread_history)
-        .where(thread_history.c.run_id == run_id, thread_history.c.kind == "run_status")
-        .values(last_activity_at=_utcnow())
+        update(runs).where(runs.c.run_id == run_id).values(last_activity_at=_utcnow())
     )
 
 
@@ -770,17 +784,15 @@ async def _fail_runs(
     """
     rows = (
         await session.execute(
-            select(thread_history.c.id, thread_history.c.run_id, thread_history.c.metadata).where(
-                where_clause
-            )
+            select(runs.c.run_id, runs.c.metadata).where(where_clause)
         )
     ).all()
     now = _utcnow()
     run_ids: list[str] = []
     for row in rows:
         await session.execute(
-            update(thread_history)
-            .where(thread_history.c.id == row.id)
+            update(runs)
+            .where(runs.c.run_id == row.run_id)
             .values(
                 status="failed",
                 completed_at=now,
@@ -806,8 +818,7 @@ async def fail_orphaned_runs(session: AsyncSession) -> list[str]:
     """
     return await _fail_runs(
         session,
-        (thread_history.c.kind == "run_status")
-        & (thread_history.c.status.in_(["queued", "running", "cancelling"])),
+        runs.c.status.in_(["queued", "running", "cancelling"]),
         "orphaned_by_souk_restart",
     )
 
@@ -832,9 +843,7 @@ async def fail_stalled_runs(session: AsyncSession, stall_timeout_seconds: int) -
     cutoff = _utcnow() - timedelta(seconds=stall_timeout_seconds)
     return await _fail_runs(
         session,
-        (thread_history.c.kind == "run_status")
-        & (thread_history.c.status.in_(["running", "cancelling"]))
-        & (thread_history.c.last_activity_at < cutoff),
+        runs.c.status.in_(["running", "cancelling"]) & (runs.c.last_activity_at < cutoff),
         "stalled_no_activity",
     )
 
@@ -852,9 +861,7 @@ async def fail_stale_paused_runs(session: AsyncSession, timeout_seconds: int) ->
     cutoff = _utcnow() - timedelta(seconds=timeout_seconds)
     return await _fail_runs(
         session,
-        (thread_history.c.kind == "run_status")
-        & (thread_history.c.status == "input-required")
-        & (thread_history.c.last_activity_at < cutoff),
+        (runs.c.status == "input-required") & (runs.c.last_activity_at < cutoff),
         "paused_no_resume",
     )
 
@@ -881,14 +888,11 @@ async def fail_unclaimed_runs(
     # them (see _fail_runs) — so the join lives in this SELECT instead.
     rows = (
         await session.execute(
-            select(thread_history.c.id, thread_history.c.run_id, thread_history.c.metadata)
-            .select_from(
-                thread_history.join(agents, agents.c.agent_id == thread_history.c.agent_id)
-            )
+            select(runs.c.run_id, runs.c.metadata)
+            .select_from(runs.join(agents, agents.c.agent_id == runs.c.agent_id))
             .where(
-                thread_history.c.kind == "run_status",
-                thread_history.c.status == "queued",
-                thread_history.c.created_at < created_cutoff,
+                runs.c.status == "queued",
+                runs.c.created_at < created_cutoff,
                 agents.c.last_seen_at < online_cutoff,
             )
         )
@@ -897,8 +901,8 @@ async def fail_unclaimed_runs(
     run_ids: list[str] = []
     for row in rows:
         await session.execute(
-            update(thread_history)
-            .where(thread_history.c.id == row.id)
+            update(runs)
+            .where(runs.c.run_id == row.run_id)
             .values(
                 status="failed",
                 completed_at=now,
@@ -911,27 +915,16 @@ async def fail_unclaimed_runs(
 
 
 async def get_run(session: AsyncSession, run_id: str) -> RunRecord | None:
-    """Named columns, not `select(thread_history)`. Runs share that table
-    with messages, so selecting all of it also returned the columns that make
-    the sharing work (`id`, `kind`, `message_id`, `message_json`) — storage,
-    not facts about a run. See models.RunRecord.
+    """`select(runs)` — and that is safe again, which it was not while runs
+    shared `thread_history` with messages. Selecting the whole row there also
+    returned `id`, `kind`, `message_id` and `message_json`: the columns that
+    made the sharing work, handed back as if they were facts about a run. The
+    fix then was to name every column; the fix now is that the table holds a
+    run and nothing else, so its columns and `models.RunRecord`'s fields are
+    the same set by construction rather than by two lists agreeing.
     """
     row = (
-        await session.execute(
-            select(
-                thread_history.c.run_id,
-                thread_history.c.thread_id,
-                thread_history.c.agent_id,
-                thread_history.c.protocol,
-                thread_history.c.status,
-                thread_history.c.input_json,
-                thread_history.c.metadata,
-                thread_history.c.created_at,
-                thread_history.c.started_at,
-                thread_history.c.completed_at,
-                thread_history.c.last_activity_at,
-            ).where(thread_history.c.run_id == run_id, thread_history.c.kind == "run_status")
-        )
+        await session.execute(select(runs).where(runs.c.run_id == run_id))
     ).mappings().first()
     return RunRecord(**row) if row else None
 
