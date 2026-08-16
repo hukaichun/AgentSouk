@@ -138,9 +138,24 @@ pair through and deleting the translation on the way.
 
 | table | today | after |
 |---|---|---|
-| `agents` | `agent_id` PK, `UNIQUE(public_key, name)` | PK `(public_key, name)`; the separate unique constraint goes with it, being the same thing |
-| `threads` | `agent_id` FK → `agents.agent_id` | `(agent_public_key, agent_name)` composite FK |
-| `thread_history` | `agent_id`, nullable, no FK | `agent_public_key` / `agent_name`, nullable, still no FK |
+| `agents` | `agent_id` PK, `public_key`, `UNIQUE(public_key, name)` | PK `(provider_key, name)`; the separate unique constraint goes with it, being the same thing; `provider_key` gains a real FK to `providers.public_key` |
+| `threads` | `agent_id` FK → `agents.agent_id` | `(provider_key, agent_name)` composite FK |
+| `thread_history` | `agent_id`, nullable, no FK | `provider_key` / `agent_name`, nullable, still no FK |
+
+**The column is `provider_key`, not `agent_public_key`.** An agent has no
+key. The key belongs to the provider, and an agent is that key plus a name —
+which is the entire point of this document, so a column name implying agents
+have keypairs of their own would undo it in the one place people read most
+often. `agents.public_key` has always meant "the provider key that owns this
+agent" (its own comment says so) and is renamed here to say it; `Souk.resolve_agent(provider, name)`
+already names the parameter `provider`, so this is the schema catching up
+with the vocabulary rather than a new one.
+
+**`agents.public_key` has no declared foreign key to `providers.public_key`
+today** — checked, not assumed — even though the latter is that table's
+primary key. The relationship is held together by `ensure_provider` being
+called first, which is a convention, not a guarantee. Promoting the column
+into a primary key is the moment to declare it.
 
 Storage grows by a 64-hex key per thread and per run_status row. Accepted
 rather than optimised around: it also makes "whose agent is this thread for"
@@ -156,7 +171,7 @@ ever matters, `providers.fingerprint` is the 16-hex form and is already unique
 | `Provider.run_stream(agent_id, run_input)` | id | `name`; the SDK drops `_handle_by_id` |
 | `Souk.attach_provider(provider_id, provider, agent_ids)` | ids | names |
 | `Registration.agent_ids: {name: id}` | ids handed out | names only, or nothing |
-| `AgentSummary.agent_id` | exposed | dropped — `public_key` and `name` are already on it |
+| `AgentSummary.agent_id` | exposed | dropped — the pair is already on it, with `public_key` renamed `provider_key` to match |
 | A2A card / routes `/a2a/id/{agent_id}` | id in the URL | `{fingerprint}/{name}` |
 | AG-UI addressing | id | same pair |
 | KYOK token's `agent_id` claim | id | the pair |
