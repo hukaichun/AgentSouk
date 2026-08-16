@@ -69,23 +69,18 @@ That is precisely the runtime architecture:
 - 🔗 **Auditable Multi-Hop Actor Chains**: Multi-agent delegation embeds tamper-evident, signed JWT EdDSA provenance chains to prevent privilege escalation and trace delegation lineages.
 - 💾 **Durable State & Human-in-the-Loop (HITL)**: Persistent threads, execution logs, and native `input-required` async pause & resume flows — on a zero-config local **SQLite** file by default, or **Postgres / ParadeDB** for a concurrent multi-writer deployment (one `SOUK_DATABASE_URL` switch, no code change).
 - 🔑 **Keep Your Own Key (KYOK)** *(experimental)*: Privacy relay allowing callers to pay for LLM inference with their own API keys without handing raw credentials to agent hosts.
-- 🖥️ **Zero-Backend Directory UI**: Pure static browser client (`souk-directory`) to browse active agents, inspect capabilities, and chat live.
+- 🖥️ **Zero-Backend Directory UI**: Pure static browser client (`souk-directory`, in AgentSoukServer) to browse active agents, inspect capabilities, and chat live.
 
 ---
 
 ## ⚡ Quick Start
 
-**Running a gateway is [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)'s quick start, not this repo's** — deployment, Docker, TLS, and configuration guidance all live there. What starts *here* is a provider or a caller against a souk that is already running:
+**Running anything is [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)'s quick start, not this repo's** — the gateway, the provider and caller SDKs, the reference providers (`agent-template`, `providers/*`), deployment, Docker, TLS, and configuration guidance all live there; it owns both ends of every wire it defines. What lives *here* is the library those wires carry: the domain, its persistence, and the protocol translation.
 
 ```bash
-# A provider, from behind any NAT — no firewall change, no public IP:
-cd agent-template && uv sync
-SOUK_HTTP_URL=https://souk.example.com \
-SOUK_GRPC_URL=souk.example.com:50051 \
-uv run agent-template
-
-# A caller, from anywhere:
-curl https://souk.example.com/agents
+# Library development is the whole quick start:
+cd souk && uv sync --group dev
+uv run pytest        # SQLite, zero config
 ```
 
 The full local demo stack (gateway + database + example agents + directory UI) lives with the gateway, in AgentSoukServer — this repo's own `docker compose` carries only a Postgres for running the test suites.
@@ -106,7 +101,7 @@ graph TD
 
     Gateway --> DB[(SQLite / Postgres<br/>Roster, Threads, Run History)]
 
-    Relay <== "claim work / report events / finish<br/>+ cancel back the other way" ==> SDK[souk-agent-sdk]
+    Relay <== "claim work / report events / finish<br/>+ cancel back the other way" ==> SDK[souk-agent-sdk<br/>(in AgentSoukServer)]
 
     SDK --> AgentA["Local Agent A<br/>(Laptop / Behind NAT)"]
     SDK --> AgentB["Enterprise VPC Agent B<br/>(Private Subnet)"]
@@ -139,12 +134,9 @@ Modular, independent distributions — no shared workspace, each stands alone:
 | Module Path | Description |
 |---|---|
 | [`souk/`](souk/) | **The core library.** Agents, threads, runs, identity, the AG-UI/A2A/KYOK adapters, and SQLite/Postgres persistence. Network-free: it depends on no web framework, no gRPC, no WebSocket library — and cannot, by packaging and by test |
-| [`souk-agent-sdk/`](souk-agent-sdk/) | Python SDK for agent providers: registration, claiming, streaming, delegation. Implements the wire contract authored in AgentSoukServer |
-| [`souk-client-sdk/`](souk-client-sdk/) | Python client library for consuming agents over AG-UI, and the caller-side KYOK bridge |
-| [`agent-template/`](agent-template/) | Minimal reference provider — the smallest complete thing that registers and serves an agent, no LLM dependency |
-| [`providers/`](providers/) | Fuller provider examples (Pydantic-AI agent with MCP tools & sub-agent delegation) |
-| [`proto/souk.proto`](proto/souk.proto) | The current gRPC relay's wire contract, kept as the record of the worker-channel semantics the WebSocket framing re-encodes |
 | [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
+
+The SDKs (`souk-agent-sdk`, `souk-client-sdk`), the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`) moved to [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer): the gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
 
 ---
 
@@ -162,12 +154,6 @@ The same suite runs against Postgres by pointing at one (dialect bugs only ever 
 ```bash
 docker compose up paradedb -d
 SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk" uv run pytest
-```
-
-SDK development mirrors it (`cd souk-agent-sdk && uv sync --group dev && uv run pytest`), with gRPC stubs generated once per checkout:
-
-```bash
-cd souk-agent-sdk && uv run bash ../scripts/gen_proto.sh souk_agent_sdk/grpc_gen
 ```
 
 Schema changes are Alembic revisions under [`souk/alembic/`](souk/alembic/) — `uv run alembic upgrade head` is a deploy-time DDL step, deliberately separate from anything a running gateway does (see `CONTRIBUTING.md`).
@@ -203,7 +189,7 @@ curl -N -X POST http://localhost:8000/a2a/translator/rpc \
 
 ## 🔐 Security & Identity Architecture
 
-- **Self-Sovereign Identity**: Agent identity is bound to an **Ed25519 keypair** generated automatically by `souk-agent-sdk`. `/agents/register` verifies cryptographic ownership before issuing short-lived HMAC session bearer tokens.
+- **Self-Sovereign Identity**: Agent identity is bound to an **Ed25519 keypair** generated automatically by the provider SDK (in AgentSoukServer). `/agents/register` verifies cryptographic ownership before issuing short-lived HMAC session bearer tokens.
 - **Actor Chain Provenance**: Delegation across multiple agents embeds an **EdDSA signed JWT chain**. Each hop cryptographically binds to the previous hop's SHA-256 hash, preventing token splicing, replay attacks, or impersonation.
 - **Transport security is the gateway's job**: what core guarantees is signing and verification (registration signatures, session tokens, actor chains, KYOK's two-part authorization) — all bounded by a 60s freshness window that only helps on an encrypted path. TLS termination, and why it is mandatory off localhost, is documented in AgentSoukServer's README.
 
@@ -211,7 +197,7 @@ curl -N -X POST http://localhost:8000/a2a/translator/rpc \
 
 ## 🔮 Roadmap
 
-- 🔌 **WebSocket relay base mode**: one gateway port for callers *and* providers. The spec and serving implementation live in AgentSoukServer ([`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)); this repo's share is the SDK transports that implement it, and eventually retiring `proto/souk.proto` alongside the gRPC carrier it describes.
+- 🔌 **WebSocket relay base mode**: one gateway port for callers *and* providers — landed. Spec, serving implementation and the SDK transports all live in AgentSoukServer ([`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)); the gRPC carrier and its `proto/souk.proto` are retired.
 - 🌐 **Cross-Souk Discovery**: `@souk` addressing (`agent@souk.example.com`) with client-side resolution and a `.well-known/souk-federation.json` discovery document — no inter-souk server-to-server proxying needed. See [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md).
 - 💳 **Native Monetization & Payments**: Integration with micro-payment rails like [x402](https://www.x402.org/) for agent-to-agent transactions and directory-listing economics.
 - 📈 **Horizontal Gateway Scaling**: Distributing broker state via Redis / Postgres LISTEN-NOTIFY for multi-replica deployments — see `docs/library-architecture.md`'s "What this leaves open" for what two replicas actually do today.

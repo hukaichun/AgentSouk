@@ -214,10 +214,11 @@ filters names against `(this key, name)` instead of ids against a set of ids.
 Nothing about "a valid token for one provider must not claim another's agents"
 changes, and that property needs its existing test to keep passing untouched.
 
-Downstream, in this repo: `souk-agent-sdk` (4 files), `souk-directory` (4),
-`providers/` (3). `souk-client-sdk` and `agent-template` have none.
-`AgentSoukServer` is a separate repository and has not been surveyed — its
-routes carry `/a2a/id/{agent_id}` today, so it changes with the addressing.
+All of it is downstream now. This tree is the library and its record — the
+SDKs, the reference providers and the directory UI left it — so everything
+that reads an `agent_id` out of an HTTP response lives in AgentSoukServer,
+which has not been surveyed here. Its routes carry `/a2a/id/{agent_id}`
+today, so they change with the addressing.
 
 ## Two things found on the way that are not this change
 

@@ -129,16 +129,18 @@ identifier anywhere** — the case that is impossible today. Plus the ownership
 test still passing with the smallest possible edit; if it needs rewriting, the
 ownership model changed too and that was not this item.
 
-**Done in core; the rest is downstream and blocked on it.** `souk-directory`
-and `providers/pydantic-ai-agent` read `agent_id` out of the *gateway's* HTTP
-responses, not out of core, so migrating them now would mean writing against
-an API nothing serves yet. `souk-agent-sdk` is blocked on a structural
-decision instead — see below.
+**Done in core, and the rest is no longer in this tree.** The SDKs, the
+reference providers and the directory UI moved to AgentSoukServer while this
+was being written, which settles the sequencing question they raised: they
+read `agent_id` out of the *gateway's* HTTP responses rather than out of
+core, so they follow the gateway. The position below is what this repository
+still owes them.
 
 ### The SDK defines the interaction; transport belongs downstream
 
-Stated as a position, because it decides what `souk-agent-sdk` is for and it
-is currently being decided by accident.
+Stated as a position rather than as work, because the SDK is not in this tree
+any more — and that makes writing it down more useful, not less: a decision
+nobody records is one the next branch makes by accident.
 
 `souk-agent-sdk` defines how a provider and souk interact: the provider port,
 identity and registration signing, and **the provider's own worker loop**.
