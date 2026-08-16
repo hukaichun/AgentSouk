@@ -716,24 +716,15 @@ class Souk:
         The unambiguous way to address an agent without knowing souk's own
         id for it: the pair is the natural key (`UNIQUE(public_key, name)`),
         so this either finds one agent or none, and a caller has nothing to
-        disambiguate. `resolve_agents_by_name` below is the other question —
-        "who is offering this name" — and it is a different one, with a
-        different answer shape, for browsing rather than addressing.
+        disambiguate.
+
+        There is deliberately no by-display-name sibling. Browsing for who
+        offers a name is `list_agents`, which answers with all of them; the
+        lookup that took a bare name and hoped for exactly one is gone —
+        see the note in `docs/library-architecture.md`.
         """
         async with self.session() as session:
             return await repo.resolve_agent(session, provider, name)
-
-    async def resolve_agents_by_name(self, name: str) -> list[dict[str, Any]]:
-        """Every currently-listed agent under this display name — zero, one,
-        or several, since a name is not exclusive across identities.
-
-        A discovery question, not an addressing one: two providers may both
-        offer `translator`, and both answers are legitimate. Something that
-        needs to reach one particular agent should say whose it is (see
-        `resolve_agent`) rather than hope this returns exactly one.
-        """
-        async with self.session() as session:
-            return await repo.resolve_agents_by_name(session, name)
 
     # ---- Threads
 

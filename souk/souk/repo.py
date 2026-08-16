@@ -293,9 +293,9 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
 
     Addressing an agent by *whose* it is and what they called it, which is
     what an agent's identity has been all along: `UNIQUE(public_key, name)`
-    is the primary key itself. So unlike resolve_agents_by_name this can never be
-    ambiguous — the pair is either registered or it is not — and callers
-    have nothing to disambiguate and no 409 to surface.
+    is the primary key itself. So this can never be ambiguous — the pair is
+    either registered or it is not — and callers have nothing to
+    disambiguate and no 409 to surface.
 
     """
     row = (
@@ -318,31 +318,6 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
         )
     ).mappings().first()
     return dict(row) if row else None
-
-
-async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[str, Any]]:
-    """Every currently-listed agent registered under this display name —
-    zero, one (the common case), or many if multiple identities picked the
-    same name. Callers of the legacy `/a2a/{name}/...`/`/agui/{name}`
-    routes use this to either transparently resolve (exactly one match) or
-    surface a 409 with the candidate list (more than one) — see api_a2a.py/
-    api_agui.py.
-    """
-    rows = (
-        await session.execute(
-            select(
-                agents.c.provider_key,
-                agents.c.name,
-                agents.c.agent_card,
-                agents.c.metadata,
-                agents.c.joined_at,
-                agents.c.last_seen_at,
-            )
-            .where(agents.c.name == name)
-            .order_by(agents.c.joined_at)
-        )
-    ).mappings().all()
-    return [dict(row) for row in rows]
 
 
 async def list_agents(
