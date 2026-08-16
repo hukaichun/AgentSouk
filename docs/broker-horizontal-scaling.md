@@ -518,7 +518,7 @@ being claimed:
 UPDATE thread_history
    SET status='running', claimed_by=:key, owner_id=:me, lease_expires_at=:t
  WHERE kind='run_status' AND status='queued'
-   AND agent_public_key = :key AND agent_name IN (:names)
+   AND provider_key = :key AND agent_name IN (:names)
 ```
 
 One statement, atomic, and the authorization is the same `WHERE` clause that
@@ -555,7 +555,7 @@ index is on queued runs and is consulted by every worker on every node; one
 fewer nullable column to reason about there is small but free.
 
 **The one real cost: the claim index gets wider.** `(agent_id, created_at)`
-becomes `(agent_public_key, agent_name, created_at)` — a 64-hex key plus a
+becomes `(provider_key, agent_name, created_at)` — a 64-hex key plus a
 name, against a 30-character id. Roughly two to three times the width on the
 one index this design puts on the hottest path. Irrelevant at the deployment
 size souk is aimed at, and named here so that if it ever is relevant, the fix
