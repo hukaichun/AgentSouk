@@ -785,18 +785,32 @@ this document oversold it and the overstatement was believed:
 - The broker is an instance owned by a `Souk` and accepted in its
   constructor, not a module-level singleton. That part is real.
 - Its wake mechanism is a plain `asyncio.Event`, not anything transport-
-  shaped, so a `LISTEN/NOTIFY` implementation could sit behind it.
-- `Run` is now the broker's own. Nothing outside `broker.py` holds one: a
-  caller gets a `RunSnapshot` (a copy of the facts, no live references) and
-  affects a run through operations — `push`, `subscribe`, `request_cancel`.
-  The one exception is deliberate: `handlers.py` receives
-  the live object, because the handlers *are* the pipeline's inner loop and
-  the broker is what dispatches them. A different broker implementation
-  brings its own.
+  shaped, so a `LISTEN/NOTIFY` implementation could sit behind it. True, but
+  weaker than it reads: `subscribe_wake` *returns* that Event and
+  `core.claim_work` awaits it directly, so core names an asyncio primitive
+  rather than the operation ("wait for work for these agents, or this
+  long"). A second implementation can satisfy it; none should have to.
+- `Run` is mostly the broker's own — a caller gets a `RunSnapshot` (a copy
+  of the facts, no live references) and affects a run through operations:
+  `push`, `subscribe`, `request_cancel`. `handlers.py` receives the live
+  object, deliberately, because the handlers *are* the pipeline's inner loop
+  and the broker is what dispatches them; a different broker brings its own.
+
+  **This bullet used to say "nothing outside `broker.py` holds one", and
+  that was not true.** `Souk.enqueue_run` is annotated `-> RunSnapshot` and
+  returns the live `Run`, queues attached — found by `inspect` at runtime,
+  after reading this bullet and believing it. It has cost nothing so far
+  only because all four call sites discard the return value. Which is the
+  same lesson this section already exists to record, arriving a second time:
+  the sentence describing an encapsulation was written before the last hole
+  in it was closed.
 - There is still **no declared interface** — no Protocol, no ABC. The
   surface is now small enough to be one, but writing it from the in-memory
   implementation alone is how the last "swap-in seam" came to be believed:
-  it is only an interface once a second implementation has met it.
+  it is only an interface once a second implementation has met it. Measured
+  since: four of the nine methods could not be met by a second
+  implementation as they stand — see `docs/broker-horizontal-scaling.md`,
+  "The interface, and what cannot currently be said in it".
 
 Encapsulating it made the shape visible, and the shape is better than it
 looked: a `Run` mixes three separable things. Its identity and input are

@@ -171,6 +171,79 @@ cancelled-run filter both read them off the live `Run`. Both facts must be
 persisted at the moment they are decided, or no second node can enforce
 either rule.
 
+## The interface, and what cannot currently be said in it
+
+The architecture doc's rule stands and this design keeps it: **the `Broker`
+Protocol is written last**, once a second implementation has met it, because
+an interface derived from one implementation is how the previous "swap-in
+seam" came to be believed rather than checked.
+
+But "write it last" is not "don't look at it now". Looking — by running
+`inspect` over the surface rather than reading it — found four places where
+the current shape cannot be met by a second implementation at all, and one of
+them contradicts a decision further down this document.
+
+```
+Souk.enqueue_run   annotated -> RunSnapshot
+Souk.enqueue_run   actually  -> Run          live object, both queues attached
+RunBroker.claim              -> list[Run]    same
+RunBroker.subscribe_wake     -> asyncio.Event
+all nine methods             sync
+```
+
+- **`Run` still escapes.** `library-architecture.md` states that nothing
+  outside `broker.py` holds a live `Run` and that callers get a
+  `RunSnapshot`. `enqueue_run` hands out the live object, mislabelled. It is
+  latent rather than active — all four call sites discard the return value
+  (checked across the repo, not assumed) — which is exactly why it is cheap
+  to fix now and expensive to leave: a future caller that starts using it
+  would be depending on an object a distributed broker cannot produce.
+  `claim` returns live `Run`s too; that one stays inside `core.claim_work`,
+  which converts to `ClaimedRun`, so it never escapes core — but the
+  *interface* is still stated in terms of an object only one implementation
+  can make.
+- **The wake seam names an in-process primitive.** `subscribe_wake` returns
+  an `asyncio.Event` and `core.claim_work` awaits it directly, then
+  unsubscribes and re-claims by hand. A database broker *can* satisfy this
+  (set the Event from its own poll task), so the seam is not fake — but the
+  operation being performed is "wait until there is work for these agents,
+  or this long", and saying that instead removes the four-step dance from
+  core and stops the interface from naming asyncio at all.
+- **The surface is sync, and must stay partly sync.** Not an oversight to
+  tidy up later: `report_event` / `finish_run` reach `broker.push`
+  synchronously because `worker._execute`'s `finally` calls `finish_run`
+  *while unwinding a cancellation*, where an `await` is interrupted before
+  it ever reaches souk and the run hangs until the stall sweep notices. So
+  the Protocol will be a mixed sync/async surface. Written down here because
+  a uniform-async "cleanup" would silently reintroduce a bug that has
+  already been fixed once.
+
+  What can safely become async: `claim` and `enqueue_run` (every caller is
+  already in an async context) and `request_cancel` (its callers are
+  ordinary request contexts; the "safe to call mid-teardown" property in its
+  docstring is about it not blocking, and is preserved by the flag write
+  landing before anything else). What cannot: `push`.
+- **`handlers` are supplied per `enqueue_run`, and that contradicts the
+  ownership decision below.** The pipeline is spawned by whoever enqueues,
+  with a `HandlerMap` that caller passes in. But the design below has the
+  pipeline created **at claim time, on the claiming node** — a node that
+  never saw the enqueue call and therefore never received the handlers.
+  Both cannot be true. Handlers belong to the broker, given once when it is
+  built: `core.enqueue_run` already rebuilds the identical
+  `make_handlers(self)` map on every call, so moving it is a simplification
+  on its own terms, not a cost paid for a future feature.
+
+  The wrinkle to handle rather than gloss: `Souk.__init__` accepts a broker
+  from outside (`broker or RunBroker(...)`), and at that moment the `Souk`
+  the handlers close over is not finished being constructed. So this needs
+  an explicit binding step (`broker.bind(souk)` or handlers passed to
+  `Souk`), not a constructor argument on the broker.
+
+None of this makes the abstraction fake. After these four changes the
+surface is eight methods that two implementations can genuinely both meet —
+which is the point of looking now: the Protocol gets *written* last, but the
+shape it will have to describe gets *fixed* first, while it is still free.
+
 ## Decisions
 
 ### The claiming node owns the run
@@ -452,6 +525,16 @@ Each phase lands green on SQLite and Postgres, per CLAUDE.md, and each names
 the probe scenarios it is expected to turn from BROKEN to OK. Nothing is
 "done" while its scenario still fails.
 
+0. **Make the surface sayable.** No behaviour change, no scenario flips, and
+   nothing about it is speculative — every item is a thing the current code
+   states wrongly today. `enqueue_run` returns a `RunSnapshot` for real (or
+   nothing — no caller uses it); `claim` returns `ClaimedRun`s rather than
+   live `Run`s; `subscribe_wake`/`unsubscribe_wake` collapse into
+   `wait_for_work(agent_ids, timeout)`; `handlers` move off `enqueue_run`
+   onto the broker via an explicit bind. Done first because each one is
+   cheap while the return values are unused and the map is rebuilt anyway,
+   and because phase 3 cannot be written on top of the current shapes at
+   all. See "The interface" above for how each was found.
 1. **Leases and sweep ownership** → fixes **[2]**, **[2b]** and **[5]**.
    `instance_id`; the four columns; the in-memory broker stamps them too
    (cheap, and it makes this phase testable before the new broker exists);
