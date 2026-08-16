@@ -50,28 +50,15 @@ Two rules decide it:
    refuse. Otherwise every risky change is made under a database that accepts
    orphans silently, and the constraint arrives in time to protect nothing.
 
-Rule 2 is why W2 is the split and nothing else. An earlier version of this
-file made W2 "one new schema baseline" holding all four schema changes at
+Rule 2 is why W1 is the split and nothing else. An earlier version of this
+file made a single "new schema baseline" item holding all four schema changes at
 once, which was wrong in a way worth recording: it optimised the *migration
 artifact* rather than the *work*. Those are separate questions. souk is
 unreleased, so the baseline is regenerated from `schema.py` no matter how many
 steps produced it — bundling bought nothing, and cost the ability to verify
 any step on its own, which is the same mistake as trusting a green suite.
 
-### W1 · Land `NothingOwned` — issue #37
-
-Branch `claude/issue-37-nothing-owned`, written, 215 tests green on SQLite and
-Postgres. Invariant 5.
-
-First because it depends on nothing and makes a currently-silent failure
-audible today. It will be edited again by W3 (its trigger is computed from
-agent ids, which become names), and that is accepted: a small edit later beats
-a live silent failure now.
-
-**Done when:** a provider whose registration is gone gets an error instead of
-an empty list, and its own logs say so. Already demonstrated.
-
-### W2 · Split `thread_history` into `runs` and `thread_messages`
+### W1 · Split `thread_history` into `runs` and `thread_messages`
 
 No document yet — the argument is this file's opening table plus the note in
 `broker-horizontal-scaling.md` that a split was deferred with "revisit if the
@@ -117,7 +104,7 @@ mid-run must raise a foreign key violation where today it writes two orphan
 built both ways and compared column by column on both backends, the check
 `d363d76` used.
 
-### W3 · Agent identity: `(provider_key, name)`
+### W2 · Agent identity: `(provider_key, name)`
 
 Document: `retiring-agent-id.md`. Invariant 1.
 
@@ -132,7 +119,7 @@ and `attach_provider` take names; the provider port takes a name; AG-UI and
 A2A address `(provider, name)`; registration stops handing ids back;
 `AgentSummary` exposes the pair; `souk-agent-sdk` deletes `_handle_by_id`.
 
-After W2, this touches `runs.agent_id` and `threads.agent_id` once each. Done
+After W1, this touches `runs.agent_id` and `threads.agent_id` once each. Done
 in the other order it would edit `thread_history.agent_id` into two columns
 and then move both during the split — the same columns twice.
 
@@ -142,7 +129,7 @@ identifier anywhere** — the case that is impossible today. Plus the ownership
 test still passing with the smallest possible edit; if it needs rewriting, the
 ownership model changed too and that was not this item.
 
-### W4 · Lifecycle
+### W3 · Lifecycle
 
 Document: `agent-lifecycle.md`. Invariant 2.
 
@@ -154,6 +141,40 @@ prefix.
 refused. That test is written first, against today's payload, where it
 **passes** — which is what proves the hole is real.
 
+### W4 · Re-derive issue #37 against the structure that exists by then
+
+Invariant 5. Deliberately *not* "merge the parked branch".
+
+`claude/issue-37-nothing-owned` holds a written, verified fix — 251 lines,
+215 tests green on both backends — and only about four of those lines are ones
+W2 rewrites. It was tempting to land it first for exactly that reason, and the
+stricter rule wins: nothing lands on `claim_work`'s ownership block while that
+block is known to be wrong, because a fix carried across a structural change
+is how a fix quietly becomes a workaround.
+
+So the parked branch becomes a **reference, not a merge**. The work is to ask
+again, against W1–W3 as built:
+
+- which trigger paths still exist? Three are predicted — a database replaced
+  under a live connection, a name never registered, and an agent deleted while
+  its provider was offline (W3 adds that one) — and predictions made before a
+  refactor are exactly what this session kept disproving.
+- does the claim query still need a separate registration lookup to tell
+  "nothing queued" from "not registered"? Predicted yes, because folding
+  ownership into the claim's `WHERE` makes 0 rows updated ambiguous. Check it
+  against the query that actually got written.
+- is the error still the right shape, and does the worker still need to
+  survive rather than exit, now that recovery is re-registering with unchanged
+  names?
+
+**Done when:** each surviving trigger is reproduced by a probe first, and only
+then fixed. Any trigger that turns out not to survive gets its answer recorded
+rather than a fix carried over out of momentum.
+
+**Until then the exposure stands, stated rather than worked around:** a
+provider whose registration is gone claims forever, silently, and looks
+healthy from outside.
+
 ### W5 · Leases and sweep ownership
 
 Document: `broker-horizontal-scaling.md`, phase 1. Invariant 4.
@@ -162,7 +183,7 @@ Document: `broker-horizontal-scaling.md`, phase 1. Invariant 4.
 work here that fixes damage occurring today — a booting replica marks another
 node's live runs failed, and that node never learns and keeps writing — and
 the argument for doing it first was exactly that. But it puts four columns on
-`thread_history`, a table W2 replaces. Building it first means building on a
+`thread_history`, a table W1 replaces. Building it first means building on a
 structure already known to be wrong and letting a green suite say it was fine,
 which is the failure this document opens with. Here, the same four columns go
 onto `runs`, once.
@@ -217,12 +238,12 @@ killing the owner mid-stream reaches a consumer on another node as a terminal
 
 | branch | contents | state |
 |---|---|---|
-| `claude/issue-37-nothing-owned` | W1 | code, green both backends |
-| `claude/agent-identity` | W3, W4 designs | design |
+| `claude/issue-37-nothing-owned` | W4 reference — not to be merged as-is | code, green both backends |
+| `claude/agent-identity` | W2, W3 designs | design |
 | `claude/broker-horizontal-scaling-6b74a4` | W5–W9 design, `scripts/probes/` | design + probes |
 | `claude/work-objectives` | this file | index |
 
-The `thread_history` split (W2) has no document yet; its argument is in this
+The `thread_history` split (W1) has no document yet; its argument is in this
 file's opening table and in `broker-horizontal-scaling.md`'s note that a
 `run_dispatch` split was deferred with "revisit if the row keeps growing" —
 which the queued work now triggers, though the split that matches the strain
