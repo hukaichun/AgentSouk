@@ -1,16 +1,3 @@
-"""What the query methods hand back, as a contract rather than as whatever
-`repo.py` happened to build.
-
-souk's field names were only ever written down in row-building code, so
-everyone downstream learned them by reading it — the gateway carried a
-hand-written model listing exactly these keys, kept in step by nobody. These
-assertions are the other half of moving that model to where the data is
-produced: the field *set* is pinned, so a rename is a deliberate act with a
-failing test attached rather than something a consumer discovers.
-
-Whole field sets, not spot checks. A spot check passes while a field quietly
-disappears.
-"""
 
 from __future__ import annotations
 
@@ -78,18 +65,8 @@ async def test_get_agent_is_an_agent_record(souk: Souk) -> None:
     }
 
 
-async def test_get_run_is_a_run_record_without_the_storage_columns(souk: Souk) -> None:
-    """Runs used to live in `thread_history` next to messages, and `get_run`
-    used to `select(thread_history)` — so it also returned `id`, `kind`,
-    `message_id` and `message_json`, which say where souk keeps a run rather
-    than anything about the run.
-
-    Runs have their own table now, so `select(runs)` is safe again and this
-    pins the consequence: the table's columns and this model's fields are the
-    same set by construction, not by two lists agreeing.
-    """
-    agent_id = await _register(souk)
-    await souk.attach_provider(agent_id.provider_key, _Provider(), [agent_id.name])
+async def test_get_run_is_a_run_record_without_the_storage_columns(souk: Souk, serve) -> None:
+    agent_id = (await serve(_Provider(), "echo")).agents["echo"]
     handle = await souk.start_run(agent_id, {"messages": []})
     [event async for event in handle.events()]
 
@@ -117,14 +94,11 @@ async def test_get_run_is_a_run_record_without_the_storage_columns(souk: Souk) -
 
 
 async def test_an_unknown_id_is_still_none(souk: Souk) -> None:
-    """Typing the hit does not change what a miss looks like."""
     assert await souk.get_agent(AgentRef(provider_key="00" * 32, name="nope")) is None
     assert await souk.get_run("run_nope") is None
 
 
 async def test_the_models_serialise(souk: Souk) -> None:
-    """The gateway turns these into JSON, so `mode="json"` has to work on
-    every field — the datetimes are the ones that would bite."""
     agent_id = await _register(souk)
 
     dumped = (await souk.list_agents())[0].model_dump(mode="json")

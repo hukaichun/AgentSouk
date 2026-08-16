@@ -61,12 +61,36 @@ class AgentRef(BaseModel):
         return f"{self.provider_key[:16]}…/{self.name}"
 
 
+class ClaimedRun(BaseModel):
+    """A run handed to a provider, with everything needed to run it.
+
+    Carries `run_input` because handing over *is* the hand-over: there is no
+    second call in which souk delivers the input, and so no window in which a
+    provider holds a run but is still waiting to be told what to do.
+
+    Deliberately not a `broker.Run`: that is souk's own mutable dispatch
+    state, with the run's queues attached, and no provider should hold it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    agent: AgentRef
+    thread_id: str
+    run_input: dict[str, Any]
+
+
 class AgentSummary(BaseModel):
     """One row of the public roster — see `Souk.list_agents`.
 
-    `online` is derived, not stored: it is `last_seen_at` measured against
-    `CoreSettings.online_window_seconds` at the moment of the query, so two
-    calls a minute apart can legitimately disagree.
+    `online` is not stored and is not derived from `last_seen_at` either. It
+    is whether a provider is serving this agent through this souk at the
+    moment of the query (see `RunBroker.serving`), so two calls a minute
+    apart can legitimately disagree, and a souk that cannot reach a provider
+    another one can will answer False where that one answers True.
+
+    Default False because the query cannot know: `repo.list_agents` returns
+    the stored half and `Souk.list_agents` fills this in.
     """
 
     provider_key: str
@@ -75,7 +99,7 @@ class AgentSummary(BaseModel):
     skills: list[dict[str, Any]] = Field(default_factory=list)
     joined_at: datetime
     last_seen_at: datetime
-    online: bool
+    online: bool = False
     # `provider_name` is the optional storefront label for `provider_key` —
     # None means that key never set one, not that it was cleared.
     provider_name: str | None = None

@@ -1,10 +1,3 @@
-"""Covers the agent_id/soft-delist mechanics in souk.repo.register_agents —
-the core of this session's identity rework: name is a non-unique display
-label, agent_id (scoped to (public_key, name)) is the real ownership key,
-and a registration batch is the declarative full statement of what an
-identity currently offers (anything previously owned but omitted gets
-soft-delisted).
-"""
 
 from __future__ import annotations
 
@@ -20,27 +13,15 @@ from souk.schema import agents, providers
 
 
 async def _listed(session, souk):
-    """repo.list_agents with this souk's own window policy — the settings
-    it used to read from a global are now passed explicitly."""
+    """The stored half of the roster. `online` is left False here and filled
+    in by `Souk.list_agents` from who the broker can actually reach — this
+    layer has no way to know, and used to guess from `last_seen_at`."""
     return await repo.list_agents(
-        session,
-        online_window_seconds=souk.settings.online_window_seconds,
-        stale_hidden_window_seconds=souk.settings.stale_hidden_window_seconds,
+        session, stale_hidden_window_seconds=souk.settings.stale_hidden_window_seconds
     )
 
 
 async def test_registering_the_same_agent_twice_is_the_same_agent(session, new_identity):
-    """Once a tautology, and worth keeping for the half that is not.
-
-    That the two registrations name the same agent is now true by
-    construction: an agent *is* `(provider_key, name)`, so there is nothing
-    for souk to assign and nothing to reuse. This used to be the test that
-    souk minted an id and looked it up again, `startswith("agent_")` and all.
-
-    What still needs checking is the storage: the second registration updates
-    the existing row rather than adding a second, and leaves `joined_at`
-    alone — an agent that re-registers has not just joined.
-    """
     identity = new_identity()
     batch = [{"name": "greeter", "description": "hi"}]
 
@@ -62,8 +43,6 @@ async def test_registering_the_same_agent_twice_is_the_same_agent(session, new_i
 
 
 async def test_the_same_name_under_two_identities_is_two_agents(session, new_identity):
-    """A name is not exclusive, which is exactly why it is not an identity on
-    its own — and why addressing an agent takes the pair."""
     a = new_identity()
     b = new_identity()
     batch = [{"name": "greeter"}]
@@ -80,18 +59,15 @@ async def test_the_same_name_under_two_identities_is_two_agents(session, new_ide
     } == {result_a["greeter"], result_b["greeter"]}
 
 
-async def test_omitting_an_agent_takes_it_offline_rather_than_removing_it(
-    session, souk, new_identity
-):
-    """The change this rule exists for.
+async def test_omitting_an_agent_keeps_it_rather_than_removing_it(session, souk, new_identity):
+    """Absence from a batch is a withdrawal, not a deletion. It used to
+    de-list, which made re-registering the whole removal UX and turned a
+    partial batch — a config error, a flag off, half a deploy — into silent
+    data loss.
 
-    Absence from a batch used to de-list, which made a plain re-registration
-    the whole removal UX — and made a provider that started with a partial
-    list (a config error, a flag off, half a deploy) silently remove
-    everything it failed to mention, with clean logs. It goes offline now:
-    still registered, still addressable, off the roster because nobody is
-    serving it. Removing is `Souk.delete_agent`, which cannot be reached by
-    accident.
+    What *stops* is being served, and that is `Souk.register_agents`' half of
+    the job: it unregisters the withdrawn names from the broker, which is
+    where reachability lives. This layer only has to not destroy anything.
     """
     identity = new_identity()
     both = [{"name": "greeter"}, {"name": "translator"}]
@@ -101,31 +77,22 @@ async def test_omitting_an_agent_takes_it_offline_rather_than_removing_it(
 
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
 
-    # Offline immediately — a departure souk witnessed, not one it has to
-    # wait out — but still on the roster, because it is still registered.
-    # Dropping off that list is what `stale_hidden_window_seconds` does much
-    # later, and it is a read-time filter, not a removal.
-    listed = {a.name: a.online for a in await _listed(session, souk)}
-    assert listed == {"greeter": True, "translator": False}
-    # Still there, and still addressable by whoever knows its name.
+    assert {a.name for a in await _listed(session, souk)} == {"greeter", "translator"}
     assert await repo.resolve_agent(session, identity.public_key, "translator") is not None
     assert await repo.get_agent(session, translator) is not None
 
-    # And offering it again is all it takes to be available once more.
-    await repo.register_agents(session, identity.public_key, both)
-    assert all(a.online for a in await _listed(session, souk))
 
-
-async def test_list_agents_excludes_stale_and_reports_online(session, souk, new_identity):
+async def test_list_agents_excludes_an_agent_nothing_has_heard_from_in_weeks(
+    session, souk, new_identity
+):
+    """A different question from `online`, and the one this table can answer:
+    not "is anybody serving it" but "has it been away so long that listing it
+    is noise". Read-time filter only — it reappears the moment it registers."""
     identity = new_identity()
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
 
-    listed = await _listed(session, souk)
-    assert len(listed) == 1
-    assert listed[0].online is True  # just registered, last_seen_at is now()
+    assert len(await _listed(session, souk)) == 1
 
-    # Backdate past the stale-hidden window — should disappear from the
-    # roster entirely, not just show online=False.
     await session.execute(
         update(agents).values(last_seen_at=datetime.now(timezone.utc) - timedelta(days=30))
     )
@@ -153,8 +120,6 @@ async def test_provider_name_defaults_to_none_and_is_sticky_across_registrations
     )
     assert (await _listed(session, souk))[0].provider_name == "Ada's Stall"
 
-    # A later registration that doesn't pass provider_name at all must not
-    # blank out the name a previous one set.
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
     assert (await _listed(session, souk))[0].provider_name == "Ada's Stall"
 
@@ -172,18 +137,12 @@ async def test_resolve_agents_by_name_zero_one_many(session, new_identity):
 
 
 async def test_an_agent_is_addressable_by_whose_it_is_and_what_it_is_called(session, new_identity):
-    """The pair is the natural key, so addressing by it can never be
-    ambiguous — unlike a name on its own, which two identities may both
-    register (see the test above). This is what lets a caller reach one
-    particular agent without knowing souk's own id for it."""
     a, b = new_identity(), new_identity()
     mine = await repo.register_agents(session, a.public_key, [{"name": "translator"}])
     theirs = await repo.register_agents(session, b.public_key, [{"name": "translator"}])
 
     assert AgentRef(**{k: (await repo.resolve_agent(session, a.public_key, "translator"))[k] for k in ("provider_key", "name")}) == mine["translator"]
     assert AgentRef(**{k: (await repo.resolve_agent(session, b.public_key, "translator"))[k] for k in ("provider_key", "name")}) == theirs["translator"]
-    # ...while the name alone still answers with both, which is the other
-    # question: who offers this, not which one do I mean.
     assert len(await repo.resolve_agents_by_name(session, "translator")) == 2
 
 
@@ -196,14 +155,6 @@ async def test_resolving_an_agent_a_provider_never_registered_is_a_miss(session,
 
 
 async def test_an_agent_that_went_quiet_is_still_addressable(session, new_identity):
-    """The inverse of the old rule, and the point of it.
-
-    This used to assert that an omitted agent became unfindable. It stays
-    findable: it is registered, souk simply has no reason to believe anyone is
-    serving it. Anything holding its name — a delegation config, a bookmarked
-    address — keeps resolving, and starts working again the moment its
-    provider comes back.
-    """
     identity = new_identity()
     await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     await repo.register_agents(session, identity.public_key, [{"name": "summarizer"}])
@@ -213,8 +164,6 @@ async def test_an_agent_that_went_quiet_is_still_addressable(session, new_identi
 
 
 async def test_a_provider_is_addressable_by_its_fingerprint(session, new_identity):
-    """The short form of a 64-character key, so an address can be read and
-    typed. Derived, so it is never out of step with the key."""
     identity = new_identity()
     ids = await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     fingerprint = provider_fingerprint(identity.public_key)
@@ -229,8 +178,6 @@ async def test_a_provider_is_addressable_by_its_fingerprint(session, new_identit
 
 
 async def test_an_identity_that_never_named_itself_is_still_addressable(session, new_identity):
-    """`providers` records identities, not labels — a short address has to
-    resolve for a key that registered and said nothing else about itself."""
     identity = new_identity()
     await repo.register_agents(session, identity.public_key, [{"name": "solo"}])
 
@@ -238,10 +185,6 @@ async def test_an_identity_that_never_named_itself_is_still_addressable(session,
 
 
 async def test_a_second_key_cannot_take_an_existing_fingerprint(session, new_identity):
-    """Two identities sharing an address is the one thing an address may not
-    do. 64 bits puts a real collision out of reach, so this plants one to
-    exercise what the constraint does with it.
-    """
     mine, theirs = new_identity(), new_identity()
     await repo.register_agents(session, mine.public_key, [{"name": "translator"}])
     await session.execute(
@@ -254,7 +197,6 @@ async def test_a_second_key_cannot_take_an_existing_fingerprint(session, new_ide
     with pytest.raises(repo.ProviderFingerprintTaken):
         await repo.register_agents(session, theirs.public_key, [{"name": "impostor"}])
 
-    # Refused outright: the colliding registration left nothing behind.
     assert await repo.get_agent_names_for_provider(session, theirs.public_key) == set()
 
 

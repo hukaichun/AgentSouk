@@ -6,14 +6,15 @@ wrapping the three calls in a network is a downstream job, and the absence of
 `httpx`, `grpcio` and `websockets` from this package's dependencies is what
 makes that checkable rather than a matter of discipline.
 
-An in-process provider needs nothing else — a `Souk` object satisfies
-`SoukConnection` structurally, so pass one straight to `ProviderWorker`.
+souk hands work over rather than being asked for it: the broker offers each
+run to whoever serves its agent, and `ProviderRuntime.deliver` is where that
+lands. An in-process provider passes a `Souk` straight in — it has the two
+calls the runtime reports through.
 """
 
 from souk_provider_sdk.contract import (
     AGENT_FIELDS,
     CLAIMED_RUN_FIELDS,
-    RECOGNISED_SOUK_ERRORS,
 )
 from souk_provider_sdk.identity import (
     ProviderIdentity,
@@ -21,18 +22,16 @@ from souk_provider_sdk.identity import (
     registration_payload,
 )
 from souk_provider_sdk.provider import AgentHandle, HandleProvider, Provider
-from souk_provider_sdk.worker import ProviderWorker, SoukConnection
+from souk_provider_sdk.runtime import ProviderRuntime
 
 __all__ = [
     "AGENT_FIELDS",
     "AgentHandle",
     "CLAIMED_RUN_FIELDS",
-    "RECOGNISED_SOUK_ERRORS",
     "HandleProvider",
     "Provider",
     "ProviderIdentity",
-    "ProviderWorker",
-    "SoukConnection",
+    "ProviderRuntime",
     "deletion_payload",
     "registration_payload",
 ]

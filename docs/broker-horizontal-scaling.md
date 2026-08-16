@@ -1,6 +1,31 @@
 # Broker horizontal scaling: design
 
-Status: **design, not yet implemented.** This picks up where
+Status: **design, not yet implemented — and written against a dispatch model
+that has since been replaced.** Read the note below before the plan.
+
+> **Dispatch inverted (2026-08-16).** This document was written when a
+> provider *claimed* work: it called souk, souk answered with runs, and that
+> call could be answered by any node. souk hands work over now — the broker
+> finds whoever serves an agent and offers each run — so several passages
+> below rest on something that no longer exists. Where a paragraph says
+> "claim", "the claim index", or "any node can answer", the mechanism is
+> gone; the *problem* each was solving is not, and mostly got harder rather
+> than easier.
+>
+> The one that changed most: this document records that inverting to a pull
+> model **removed** connection affinity, and lists that as why several
+> replicas were within reach. Pushing brings it back. A run created on node A
+> for a provider attached to node B has to reach B, so the shared record this
+> plan needs is no longer only about runs — it is about which node holds
+> which provider connection. `RunBroker.serving` is the single seam that
+> answer has to move behind, and it is already the only way anything asks.
+> See `docs/broker-pushes-to-providers.md`, open question 5.
+>
+> Individual superseded passages are marked in place. Nothing has been
+> deleted: the measurements behind each decision are still the record of why
+> the door was left where it is.
+
+This picks up where
 `docs/library-architecture.md`'s "What this leaves open: horizontal scaling"
 stops. That section stays the record of *why* the door was left open and what
 two replicas do today; this document is the plan for walking through it.
@@ -530,7 +555,8 @@ this design that identifies a *provider* was already the natural key. Only the
 part identifying an *agent* was a surrogate. The two halves of the same table
 were built to different rules.
 
-**#37's `NothingOwned` gets a better home.** Merging the check into the claim
+**#37's `NothingOwned` gets a better home.** *(Superseded: the error was
+deleted with the claim path — see the note further down.)* Merging the check into the claim
 loses the ability to tell "nothing queued" from "you own none of these" —
 0 rows updated means both — which is precisely the ambiguity that issue is
 about. So the registration lookup survives, but only on the empty path: claim
@@ -549,6 +575,14 @@ no runs anywhere, on any node. What is left is the in-process `attached` check,
 which genuinely is node-local: node A cannot see that the provider is attached
 on node B. That degrades into the previous item rather than into damage — B's
 worker claims for a name that no longer exists and gets `NothingOwned`, loudly.
+
+> **Superseded (2026-08-16).** That degradation is gone with the claim it
+> relied on. Under delivery, node B's provider is simply never offered
+> anything and is told nothing at all — so the node-local `attached` check
+> below is no longer the *only* node-local thing here. Reachability itself is
+> (`RunBroker.serving`), and answering it across processes is the same shared
+> record that delivery across processes needs.
+
 
 **`delisted_at` disappearing takes a column out of the hot path.** The claim
 index is on queued runs and is consulted by every worker on every node; one

@@ -1,74 +1,55 @@
-"""souk still provides what a provider SDK reads off it.
+"""The two sides state the same interaction independently; this checks they
+still agree.
 
-A provider cannot import souk, so the two agree by duck typing: a worker reads
-fields off whatever `claim_work` returns and recognises souk's refusals by the
-name of the exception class. Duck typing across a repository boundary is a
-promise nobody holds — this file is what holds it.
+`souk_provider_sdk` cannot import souk, so nothing makes the pair agree by
+construction. It has been broken: souk delivered its own dispatch object,
+whose input field is `input_json`, to a provider reading `run_input`, and the
+run died on its first event with nothing red anywhere.
 
-The SDK states its expectations as data (`souk_provider_sdk.contract`) and
-these assert souk still meets them. Same device as the signing payloads, and
-for the same reason: a payload was changed here while every test signed with
-souk's own builder, 219 tests passed, and no provider in the world could
-register. A contract only catches anything when the two sides are stated
-independently.
-
-If one of these fails, the fix is *not* to update the frozenset until it
-passes. It is to decide whether souk meant to change its contract — and if it
-did, to say so downstream, because nothing else will.
+Both directions are checked, because both cross the boundary — souk hands a
+run over, and the provider hands events back.
 """
 
 from __future__ import annotations
 
-from dataclasses import fields
+import inspect
 
-from souk_provider_sdk.contract import (
+from souk_provider_sdk import (
     AGENT_FIELDS,
     CLAIMED_RUN_FIELDS,
-    RECOGNISED_SOUK_ERRORS,
+    HandleProvider,
+    ProviderIdentity,
+    ProviderRuntime,
 )
 
-from souk.errors import InvalidRegistration, NothingOwned
-from souk.models import AgentRef
-from souk.worker import ClaimedRun
+from souk.broker import ConnectedProvider
+from souk.models import AgentRef, ClaimedRun
 
 
-def test_a_claimed_run_carries_exactly_what_a_worker_reads():
-    """Exactly, not merely enough. A field souk hands over that no worker
-    reads is one somebody meant a provider to have and nothing gives it."""
-    assert {f.name for f in fields(ClaimedRun)} == CLAIMED_RUN_FIELDS
+def test_a_delivered_run_carries_exactly_what_a_provider_reads():
+    assert set(ClaimedRun.model_fields) == CLAIMED_RUN_FIELDS
 
 
-def test_the_agent_on_a_claimed_run_is_still_the_pair():
-    """The loop routes on `run.agent.name`. An agent is
-    `(provider_key, name)` and has no other identity."""
+def test_the_agent_on_a_delivered_run_is_still_the_pair():
     assert set(AgentRef.model_fields) == AGENT_FIELDS
 
 
-def test_the_refusals_a_worker_acts_on_still_have_the_names_it_matches():
-    """The nastiest of the three if it breaks, because it breaks *quietly*.
+def test_the_sdk_runtime_is_something_souks_broker_can_deliver_to():
+    # An instance, not the class: `max_concurrent_runs` is set in __init__,
+    # which is exactly the kind of thing a class-level hasattr misses.
+    runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]), souk=None)
 
-    A worker matches on `type(exc).__name__`. Rename `NothingOwned` and the
-    match silently stops happening — no crash, no error, just a fall-through
-    to "unknown failure, retry". The provider goes back to spinning forever
-    with clean logs, which is issue #37 restored, and nothing anywhere turns
-    red. So the names are asserted rather than trusted.
-    """
-    assert NothingOwned.__name__ in RECOGNISED_SOUK_ERRORS
-    assert InvalidRegistration.__name__ in RECOGNISED_SOUK_ERRORS
+    for name in ConnectedProvider.__annotations__:
+        assert hasattr(runtime, name), f"ConnectedProvider needs {name}"
+    assert inspect.iscoroutinefunction(runtime.deliver)
+    assert not inspect.iscoroutinefunction(runtime.cancel)
 
 
-def test_souk_satisfies_the_connection_the_worker_expects():
-    """The three methods, by name and by being callable. A `Souk` is passed
-    straight to a worker in-process, so this is the whole interface between
-    them — and `claim_work` is async while the other two are deliberately not
-    (a worker reporting an event must never wait on souk's persistence, and
-    `finish_run` runs while unwinding a cancellation, where an await would be
-    interrupted before it ever arrived).
-    """
-    import inspect
-
+def test_souk_satisfies_the_connection_the_provider_reports_back_through():
     from souk.core import Souk
 
-    assert inspect.iscoroutinefunction(Souk.claim_work)
+    # Synchronous on purpose: a provider must never wait on souk's
+    # persistence, and the end-of-stream marker is sent while unwinding a
+    # cancellation, where an await would be interrupted before arriving.
     assert not inspect.iscoroutinefunction(Souk.report_event)
     assert not inspect.iscoroutinefunction(Souk.finish_run)

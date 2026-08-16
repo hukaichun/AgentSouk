@@ -23,7 +23,6 @@ __all__ = [
     "KyokRejected",
     "AmbiguousAgentName",
     "InvalidRunInput",
-    "NothingOwned",
     "ProviderFingerprintTaken",
     "RunNotFound",
     "SoukError",
@@ -76,46 +75,6 @@ class AgentInUse(SoukError):
     def __init__(self, message: str, *, reason: str) -> None:
         super().__init__(message)
         self.reason = reason
-
-
-class NothingOwned(SoukError):
-    """A worker asked to claim for names and souk knows none of them as its.
-
-    Distinct from claiming nothing, which is the normal state of a market
-    stall — a worker that waits through it is behaving correctly. This says
-    waiting is futile: no run can ever arrive on this call, because souk will
-    filter every requested name out before it looks for work.
-
-    An error rather than a return value precisely so it cannot be ignored by
-    accident. souk computes this either way; the version that only logged it
-    produced a provider which ran for 30 minutes with its container healthy,
-    its own logs clean and exit code 0, while absent from the roster entirely.
-    Every step in that chain was individually correct, which is why nothing
-    caught it.
-
-    Three ways to reach it, each reproduced by
-    `scripts/probes/probe_claim_says_nothing.py` before this existed:
-
-    - **the database was replaced** under a live connection — restored,
-      or souk repointed at a fresh one while a provider kept running. Nothing
-      the provider holds went stale (its names are its own configuration);
-      souk simply has no rows for them, and it will not learn otherwise until
-      it re-registers.
-    - **a name it never registered** — a typo, a batch from the wrong config.
-    - **the agent was deleted while it was offline** and it came back. This
-      path did not exist until removing an agent became an explicit act (see
-      `Souk.delete_agent`).
-
-    Deliberately *not* raised for a partial mismatch: a provider asking for
-    three names and owning two keeps serving those two, and that stays a
-    warning. Measured rather than assumed — the probe's fourth scenario
-    queues work for the good name and confirms it is still claimed. Killing
-    that worker over one bad name would be worse than the silence this fixes.
-
-    Says nothing about anyone else. The set it is computed against comes from
-    the caller's own key alone, so this means "none of these are yours" and
-    never whether they exist or whose they are.
-    """
 
 
 class InvalidRegistration(SoukError):

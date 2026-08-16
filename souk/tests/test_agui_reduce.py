@@ -1,8 +1,3 @@
-"""souk/agui_reduce.py — the Python port of AG-UI's own reference
-`defaultApplyEvents` reconstruction. See the pause/resume tests / the manual verification against a real LLM run (souk-guide
-calling list_souk_agents) referenced in this feature's PR for the
-end-to-end proof; this file just pins the pure function's behavior.
-"""
 
 from __future__ import annotations
 

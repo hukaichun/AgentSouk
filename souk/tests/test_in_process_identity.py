@@ -1,15 +1,3 @@
-"""An in-process provider is not a trusted one.
-
-Sharing a process with souk is not a reason to skip proving who you are, and
-it is not a reason for souk to lose track of whether you are actually there.
-An earlier version of `attach_provider` was a side door past both: it put an
-object in a dictionary, so anything holding the Souk could claim any agent_id,
-and the agent stayed invisible to the liveness model that the roster and the
-offline fast-fail read — an attached provider showed as offline and calls to
-it failed with "agent is currently offline" while it sat right there.
-
-These tests hold the line that in-process and remote go through the same door.
-"""
 
 from __future__ import annotations
 
@@ -30,8 +18,6 @@ class LocalProvider:
 
 
 def _signed(identity: ProviderIdentity, names: list[str]) -> tuple[str, str, int]:
-    """Signed the way a provider signs — through the SDK, so this is also a
-    check that souk still accepts what one actually sends."""
     signature, timestamp = identity.sign_registration(names)
     return identity.public_key, signature, timestamp
 
@@ -42,7 +28,7 @@ async def _register(souk, name: str = "local"):
     registration = await souk.register_agents(
         public_key, signature, timestamp, [{"name": name}]
     )
-    return registration, identity.public_key, registration.agents[name]
+    return registration, identity, registration.agents[name]
 
 
 async def test_registration_must_prove_it_holds_the_key(souk):
@@ -54,11 +40,8 @@ async def test_registration_must_prove_it_holds_the_key(souk):
 
 
 async def test_registration_refuses_a_stale_timestamp(souk):
-    """Bounds how long an observed-but-valid signature stays replayable."""
     key = Ed25519PrivateKey.generate()
     stale = int(time.time()) - 3600
-    # Built here rather than through the SDK on purpose: this test is about
-    # a payload souk must *refuse*, so it needs to construct one directly.
     payload = registration_signing_payload(["a"], stale)
 
     with pytest.raises(InvalidRegistration):
@@ -70,22 +53,17 @@ async def test_registration_refuses_a_stale_timestamp(souk):
         )
 
 
-async def test_attaching_an_unregistered_agent_is_refused(souk):
-    """The whole point: being in-process is not a way around registering."""
+async def test_attaching_an_unregistered_agent_is_refused(souk, attach):
+    """Sharing souk's process is not a reason to be trusted, and not a reason
+    to take a different path: the names have to be ones this key registered."""
     with pytest.raises(AgentNotFound):
-        await souk.attach_provider(
-            Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex(),
-            LocalProvider(),
-            ["agent_never_registered"],
-        )
+        await attach(ProviderIdentity.generate(), LocalProvider(), ["agent_never_registered"])
 
 
-async def test_an_attached_provider_is_actually_online_and_reachable(souk):
-    """The bug this pins: attached-but-offline. souk reported the agent
-    offline and fast-failed calls to a provider that was right there."""
-    _registration, public_key, agent_id = await _register(souk)
+async def test_an_attached_provider_is_actually_online_and_reachable(souk, attach):
+    _registration, identity, agent_id = await _register(souk)
 
-    await souk.attach_provider(public_key, LocalProvider(), [agent_id.name])
+    await attach(identity, LocalProvider(), [agent_id.name])
 
     roster = await souk.list_agents()
     assert [a.name for a in roster] == [agent_id.name]
@@ -95,29 +73,15 @@ async def test_an_attached_provider_is_actually_online_and_reachable(souk):
     assert [e["type"] async for e in handle.events()] == ["RUN_STARTED", "RUN_FINISHED"]
 
 
-async def test_detaching_marks_it_offline_immediately(souk):
-    """A departure souk actually witnessed, unlike a remote provider that
-    stops polling and has to be inferred — so it shouldn't have to age out
-    of the online window first."""
-    _registration, public_key, agent_id = await _register(souk)
-    await souk.attach_provider(public_key, LocalProvider(), [agent_id.name])
+async def test_detaching_marks_it_offline_immediately(souk, attach):
+    """A departure souk witnessed, so it takes effect at once rather than
+    being inferred from silence later."""
+    _registration, identity, agent_id = await _register(souk)
+    await attach(identity, LocalProvider(), [agent_id.name])
     assert (await souk.list_agents())[0].online is True
 
-    await souk.detach_provider(public_key)
+    await souk.detach_provider(identity.public_key)
 
     roster = await souk.list_agents()
     assert roster[0].online is False
-    # Still listed, just not available — de-listing is a different act.
     assert roster[0].name == agent_id.name
-
-
-async def test_registration_issues_a_session_token(souk):
-    """The same token a remote provider gets, since it is the same act."""
-    registration, public_key, _agent_id = await _register(souk)
-    assert registration.session_token
-    from souk.identity import verify_session_token
-
-    # And it is issued to the key itself — the provider's only identity.
-    assert verify_session_token(
-        registration.session_token, souk.settings.token_signing_secret
-    ) == public_key

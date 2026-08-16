@@ -2,7 +2,7 @@
 
 Neither side is named by transport here, deliberately. A caller reaches a
 run through a protocol adapter, and a worker reaches it through core's three
-methods (`claim_work` / `report_event` / `finish_run`); what carried either
+methods (`deliver` / `report_event` / `finish_run`); what carried either
 of them is a serving-layer choice this module must not encode. It once
 said "the HTTP gateway and the gRPC relay", which was true of exactly one
 deployment.
@@ -71,13 +71,15 @@ status, run_events) — it is not on the live event-relay hot path.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Protocol
 
-from souk.models import AgentRef
+from souk.models import AgentRef, ClaimedRun
 
 logger = logging.getLogger("souk.broker")
 
@@ -147,6 +149,125 @@ class Fail:
 Command = Claim | RelayEvent | FinishStream | RequestCancel | Fail
 
 
+@dataclass(frozen=True)
+class ProviderQuality:
+    """What souk has observed about a provider keeping its word.
+
+    Three ways of not doing what it said, all of them things souk saw rather
+    than inferred:
+
+    - `misdeclared` — it declared a capacity and then refused work inside it,
+      so souk learned the real number by being refused;
+    - `abandoned` — it took a run and then neither finished it nor reported
+      it failed, so the stall sweep had to give up;
+    - `unanswered` — it was offered a run and said nothing at all;
+    - `answered_late` — of those, the ones it had taken anyway, found because
+      it started producing for a run souk had already re-queued.
+
+    In memory, and so about *this process since it started*. That is the
+    honest scope: a provider that behaved badly yesterday, in a souk that has
+    since restarted, is not something this souk witnessed.
+    """
+
+    in_flight: int
+    declared: int | None
+    misdeclared: int
+    abandoned: int
+    unanswered: int
+    answered_late: int
+
+
+@dataclass
+class _Capacity:
+    """What souk believes a provider can take, and what it has learned.
+
+    A bucket souk keeps rather than a number the provider keeps telling it:
+    souk sees every run start and every run end, so it can count for itself,
+    and a count derived from events it already handles cannot go stale
+    between them.
+
+    Per provider, not per agent — one identity serving a translator and a
+    summarizer has one process behind both, and its budget is across them.
+    """
+
+    # How many at once, declared when the provider registered. None is
+    # unlimited: souk offers everything and lets the provider decline if that
+    # was optimistic.
+    declared: int | None
+    in_flight: int = 0
+    # Times it declined while souk believed it had room. Not bookkeeping —
+    # souk observing that what this provider says it can take and what it
+    # actually takes disagree.
+    misdeclared: int = 0
+    # Runs it took and never ended: reaped by the stall sweep rather than
+    # finished or failed by the provider. Each held a place in this bucket
+    # for the whole stall timeout.
+    abandoned: int = 0
+    # Runs offered that it never answered — no ack, no refusal, nothing
+    # before the deadline.
+    unanswered: int = 0
+    # Of those, the ones it turned out to have taken anyway: it started
+    # producing for a run souk had already put back in the queue.
+    #
+    # The worst signal here. Delivery runs over TCP, so an ack is not lost in
+    # transit — the connection breaks instead. A late one means the provider
+    # was simply too slow to say yes, which is its own doing, and souk had
+    # meanwhile re-queued a run it was already running. One more offer and it
+    # would have run twice.
+    answered_late: int = 0
+
+    @property
+    def has_room(self) -> bool:
+        return self.declared is None or self.in_flight < self.declared
+
+
+class ConnectedProvider(Protocol):
+    """Whoever is serving an agent right now, as the broker sees them.
+
+    Three things, because they are the three the broker needs and no more:
+    who this is, how to hand it a run, and how to ask it to stop one. What
+    carries any of them — a call in this process, a frame on a socket — is
+    not the broker's business and does not appear here.
+    """
+
+    # The provider's Ed25519 public key. Established when it connected, not
+    # per run: recorded on each run it takes, and every event it later
+    # reports is checked against it (see Souk.report_event), because holding
+    # a connection is not the same as holding a particular run.
+    public_key: str
+    # How many runs it will have going at once, across every agent it serves.
+    # None is unlimited. souk keeps a bucket this size and offers nothing once
+    # it is empty — see _Capacity.
+    max_concurrent_runs: int | None
+
+    async def deliver(self, run: ClaimedRun) -> bool:
+        """Take this run, or decline it.
+
+        What it is given is a `ClaimedRun` — the run's identity, its
+        agent and its input — and never `broker.Run`, which is souk's own
+        dispatch state with the run's queues hanging off it. A provider
+        holding that could reach into souk's machinery in-process, and
+        could not be handed anything at all over a wire. The offer is a
+        value, so the same call means the same thing either way.
+
+        True is the ack, and it means the run has started: from that moment
+        the broker records who has it and the run moves to `running`.
+        Anything else — False, or an exception — leaves the run exactly where
+        it was, queued, to be offered again.
+
+        Declining is how a provider says it is full. It is the only way it
+        can: souk cannot see a provider's capacity, so the provider expresses
+        it by not taking work.
+        """
+        ...
+
+    def cancel(self, run_id: str) -> None:
+        """souk is asking for this run to stop. A request, not an order —
+        what the provider does about it is its own business, and souk decides
+        the outcome from what the stream actually does."""
+        ...
+
+
 @dataclass
 class Run:
     """Pure data — deliberately no methods. Everything that changes about
@@ -162,6 +283,14 @@ class Run:
     thread_id: str
     input_json: dict[str, Any]
     protocol: str  # "ag-ui" | "a2a"
+    # When this run entered dispatch. Immutable, so keeping it in memory
+    # costs nothing and saves the broker a database read to answer its own
+    # question — how long has this been waiting for somebody to take it.
+    #
+    # Deliberately not `runs.created_at`: for a run resuming after a pause
+    # that column still holds the original creation, while this is when the
+    # current round started waiting. Waiting is what the broker times.
+    queued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     seq: int = 0
     # The seq this round started at (== the `seq` ctor param — see
     # enqueue_run) — never mutated afterward, unlike `seq` itself, which
@@ -182,7 +311,7 @@ class Run:
     # actually given, and a connection alone is not evidence of that.
     claimed_by: str | None = None
     # How to *ask* the worker holding this run to stop — supplied by
-    # whoever claimed it (souk.core.claim_work's `on_cancel`), because
+    # whoever took it (see ConnectedProvider.cancel), because
     # only the claimer knows how to reach itself: an in-process worker
     # cancels its own task, a remote one puts a frame on its own wire.
     # Called by
@@ -308,7 +437,6 @@ async def _no_events() -> AsyncIterator[Any]:
 
 HandlerMap = dict[type, Callable[[Run, Any], Awaitable[None]]]
 
-
 async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
     """The run's own single-consumer task — the only thing that ever
     dispatches a Command to a handler, so no two handlers ever run
@@ -359,7 +487,14 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
 
 
 class RunBroker:
-    def __init__(self, spawn=None) -> None:
+    def __init__(
+        self,
+        spawn=None,
+        *,
+        sweep_interval_seconds: float = 1.0,
+        queued_timeout_seconds: float = 45.0,
+        deliver_timeout_seconds: float = 5.0,
+    ) -> None:
         # How a run's pipeline task gets started. A Souk passes its own
         # spawn (see souk/core.py) so the task is supervised and can be
         # cancelled and awaited at shutdown; the default keeps this class
@@ -370,15 +505,130 @@ class RunBroker:
         # `(provider_key, name)` and AgentRef is frozen (see souk/models.py).
         # It used to be keyed by a souk-minted id standing in for that pair.
         self._pending_by_agent: dict[AgentRef, deque[str]] = defaultdict(deque)
-        # Lets a long-polling claim block until a run actually
-        # shows up for one of its agents instead of sleeping through a
-        # fixed poll interval — see core.claim_work. A plain asyncio.Event
-        # rather than anything shaped like a wire frame, so this stays
-        # a swap-in seam for a distributed backend (e.g. Postgres
-        # LISTEN/NOTIFY) if souk is ever split across multiple processes;
-        # nothing above this depends on wakes being in-process.
-        self._wake_subscribers: dict[AgentRef, set[asyncio.Event]] = defaultdict(set)
+        # Which provider is serving each agent. The whole of what the broker
+        # knows about reaching anybody, and private on purpose: ask `serving`
+        # or `agents_served_by`. Reachability is the one fact that stops being
+        # answerable from one process the moment there is more than one souk,
+        # so it gets a single door to swap rather than a dict several modules
+        # reach into. See docs/broker-horizontal-scaling.md.
+        self._providers: dict[AgentRef, ConnectedProvider] = {}
+        # What each provider can take, by public key — one bucket per
+        # identity, however many agents it serves.
+        self._capacity: dict[str, _Capacity] = {}
+        # Kept per run so the broker can start work for it later than
+        # enqueueing: a run's pipeline begins when a provider takes it, and a
+        # queued run that is cancelled needs one handler run and no pipeline.
+        self._handlers: dict[str, HandlerMap] = {}
         self._pipeline_tasks: set[asyncio.Task] = set()
+        # How often this broker's own loop comes round, and how long a run
+        # may go unwanted before it gives up on it.
+        #
+        # The broker's own, not `CoreSettings`': which runs it is holding and
+        # how long it has held them is a question only it can answer, and a
+        # copy of the number in settings is a copy that can disagree with the
+        # one actually used. It briefly did — settings carried
+        # `queued_timeout_seconds` while nothing passed it here, so changing
+        # it did nothing, and the two defaults being equal hid that.
+        #
+        # A deployment wanting a different number passes a configured broker:
+        # `Souk(settings, broker=RunBroker(queued_timeout_seconds=...))`.
+        self.sweep_interval_seconds = sweep_interval_seconds
+        self.queued_timeout_seconds = queued_timeout_seconds
+        # How long to wait for a provider to answer an offer. There is one
+        # delivery loop, so an offer that never returns stops dispatch for
+        # every agent, not only this provider's.
+        self.deliver_timeout_seconds = deliver_timeout_seconds
+        self._loop_task: asyncio.Task | None = None
+        # Set whenever something might have made placing possible again — a
+        # run arriving, or a provider registering. The sweep waits on this,
+        # and only ever waits when there is nothing it could be doing.
+        #
+        # Rebuilt by `start`, not left as the one made here. An
+        # `asyncio.Event` binds to the loop that first uses it, and a
+        # `RunBroker` is constructed synchronously — possibly with no loop
+        # running at all, and certainly not necessarily the loop it will run
+        # in. Keeping this one made every later loop raise "bound to a
+        # different event loop" the moment the sweep tried to rest.
+        self._work_to_do = asyncio.Event()
+
+    # ---- The broker's own loop
+
+    def start(self) -> None:
+        """Begin sweeping. Idempotent.
+
+        Binds this broker to the loop that is running now — see
+        `_work_to_do`. Nothing is lost by replacing it: `run_forever` makes a
+        full placing pass before it ever waits, so a set that happened before
+        this call is answered by that pass rather than by the event.
+        """
+        if not self.is_running:
+            self._work_to_do = asyncio.Event()
+            self._loop_task = self._spawn(self.run_forever(), name="broker-sweep")
+
+    @property
+    def is_running(self) -> bool:
+        """Is the loop turning. The only thing that hands a run to anybody, so
+        this is what "can this souk dispatch" means (see `Souk.health`)."""
+        return self._loop_task is not None and not self._loop_task.done()
+
+    def stop(self) -> None:
+        if self._loop_task is not None:
+            self._loop_task.cancel()
+            self._loop_task = None
+
+    async def run_forever(self) -> None:
+        """Keep placing what is waiting, and rest only when it cannot.
+
+        There are exactly two states this may sleep in:
+
+        - **nothing is queued** — there is no work to place;
+        - **nothing that is queued has a provider registered** — there is
+          nowhere to place it.
+
+        In any other state it keeps going. Sleeping on a fixed interval while
+        runs sit placeable would add that interval to every one of them for
+        no reason.
+
+        When it does sleep it sleeps until woken rather than for a duration:
+        `_work_to_do` is set by a run arriving and by a provider registering,
+        which are the only two things that can change either condition. The
+        wait is bounded by `queued_timeout_seconds` so a run nobody ever
+        comes for is still given up on.
+
+        A provider that declined everything is *not* one of those states: it
+        is reachable and there is work for it, so the broker keeps asking.
+        """
+        while True:
+            try:
+                self.expire_queued(self.queued_timeout_seconds)
+                self._work_to_do.clear()
+                placed = False
+                for agent in list(self._pending_by_agent):
+                    if await self._offer_pending(agent):
+                        placed = True
+                if placed:
+                    # Something moved, so more might. Yield and go again.
+                    await asyncio.sleep(0)
+                    continue
+                # A whole pass placed nothing: everything queued is either
+                # unserved or with a provider that will not take it. Wait for
+                # something that could change that — a run arriving, a
+                # provider registering, or one of a provider's runs ending
+                # and giving its place back. All three set `_work_to_do`.
+                #
+                # Waiting rather than asking again is the point: asking again
+                # is asking a provider that just said no, as fast as the loop
+                # can turn, with nothing about the answer having changed.
+                with contextlib.suppress(TimeoutError):
+                    async with asyncio.timeout(self.queued_timeout_seconds):
+                        await self._work_to_do.wait()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One provider misbehaving must not stop the sweep for every
+                # other agent.
+                logger.exception("broker sweep failed; continuing")
+                await asyncio.sleep(self.sweep_interval_seconds)
 
     def enqueue_run(
         self,
@@ -406,6 +656,15 @@ class RunBroker:
         already wrote in its earlier round(s) — see
         repo.get_last_event_seq.
         """
+        if not self.is_running:
+            # Queueing here would be queueing into a loop that never comes
+            # round: nothing else in this class hands a run out. The caller
+            # would get a handle, wait on it, and be told nothing at all —
+            # which is what happened before this check existed.
+            raise RuntimeError(
+                f"run {run_id}: this broker is not running, so nothing would ever be "
+                "dispatched — call Souk.start() (or RunBroker.start()) first"
+            )
         run = Run(
             run_id=run_id,
             agent=agent,
@@ -417,11 +676,175 @@ class RunBroker:
         )
         self._runs[run_id] = run
         self._pending_by_agent[agent].append(run_id)
-        for event in self._wake_subscribers.get(agent, ()):
-            event.set()
+        self._work_to_do.set()
         if handlers is not None:
-            self._spawn(_pipeline(run, handlers, self), name=f"pipeline:{run_id}")
+            self._handlers[run_id] = handlers
         return run
+
+    # ---- Handing runs to providers
+
+    def register_provider(self, mapping: dict[AgentRef, ConnectedProvider]) -> None:
+        """Which provider serves which agents, and offer them whatever is
+        already waiting.
+
+        A mapping and nothing else: registering is not an event with a
+        lifecycle, it is the broker learning where an agent's work goes. A
+        second entry for the same agent replaces the first, which is what a
+        reconnect is.
+        """
+        self._providers.update(mapping)
+        for provider in mapping.values():
+            # A reconnect keeps the existing bucket: runs it already holds
+            # are still its own, and resetting the count would let souk offer
+            # past its capacity every time a connection blipped.
+            self._capacity.setdefault(
+                provider.public_key, _Capacity(declared=provider.max_concurrent_runs)
+            )
+        self._work_to_do.set()
+
+    def serving(self, agent: AgentRef) -> ConnectedProvider | None:
+        """Who is serving this agent right now, or None if nobody is.
+
+        This is what souk means by an agent being reachable, and it is a fact
+        rather than an inference. It used to be one: a provider came and asked
+        for work, each ask stamped `last_seen_at`, and "asked recently" stood
+        in for "still there". Nothing asks souk for anything now, so nothing
+        stamps anything — an attached, healthy provider that had just finished
+        a run was reported offline sixty seconds after attaching, measured.
+
+        Node-local, and that is the known edge of it: this souk cannot see a
+        provider attached to another one. Answering across processes needs a
+        shared record of which node holds which connection — which multiple
+        brokers need anyway, because a run created here for a provider
+        attached there has to reach there. That record will also need an
+        expiry, since a row saying a node serves an agent outlives the node
+        being killed; `last_seen_at` becomes that expiry, written by whoever
+        holds the connection instead of by the provider asking for work.
+        """
+        return self._providers.get(agent)
+
+    def agents_served_by(self, public_key: str) -> list[AgentRef]:
+        """Every agent this provider is currently serving here."""
+        return [a for a, p in self._providers.items() if p.public_key == public_key]
+
+    def unregister_provider(self, agents: list[AgentRef]) -> None:
+        """This provider is no longer reachable. Runs it already took are
+        left alone — it is still producing, and souk records no outcome it
+        has not observed."""
+        for agent in agents:
+            self._providers.pop(agent, None)
+
+    async def _offer_pending(self, agent: AgentRef) -> bool:
+        """Offer this agent's queued runs, oldest first, until one is
+        declined or the queue empties.
+
+        **Called only from `run_forever`, and that is load-bearing.** It reads
+        the head of the queue, awaits the provider, and removes it only after
+        — so two of these running at once both see the same run at the head,
+        both hand it over, and both then remove *a* run: the first removes the
+        one they duplicated, the second removes the next one along, which is
+        thereby lost. Not merely delayed. `expire_queued` only ever looks at
+        the pending queue, so a run taken out of it and given to nobody is
+        never offered again and never given up on either — it hangs silently,
+        with its caller still watching.
+
+        Enqueueing a run and registering a provider therefore set
+        `_work_to_do` and hand out nothing themselves. The loop is waiting on
+        that event when idle, so going through one door costs no latency.
+
+        Stops at the first decline rather than trying the rest: a provider
+        that just said it is full will say so again, and walking the whole
+        queue to hear it once per run is work with no possible outcome.
+        """
+        placed = False
+        while True:
+            provider = self._providers.get(agent)
+            queue = self._pending_by_agent.get(agent)
+            if provider is None or not queue:
+                return placed
+            run_id = queue[0]
+            run = self._runs.get(run_id)
+            if run is None or run.cancel_requested:
+                # Forgotten, or asked to stop before anyone took it. Drop it
+                # silently, exactly as handing it out used to.
+                queue.popleft()
+                continue
+            capacity = self._capacity.get(provider.public_key)
+            if capacity is not None and not capacity.has_room:
+                # souk believes this provider is full, so it offers nothing
+                # until one of its runs ends — which souk sees for itself.
+                # A wait for an event, not a retry.
+                return placed
+            if not await self._offer(run, provider):
+                return placed
+            queue.popleft()
+            placed = True
+
+    async def _offer(self, run: Run, provider: ConnectedProvider) -> bool:
+        """One offer. True means the provider took it — from that moment the
+        run has started, and this is the only place that decides so."""
+        capacity = self._capacity.get(provider.public_key)
+        try:
+            async with asyncio.timeout(self.deliver_timeout_seconds):
+                accepted = await provider.deliver(
+                    ClaimedRun(
+                        run_id=run.run_id,
+                        agent=run.agent,
+                        thread_id=run.thread_id,
+                        run_input=run.input_json,
+                    )
+                )
+        except TimeoutError:
+            # It said nothing. The run stays queued and will be offered
+            # again, which is all souk can do — and is why this is counted
+            # rather than retried quietly: if the provider did take it,
+            # offering again runs it twice.
+            if capacity is not None:
+                capacity.unanswered += 1
+            logger.warning(
+                "provider %s did not answer an offer of run %s within %ss (%d so far)",
+                provider.public_key[:16],
+                run.run_id,
+                self.deliver_timeout_seconds,
+                capacity.unanswered if capacity else 0,
+            )
+            return False
+        except Exception:
+            if capacity is not None:
+                capacity.unanswered += 1
+            logger.exception("run %s: delivering to its provider failed", run.run_id)
+            return False
+        if not accepted:
+            if capacity is not None and capacity.has_room:
+                # Declined while souk believed it had room: what it declared
+                # and what it does disagree. Believe the provider, which is
+                # the one that knows, and record that souk had to find out by
+                # being refused.
+                capacity.misdeclared += 1
+                capacity.in_flight = capacity.declared or capacity.in_flight
+                logger.warning(
+                    "provider %s declined a run while souk believed it had room "
+                    "(now %d/%s in flight); treating it as full",
+                    provider.public_key[:16],
+                    capacity.in_flight,
+                    capacity.declared,
+                )
+            return False
+        # Taken. Recorded and marked in one step, with no await in between,
+        # so nothing can observe a run that has been handed over and belongs
+        # to nobody.
+        run.claimed_by = provider.public_key
+        run.cancel_notify = provider.cancel
+        if capacity is not None:
+            capacity.in_flight += 1
+        # The run's own task starts here, not at enqueue: until a provider
+        # took it there was nothing for a pipeline to do, and one waiting on
+        # an empty queue for a run nobody wanted is a task per queued run.
+        handlers = self._handlers.get(run.run_id)
+        if handlers is not None:
+            self._spawn(_pipeline(run, handlers, self), name=f"pipeline:{run.run_id}")
+        run.in_queue.put_nowait(Claim())
+        return True
 
     def _spawn_unsupervised(self, coro, *, name: str | None = None) -> asyncio.Task:
         # asyncio.create_task() doesn't itself keep the task alive — nothing
@@ -435,72 +858,6 @@ class RunBroker:
         self._pipeline_tasks.add(task)
         task.add_done_callback(self._pipeline_tasks.discard)
         return task
-
-    def subscribe_wake(self, agents: list[AgentRef]) -> asyncio.Event:
-        event = asyncio.Event()
-        for agent in agents:
-            self._wake_subscribers[agent].add(event)
-        return event
-
-    def unsubscribe_wake(self, agents: list[AgentRef], event: asyncio.Event) -> None:
-        for agent in agents:
-            self._wake_subscribers[agent].discard(event)
-
-    def claim(
-        self,
-        agents: list[AgentRef],
-        *,
-        claimed_by: str,
-        cancel_notify: Callable[[str], None] | None = None,
-        max_claim: int | None = None,
-    ) -> list[Run]:
-        """Hands up to `max_claim` runs across `agents` to one worker,
-        round-robining between agents so a cap doesn't starve later ids in
-        the list.
-
-        Claiming and being claimed are one act, not two. Each run returned
-        is marked as `claimed_by` this worker and has its Claim queued
-        *before this returns*, with no `await` anywhere in between — so
-        there is no window in which a run has been handed out but souk
-        still believes nobody has it. That window used to exist (poll
-        returned run_ids, the provider came back later to claim them) and
-        needed a second cancelled-check to cover it.
-
-        `max_claim=None` means the caller never reported a capacity at
-        all — drains everything currently queued, unlimited (the old
-        all-at-once behavior). `max_claim=0` is different: it means the
-        caller explicitly reported "no spare capacity right now", so
-        nothing is claimed — distinct from None, not a stand-in for it.
-
-        Filters out runs already asked to stop (see Run.cancel_requested)
-        rather than ever handing one over — dropped silently here, not
-        counted against max_claim, same as an already-forgotten run_id.
-        """
-        if max_claim is not None and max_claim <= 0:
-            return []
-
-        found: list[Run] = []
-        queues = [self._pending_by_agent.get(agent) for agent in agents]
-        while any(queues):
-            if max_claim is not None and len(found) >= max_claim:
-                break
-            progressed = False
-            for queue in queues:
-                if not queue:
-                    continue
-                if max_claim is not None and len(found) >= max_claim:
-                    break
-                run_id = queue.popleft()
-                progressed = True
-                run = self._runs.get(run_id)
-                if run is not None and not run.cancel_requested:
-                    run.claimed_by = claimed_by
-                    run.cancel_notify = cancel_notify
-                    run.in_queue.put_nowait(Claim())
-                    found.append(run)
-            if not progressed:
-                break
-        return found
 
     def get(self, run_id: str) -> RunSnapshot | None:
         """What this run currently looks like, as a copy. None if this broker
@@ -521,6 +878,20 @@ class RunBroker:
         run = self._runs.get(run_id)
         if run is None:
             return False
+        if isinstance(command, Fail) and run.claimed_by is not None:
+            # A provider took this run and then neither finished it nor
+            # reported it failed — the health sweep had to give up, and it
+            # held a place in that provider's bucket the whole time. souk saw
+            # both halves, so it can say so.
+            capacity = self._capacity.get(run.claimed_by)
+            if capacity is not None:
+                capacity.abandoned += 1
+                logger.warning(
+                    "provider %s abandoned run %s (%d so far): took it and never ended it",
+                    run.claimed_by[:16],
+                    run_id,
+                    capacity.abandoned,
+                )
         run.in_queue.put_nowait(command)
         return True
 
@@ -536,14 +907,89 @@ class RunBroker:
         return _drain_run(run) if run is not None else _no_events()
 
     def request_cancel(self, run_id: str) -> bool:
-        """Ask for a run to stop — see the module docstring for the two
-        halves this splits into. False if this broker is not dispatching
-        it."""
+        """Ask for a run to stop. False if this broker is not dispatching it.
+
+        Which of the two situations it is, is decided here rather than later,
+        because the broker is what knows: it either handed this run to a
+        provider or it did not.
+
+        **A provider has it.** The request goes onto the run's own queue, in
+        order behind everything else about it, and its pipeline asks the
+        provider to stop and records `cancelling`. souk can ask; it cannot
+        compel, so the outcome is still decided when the stream ends.
+
+        **Nobody has it.** There is no pipeline — one starts when a provider
+        takes a run — so the broker spawns a single handler run to record
+        `cancelled` and nothing else. It also drops out of the pending queue
+        (see `_offer_pending`, which skips a run once `cancel_requested` is
+        set), so it is never offered to anyone.
+
+        `cancel_requested` is set synchronously, before either path, so
+        nothing can offer this run in the meantime.
+        """
         run = self._runs.get(run_id)
         if run is None:
             return False
-        _request_cancel(run)
+        run.cancel_requested = True
+        if run.claimed_by is not None:
+            run.in_queue.put_nowait(RequestCancel())
+            return True
+        self._spawn(self._cancel_queued(run), name=f"cancel:{run_id}")
         return True
+
+    def expire_queued(self, timeout_seconds: float) -> list[str]:
+        """Give up on runs nobody has taken in time.
+
+        The broker's own question — which runs am I still holding, and how
+        long have I held them — and it answers both from memory: `queued_at`
+        does not change, so there is nothing to read.
+
+        Each one gets a single handler run to record the failure, the same
+        shape as a cancel arriving for a queued run: no pipeline, because a
+        pipeline starts when a provider takes a run.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
+        expired: list[str] = []
+        for queue in list(self._pending_by_agent.values()):
+            for run_id in list(queue):
+                run = self._runs.get(run_id)
+                if run is None or run.queued_at > cutoff:
+                    continue
+                queue.remove(run_id)
+                expired.append(run_id)
+                self._spawn(
+                    self._one_shot(run, Fail("no_provider_took_it")),
+                    name=f"expire:{run_id}",
+                )
+        return expired
+
+    async def _cancel_queued(self, run: Run) -> None:
+        """One handler run, for a run nobody took.
+
+        The broker holds no database. Recording `cancelled` is a handler's
+        job like every other write about a run, so it runs one — there is
+        simply no pipeline to put it on.
+        """
+        await self._one_shot(run, RequestCancel())
+
+    async def _one_shot(self, run: Run, command: Command) -> None:
+        """Run exactly one handler for a run that has no pipeline, then end it.
+
+        The broker holds no database, so recording what just happened is a
+        handler's job like every other write about a run. What it does not
+        need is a pipeline: that exists to order many commands against one
+        run, and a run nobody took gets exactly one.
+        """
+        handler = (self._handlers.get(run.run_id) or {}).get(type(command))
+        if handler is not None:
+            try:
+                await handler(run, command)
+            except Exception:
+                logger.exception(
+                    "run %s: recording %s failed", run.run_id, type(command).__name__
+                )
+        run.out_queue.put_nowait(END_OF_STREAM)
+        self.forget(run.run_id)
 
     def active_run_ids(self) -> list[str]:
         """Every run currently in dispatch. Live in-memory state, distinct
@@ -551,5 +997,86 @@ class RunBroker:
         finished."""
         return list(self._runs)
 
+    def accept_late_ack(self, run_id: str, claimed_by: str) -> bool:
+        """A provider is producing for a run souk does not think it took.
+
+        The events are the proof — nothing else could produce them — so this
+        is the ack, arriving after souk stopped waiting. See
+        `_Capacity.answered_late` for why that is the provider's doing rather
+        than the network's.
+
+        Accepted only from the provider actually registered for that run's
+        agent. Otherwise it would be a way to take over anyone's run by
+        guessing a run_id, which is what the ownership check on report_event
+        exists to stop.
+
+        False if this is not that, and the caller then rejects the events —
+        which is what it did before there was any way to be right here.
+        """
+        run = self._runs.get(run_id)
+        if run is None or run.claimed_by is not None:
+            return False
+        provider = self._providers.get(run.agent)
+        if provider is None or provider.public_key != claimed_by:
+            return False
+
+        # Out of the queue, or the loop offers it again to the very provider
+        # already running it.
+        queue = self._pending_by_agent.get(run.agent)
+        if queue is not None and run_id in queue:
+            queue.remove(run_id)
+
+        capacity = self._capacity.get(claimed_by)
+        if capacity is not None:
+            capacity.answered_late += 1
+            capacity.in_flight += 1
+        logger.warning(
+            "provider %s answered late for run %s (%d so far): already producing for "
+            "a run souk had put back in the queue",
+            claimed_by[:16],
+            run_id,
+            capacity.answered_late if capacity else 0,
+        )
+        run.claimed_by = claimed_by
+        run.cancel_notify = provider.cancel
+        handlers = self._handlers.get(run_id)
+        if handlers is not None:
+            self._spawn(_pipeline(run, handlers, self), name=f"pipeline:{run_id}")
+        run.in_queue.put_nowait(Claim())
+        return True
+
+    def quality(self) -> dict[str, ProviderQuality]:
+        """What souk has observed about each provider, by public key.
+
+        A snapshot: reading it cannot change it, and holding it will not keep
+        it current — ask again.
+        """
+        return {
+            key: ProviderQuality(
+                in_flight=c.in_flight,
+                declared=c.declared,
+                misdeclared=c.misdeclared,
+                abandoned=c.abandoned,
+                unanswered=c.unanswered,
+                answered_late=c.answered_late,
+            )
+            for key, c in self._capacity.items()
+        }
+
     def forget(self, run_id: str) -> None:
-        self._runs.pop(run_id, None)
+        """This run is over, however it ended.
+
+        Returning its place in the provider's bucket happens here rather than
+        somewhere more specific because *every* ending passes through here —
+        finished, failed, cancelled, reaped. A place returned on only some of
+        those endings is a bucket that empties permanently on the rest.
+        """
+        run = self._runs.pop(run_id, None)
+        self._handlers.pop(run_id, None)
+        if run is not None and run.claimed_by is not None:
+            capacity = self._capacity.get(run.claimed_by)
+            if capacity is not None and capacity.in_flight > 0:
+                capacity.in_flight -= 1
+                # A place came back, so there may now be somewhere to put
+                # something. This is what lets the loop wait instead of ask.
+                self._work_to_do.set()

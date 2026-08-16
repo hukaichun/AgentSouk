@@ -86,6 +86,15 @@ Folding ownership into the claim's `WHERE` (see
 "nothing queued" from "not registered" — the distinction now *requires* a
 second, separate check, which is exactly what `NothingOwned` is.
 
+> **Superseded (2026-08-16).** `NothingOwned` no longer exists. It was souk's
+> answer to a provider *asking* for work, and providers stopped asking: the
+> broker delivers, so there is no call left to refuse. The question it
+> answered — "are these names even mine?" — is now answered at
+> `Souk.attach_provider`, which raises `AgentNotFound` for a name the key
+> never registered, before any run is involved. The argument below is kept
+> as the record of why the check had to exist at all.
+
+
 **The error also gets stronger.** `threads.agent_id` is a NOT NULL foreign key
 to `agents`, and a run cannot exist without a thread (`thread_history.thread_id`
 is NOT NULL too), so an unregistered `(provider_key, name)` provably has no

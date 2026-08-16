@@ -7,9 +7,8 @@ A regular `RUN_FINISHED` event whose `outcome` is `{"type": "interrupt",
 "interrupts": [...]}` (`ag_ui.core.RunFinishedInterruptOutcome`/
 `Interrupt`, part of the AG-UI spec itself, ag-ui-protocol >= 0.1.19) is
 what a provider emits. Frameworks that already speak AG-UI's interrupt/
-resume (e.g. pydantic-ai's `Tool(requires_approval=True)` — see
-`providers/pydantic-ai-agent` for where this would go) emit and consume
-this automatically; a provider using one of those needs zero souk-
+resume (e.g. pydantic-ai's `Tool(requires_approval=True)`) emit and
+consume this automatically; a provider using one of those needs zero souk-
 specific code to support pausing. souk's only job is to notice this
 outcome while relaying (`handlers._handle_relay`) and, once the
 stream ends, record `status='input-required'` with the interrupts
@@ -54,9 +53,8 @@ can get an answer from another it delegated to is just a question of
 whether *that callee's own thread* can currently accept a new run (the
 same `get_active_run_for_thread` check, applied to the callee's thread
 instead of the caller's) — not something that needs the caller's own
-thread blocked, subscribed, or notified. See `providers/pydantic-ai-agent/
-pydantic_ai_agent/sub_agent_tool.py` for how a delegating agent checks
-back on a callee: it just calls again:
+thread blocked, subscribed, or notified. A delegating agent checks back
+on a callee by simply calling again:
 
 - Callee's thread has no active run (it genuinely finished) → the call
   goes through for real, with the real answer.

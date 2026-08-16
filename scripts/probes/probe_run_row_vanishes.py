@@ -65,9 +65,27 @@ def migrate() -> None:
     command.upgrade(cfg, "head")
 
 
+class _Taker:
+    """Takes the run and does nothing else, so it is live and owned while the
+    database is pulled out from under it. The events below are pushed by hand
+    because this probe is about what souk does with them, not about an agent.
+    """
+
+    def __init__(self, public_key: str) -> None:
+        self.public_key = public_key
+        self.max_concurrent_runs = None
+
+    async def deliver(self, run) -> bool:
+        return True
+
+    def cancel(self, run_id: str) -> None:
+        pass
+
+
 async def main() -> int:
     migrate()
     souk = Souk(CoreSettings(database_url=URL, token_signing_secret="probe"))
+    await souk.start()
     key = Ed25519PrivateKey.generate()
     public_key = key.public_key().public_bytes_raw().hex()
     timestamp = int(time.time())
@@ -79,9 +97,11 @@ async def main() -> int:
     )
     agent = registration.agents["a"]
 
+    await souk.attach_provider(_Taker(public_key), ["a"])
     handle = await souk.start_run(agent, {"messages": []})
-    await souk.claim_work(registration.session_token, ["a"])
-    await asyncio.sleep(0.2)
+    async with asyncio.timeout(5):
+        while souk.broker.get(handle.run_id).claimed_by is None:
+            await asyncio.sleep(0)
 
     # The database is replaced underneath a live run: a restore, or a souk
     # pointed at a fresh database while a provider's connection stayed open.

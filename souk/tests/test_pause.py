@@ -1,8 +1,3 @@
-"""Pure-function coverage for souk.pause.interrupt_outcome_of — the only
-souk-side detection logic left for AG-UI's native HITL pause mechanism.
-Waiting on a sub-agent call is not a pause at all (see that module's
-docstring) and has no dedicated detection function to test here.
-"""
 
 from __future__ import annotations
 
