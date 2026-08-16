@@ -35,7 +35,7 @@ from souk.broker import FinishStream, RelayEvent, RunBroker, RunSnapshot
 from souk.changes import ChangeEvent, RosterChanged, RunStatusChanged
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, EXPECTED_SCHEMA_REVISION, quoted_schema
-from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration
+from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration, NothingOwned
 from souk.handlers import make_handlers
 from souk.health import run_health_sweeps_forever
 from souk.identity import (
@@ -490,6 +490,14 @@ class Souk:
         - and the agents it does own are marked as seen, which is how any
           provider — in-process or remote — stays online at all.
 
+        If that filtering leaves *nothing*, this raises `NothingOwned` rather
+        than returning `[]`. The two answers demand opposite responses from a
+        worker — keep waiting, versus stop and re-register — and returning the
+        same empty list for both is what let a provider loop for 30 minutes
+        looking perfectly healthy while absent from the roster. A partial
+        mismatch is still just a warning: the names it does own are still its
+        to serve.
+
         `max_claim=None` means unlimited; `0` explicitly means "no capacity
         right now" and claims nothing — distinct from None, and a reason not
         to hold the call open, since only the caller can change that.
@@ -507,7 +515,20 @@ class Souk:
             for name in agent_names
             if name in registered
         ]
+        if agent_names and not allowed:
+            # Nothing this worker asked for is its own, so no amount of
+            # waiting can produce a run. Told, rather than answered with the
+            # same `[]` that means "nothing queued yet" — see errors.
+            # NothingOwned for the 30 minutes of healthy-looking silence that
+            # distinction cost, and for the three ways to get here.
+            raise NothingOwned(
+                f"provider {public_key} has registered none of the name(s) it asked to "
+                f"claim for: {sorted(set(agent_names))} — re-register to offer them again"
+            )
         if len(allowed) != len(agent_names):
+            # A partial mismatch stays a warning on purpose: the rest are
+            # still this provider's to serve, and there is nothing futile
+            # about carrying on.
             logger.warning(
                 "claim_work: provider %s asked for name(s) it has not registered: %s",
                 public_key,
