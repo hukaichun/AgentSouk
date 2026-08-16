@@ -182,9 +182,10 @@ and both should be decided separately rather than folded in silently.
   does not filter `delisted_at`, so a de-listed agent is still owned by its
   key and its provider keeps claiming for it — while `get_agent_by_id`,
   `resolve_agent` and `list_agents` all treat it as gone. Measured, after a
-  test written on the assumption that it did timed out. Harmless today (no
-  new run can be created for an unresolvable agent) and inconsistent, which
-  is the kind of pair that stops being harmless later.
+  test written on the assumption that it did timed out. Now resolved from
+  the other end: `docs/agent-lifecycle.md` stops registration de-listing
+  anything, which leaves `delisted_at` with no writer at all, so the
+  inconsistent state stops existing rather than being made consistent.
 - **`Souk.enqueue_run` is annotated `-> RunSnapshot` and returns a live
   `Run`.** Unrelated, already recorded in
   `docs/broker-horizontal-scaling.md`'s phase 0.
