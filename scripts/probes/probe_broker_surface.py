@@ -44,12 +44,12 @@ async def main() -> None:
     ts = int(time.time())
     sig = key.sign(registration_signing_payload(["prober"], ts)).hex()
     reg = await souk.register_agents(pub, sig, ts, [{"name": "prober"}])
-    agent_id = reg.agent_ids["prober"]
+    agent = reg.agents["prober"]
 
-    handle = await souk.start_run(agent_id, {"messages": [], "state": {}})
+    handle = await souk.start_run(agent, {"messages": [], "state": {}})
 
     print("--- what escapes the broker ---")
-    returned = souk.enqueue_run("run_probe", agent_id, handle.thread_id, {}, "ag-ui")
+    returned = souk.enqueue_run("run_probe", agent, handle.thread_id, {}, "ag-ui")
     print(f"Souk.enqueue_run annotated -> {inspect.signature(Souk.enqueue_run).return_annotation}")
     print(f"Souk.enqueue_run actually returns -> {type(returned).__name__}")
     print(f"  is a live Run (queues attached): {isinstance(returned, Run)}")
@@ -59,14 +59,14 @@ async def main() -> None:
         print(f"  and can mutate fields directly, e.g. claimed_by = {returned.claimed_by!r}")
 
     print("\n--- claim ---")
-    claimed = souk.broker.claim([agent_id], claimed_by=pub, max_claim=1)
+    claimed = souk.broker.claim([agent], claimed_by=pub, max_claim=1)
     print(f"RunBroker.claim -> list[{type(claimed[0]).__name__ if claimed else '?'}]")
 
     print("\n--- the wake seam ---")
-    event = souk.broker.subscribe_wake([agent_id])
+    event = souk.broker.subscribe_wake([agent])
     print(f"RunBroker.subscribe_wake -> {type(event).__name__} "
           f"({type(event).__module__}) — core awaits .wait() on this directly")
-    souk.broker.unsubscribe_wake([agent_id], event)
+    souk.broker.unsubscribe_wake([agent], event)
 
     print("\n--- sync vs async on the surface ---")
     for name in ("enqueue_run", "claim", "get", "push", "subscribe", "request_cancel",

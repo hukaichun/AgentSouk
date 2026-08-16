@@ -65,7 +65,7 @@ async def register(cluster: Cluster) -> tuple[str, str, str]:
             "agents": [{"name": "prober", "description": "probe fixture"}],
         }
     )
-    return public_key, result["agent_ids"]["prober"], result["session_token"]
+    return public_key, result["agents"]["prober"], result["session_token"]
 
 
 async def scenario_cross_node_claim(cluster: Cluster, findings: Findings) -> None:
@@ -74,11 +74,11 @@ async def scenario_cross_node_claim(cluster: Cluster, findings: Findings) -> Non
     same node is a coin toss.
     """
     print("\n[1] cross-node claim")
-    public_key, agent_id, token = await register(cluster)
-    run = await cluster.call({"op": "start_run", "agent_id": agent_id, "run_input": RUN_INPUT}, node="a")
+    public_key, agent, token = await register(cluster)
+    run = await cluster.call({"op": "start_run", **agent, "run_input": RUN_INPUT}, node="a")
 
     claimed_b = await cluster.call(
-        {"op": "claim_work", "token": token, "agent_ids": [agent_id], "max_claim": 5}, node="b"
+        {"op": "claim_work", "token": token, "agent_names": [agent["agent_name"]], "max_claim": 5}, node="b"
     )
     findings.record(
         "a worker on B can claim a run enqueued on A",
@@ -87,10 +87,10 @@ async def scenario_cross_node_claim(cluster: Cluster, findings: Findings) -> Non
     )
 
     claimed_a = await cluster.call(
-        {"op": "claim_work", "token": token, "agent_ids": [agent_id], "max_claim": 5}, node="a"
+        {"op": "claim_work", "token": token, "agent_names": [agent["agent_name"]], "max_claim": 5}, node="a"
     )
     print(f"       (A claims the same run: {len(claimed_a)} — it is only visible where it was enqueued)")
-    return public_key, agent_id, token, run
+    return public_key, agent, token, run
 
 
 async def scenario_new_replica_reaps(cluster: Cluster, findings: Findings) -> None:
@@ -106,10 +106,10 @@ async def scenario_new_replica_reaps(cluster: Cluster, findings: Findings) -> No
     scenario pass.)
     """
     print("\n[2] a new replica boots mid-run")
-    public_key, agent_id, token = await register(cluster)
-    run = await cluster.call({"op": "start_run", "agent_id": agent_id, "run_input": RUN_INPUT}, node="a")
+    public_key, agent, token = await register(cluster)
+    run = await cluster.call({"op": "start_run", **agent, "run_input": RUN_INPUT}, node="a")
     claimed = await cluster.call(
-        {"op": "claim_work", "token": token, "agent_ids": [agent_id], "max_claim": 1}, node="a"
+        {"op": "claim_work", "token": token, "agent_names": [agent["agent_name"]], "max_claim": 1}, node="a"
     )
     if not claimed:
         findings.record("a booting replica leaves live runs alone", False, "nothing claimed on A")
@@ -156,10 +156,10 @@ async def scenario_report_to_wrong_node(cluster: Cluster, findings: Findings) ->
     moved on, never finds out.
     """
     print("\n[3] event reported to the node that does not hold the run")
-    public_key, agent_id, token = await register(cluster)
-    run = await cluster.call({"op": "start_run", "agent_id": agent_id, "run_input": RUN_INPUT}, node="a")
+    public_key, agent, token = await register(cluster)
+    run = await cluster.call({"op": "start_run", **agent, "run_input": RUN_INPUT}, node="a")
     claimed = await cluster.call(
-        {"op": "claim_work", "token": token, "agent_ids": [agent_id], "max_claim": 1}, node="a"
+        {"op": "claim_work", "token": token, "agent_names": [agent["agent_name"]], "max_claim": 1}, node="a"
     )
     if not claimed:
         findings.record("an event reported to any node reaches the run", False, "nothing claimed on A")
@@ -189,10 +189,10 @@ async def scenario_cross_node_stream(cluster: Cluster, findings: Findings) -> No
     what a worker reported elsewhere.
     """
     print("\n[4] consumer on the node that does not own the run")
-    public_key, agent_id, token = await register(cluster)
-    run = await cluster.call({"op": "start_run", "agent_id": agent_id, "run_input": RUN_INPUT}, node="a")
+    public_key, agent, token = await register(cluster)
+    run = await cluster.call({"op": "start_run", **agent, "run_input": RUN_INPUT}, node="a")
     claimed = await cluster.call(
-        {"op": "claim_work", "token": token, "agent_ids": [agent_id], "max_claim": 1}, node="a"
+        {"op": "claim_work", "token": token, "agent_names": [agent["agent_name"]], "max_claim": 1}, node="a"
     )
     if not claimed:
         findings.record("a consumer on B sees a run owned by A", False, "nothing claimed on A")
@@ -235,10 +235,10 @@ async def scenario_owner_dies(cluster: Cluster, findings: Findings) -> None:
     says at the moment of death is printed below.
     """
     print("\n[5] the owning node dies")
-    _public_key, agent_id, token = await register(cluster)
-    run = await cluster.call({"op": "start_run", "agent_id": agent_id, "run_input": RUN_INPUT}, node="a")
+    _public_key, agent, token = await register(cluster)
+    run = await cluster.call({"op": "start_run", **agent, "run_input": RUN_INPUT}, node="a")
     claimed = await cluster.call(
-        {"op": "claim_work", "token": token, "agent_ids": [agent_id], "max_claim": 1}, node="a"
+        {"op": "claim_work", "token": token, "agent_names": [agent["agent_name"]], "max_claim": 1}, node="a"
     )
     if not claimed:
         findings.record("a dead node's run reaches a verdict", False, "nothing claimed on A")

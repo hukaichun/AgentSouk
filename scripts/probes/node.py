@@ -41,8 +41,14 @@ from typing import Any
 from souk import repo
 from souk.config import CoreSettings
 from souk.core import Souk
+from souk.models import AgentRef
 
 logger = logging.getLogger("probe.node")
+
+
+def _agent(req: dict[str, Any]) -> AgentRef:
+    """An agent named the way souk names one — the pair, off the wire."""
+    return AgentRef(provider_key=req["provider_key"], name=req["agent_name"])
 
 
 async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
@@ -59,23 +65,32 @@ async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
         registration = await souk.register_agents(
             req["public_key"], req["signature"], req["timestamp"], req["agents"]
         )
-        return {"agent_ids": registration.agent_ids, "session_token": registration.session_token}
+        return {
+            # The pairs, indexed by name. Not ids: souk mints none, which is
+            # the point of docs/retiring-agent-id.md.
+            "agents": {
+                name: {"provider_key": ref.provider_key, "agent_name": ref.name}
+                for name, ref in registration.agents.items()
+            },
+            "session_token": registration.session_token,
+        }
 
     if op == "start_run":
-        handle = await souk.start_run(req["agent_id"], req["run_input"])
+        handle = await souk.start_run(_agent(req), req["run_input"])
         return {"run_id": handle.run_id, "thread_id": handle.thread_id, "is_live": handle.is_live}
 
     if op == "claim_work":
         claimed = await souk.claim_work(
             req["token"],
-            req["agent_ids"],
+            req["agent_names"],
             max_claim=req.get("max_claim"),
             wait_seconds=req.get("wait_seconds", 0),
         )
         return [
             {
                 "run_id": run.run_id,
-                "agent_id": run.agent_id,
+                "provider_key": run.agent.provider_key,
+                "agent_name": run.agent.name,
                 "thread_id": run.thread_id,
                 "run_input": run.run_input,
             }
@@ -114,7 +129,7 @@ async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
 
     if op == "touch_agent":
         async with souk.session() as session:
-            await repo.touch_agent(session, req["agent_id"])
+            await repo.touch_agents(session, req["provider_key"], [req["agent_name"]])
         return True
 
     raise ValueError(f"unknown op: {op}")
