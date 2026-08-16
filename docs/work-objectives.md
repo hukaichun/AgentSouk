@@ -41,9 +41,22 @@ argument.
 
 ## Order
 
-The ordering rule is that no item may be built on a structure a later item
-replaces. That rule costs the one thing this repo would otherwise do first —
-see W6.
+Two rules decide it:
+
+1. **No item may be built on a structure a later item replaces.** That costs
+   the one thing this repo would otherwise do first — see W5.
+2. **Constraints come before the work they protect.** An item that makes the
+   database refuse something goes ahead of the items whose mistakes it would
+   refuse. Otherwise every risky change is made under a database that accepts
+   orphans silently, and the constraint arrives in time to protect nothing.
+
+Rule 2 is why W2 is the split and nothing else. An earlier version of this
+file made W2 "one new schema baseline" holding all four schema changes at
+once, which was wrong in a way worth recording: it optimised the *migration
+artifact* rather than the *work*. Those are separate questions. souk is
+unreleased, so the baseline is regenerated from `schema.py` no matter how many
+steps produced it — bundling bought nothing, and cost the ability to verify
+any step on its own, which is the same mistake as trusting a green suite.
 
 ### W1 · Land `NothingOwned` — issue #37
 
@@ -58,44 +71,70 @@ a live silent failure now.
 **Done when:** a provider whose registration is gone gets an error instead of
 an empty list, and its own logs say so. Already demonstrated.
 
-### W2 · One new schema baseline
+### W2 · Split `thread_history` into `runs` and `thread_messages`
 
-Documents: `retiring-agent-id.md`, `agent-lifecycle.md`,
-`broker-horizontal-scaling.md`. Invariants 1, 3, 4.
+No document yet — the argument is this file's opening table plus the note in
+`broker-horizontal-scaling.md` that a split was deferred with "revisit if the
+row keeps growing". Invariants 3 and 4.
 
-Four schema changes are queued, and later ones undo parts of earlier ones.
-Written as four migrations that is churn; written as one baseline it is a
-single definition. There is precedent and a stated reason: `d363d76`
-collapsed the chain once already, because souk has never been released and
-"a baseline that creates a column a later revision deletes costs more in
-confusion than the history is worth". Databases get recreated.
+**First of the structural work, because it is what installs the constraints
+the rest of the work needs.** One table holds two entities distinguished by a
+`kind` column, and the merge exists to interleave them by a shared `id` — an
+ordering nothing reads. What it costs is paid on every query: half the columns
+NULL per row, a `kind` predicate that silently matches the wrong rows when
+forgotten (`get_run` shipped that bug), and `run_id` unable to be a key
+because the messages a run introduced carry it too.
 
-In one baseline:
+What the split makes possible, and what nothing before it can have:
 
-- `agents` keyed `(provider_key, name)`; `agent_id` gone; `provider_key` gains
-  the foreign key to `providers.public_key` that it has never had
-- `thread_history` split into `runs` and `thread_messages` — `run_id` becomes
-  a real primary key instead of a partial unique index working around message
-  rows that share it
-- `run_events.run_id` becomes a real foreign key, which is what its comment
-  has always claimed
-- `delisted_at` dropped — after W4 nothing writes it
-- the dispatch columns (`owner_id`, `lease_expires_at`, `claimed_by`,
-  `cancel_requested`) present from the start, on `runs`
+- **`run_id` becomes a real primary key**, replacing a partial unique index
+  that exists to work around the shared column. A2A's `Task.id` *is* `run_id`,
+  so the thing every caller addresses is finally a key.
+- **`run_events.run_id` becomes a real foreign key** — which its own comment
+  has always claimed ("enforced at the application layer instead") and which
+  nothing has ever enforced.
+- **`thread_messages.run_id` can reference `runs` too**, likewise impossible
+  today.
 
-**Done when:** the schema is built both ways and compared column by column,
-constraint by constraint, index by index, on both backends — the check
-`d363d76` used. And when the orphan-write probe fails: wiping the database
-mid-run must now raise a foreign key violation where it previously wrote two
-orphan `run_events` rows.
+That second one is why this is first rather than last. With it, a write into a
+run the database has never heard of *fails* — so the whole "was the database
+replaced underneath us" question is answered structurally, by every subsequent
+change, instead of needing a mechanism of its own. Every item after this one
+is made under a database that catches divergence rather than one that accepts
+orphans in silence.
 
-### W3 · Contracts follow the schema
+Folded in, being the same invariant and a few lines: `repo.mark_run_status`
+runs an UPDATE and discards the rowcount, so souk cannot tell it updated
+nothing.
+
+Dispatch columns stay on the run row when W5 adds them — the claim transition
+and the status transition are one atomic write, which is what makes that free.
+So the split is messages-versus-runs, never dispatch-versus-status.
+
+**Done when:** the orphan-write probe changes verdict — wiping the database
+mid-run must raise a foreign key violation where today it writes two orphan
+`run_events` rows and completes a run that leaves no trace. And the schema
+built both ways and compared column by column on both backends, the check
+`d363d76` used.
+
+### W3 · Agent identity: `(provider_key, name)`
 
 Document: `retiring-agent-id.md`. Invariant 1.
 
-`claim_work` and `attach_provider` take names; the provider port takes a name;
-AG-UI and A2A address `(provider, name)`; registration stops handing ids back;
-`AgentSummary` exposes the pair. `souk-agent-sdk` deletes `_handle_by_id`.
+Schema and contracts **in one item, not two.** `retiring-agent-id.md` rejects
+carrying two vocabularies at once and says so explicitly — "does not become
+acceptable for being temporary" — so landing the schema and the contracts as
+separate merges would violate the design in the gap between them.
+
+`agents` keyed `(provider_key, name)`, `agent_id` gone, `provider_key` gaining
+the foreign key to `providers.public_key` that it has never had; `claim_work`
+and `attach_provider` take names; the provider port takes a name; AG-UI and
+A2A address `(provider, name)`; registration stops handing ids back;
+`AgentSummary` exposes the pair; `souk-agent-sdk` deletes `_handle_by_id`.
+
+After W2, this touches `runs.agent_id` and `threads.agent_id` once each. Done
+in the other order it would edit `thread_history.agent_id` into two columns
+and then move both during the split — the same columns twice.
 
 **Done when:** a probe replaces the database under a running provider, the
 provider re-registers, and it is serving again **with no re-attach and no new
@@ -115,17 +154,7 @@ prefix.
 refused. That test is written first, against today's payload, where it
 **passes** — which is what proves the hole is real.
 
-### W5 · Stop discarding what the database says
-
-Invariant 4. `repo.mark_run_status` runs an UPDATE and throws away the
-rowcount, so souk cannot tell it updated nothing.
-
-**Done when:** the probe that wipes the database mid-run makes souk complain,
-rather than completing a run that leaves no trace. Between this and W2's
-foreign key, "the database is not the one I was talking to" needs no detection
-mechanism of its own — the writes fail.
-
-### W6 · Leases and sweep ownership
+### W5 · Leases and sweep ownership
 
 Document: `broker-horizontal-scaling.md`, phase 1. Invariant 4.
 
@@ -135,7 +164,8 @@ node's live runs failed, and that node never learns and keeps writing — and
 the argument for doing it first was exactly that. But it puts four columns on
 `thread_history`, a table W2 replaces. Building it first means building on a
 structure already known to be wrong and letting a green suite say it was fine,
-which is the failure this document opens with. W2 carries the columns instead.
+which is the failure this document opens with. Here, the same four columns go
+onto `runs`, once.
 
 Until then the exposure is real and worth stating: **do not run two souk
 processes against one database.** That includes accidentally — a rolling
@@ -144,7 +174,7 @@ deploy, an autoscaler, a restarted container overlapping its predecessor.
 **Done when:** `scripts/probes/probe_multiprocess.py` scenarios [2], [2b] and
 [5] turn from BROKEN to OK, in separate OS processes, on both backends.
 
-### W7 · Make the broker surface sayable
+### W6 · Make the broker surface sayable
 
 Document: `broker-horizontal-scaling.md`, phase 0. Invariant 4.
 
@@ -158,7 +188,7 @@ claiming node, which never saw the enqueue call.
 escaping and no `asyncio` type in the surface. Behaviour is unchanged, so the
 suite proves nothing here and is not the check.
 
-### W8–W10 · The distributed broker
+### W7–W9 · The distributed broker
 
 Document: `broker-horizontal-scaling.md`, phases 3–5. Invariant 4.
 
@@ -189,7 +219,7 @@ killing the owner mid-stream reaches a consumer on another node as a terminal
 |---|---|---|
 | `claude/issue-37-nothing-owned` | W1 | code, green both backends |
 | `claude/agent-identity` | W3, W4 designs | design |
-| `claude/broker-horizontal-scaling-6b74a4` | W6–W10 design, `scripts/probes/` | design + probes |
+| `claude/broker-horizontal-scaling-6b74a4` | W5–W9 design, `scripts/probes/` | design + probes |
 | `claude/work-objectives` | this file | index |
 
 The `thread_history` split (W2) has no document yet; its argument is in this
