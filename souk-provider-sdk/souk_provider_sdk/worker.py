@@ -115,10 +115,37 @@ class ProviderWorker:
     def stop(self) -> None:
         """Stop claiming. Runs already in flight are left alone: this worker
         is going away, but its agents are still producing, and souk must not
-        record an outcome nobody observed."""
+        record an outcome nobody observed.
+
+        Synchronous, and therefore does not wait. Use `aclose` to shut down.
+        """
         if self._loop_task is not None:
             self._loop_task.cancel()
             self._loop_task = None
+
+    async def aclose(self, *, cancel_in_flight: bool = False) -> None:
+        """Stop claiming, then wait for what this worker started.
+
+        `stop` on its own leaves the tasks it spawned running, which is right
+        for "stop taking new work" and wrong for "this process is going
+        away": whoever holds a worker has no other handle on those tasks, so
+        without this they outlive their owner and keep reporting into souk
+        from a provider that believes it has shut down. Found in souk's own
+        suite, where a stopped worker kept claiming into the next test.
+
+        `cancel_in_flight` decides what happens to runs still going. False
+        drains them, which is the graceful shutdown a provider wants — souk
+        gets each run's real outcome. True cancels them, and souk then sees
+        each stream end without a RUN_FINISHED, which it records as failed
+        unless it had already asked for a cancel. Neither is a lie; they are
+        different shutdowns.
+        """
+        self.stop()
+        if cancel_in_flight:
+            for task in list(self._in_flight.values()):
+                task.cancel()
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
 
     def _spawn(self, coro, *, name: str | None = None) -> asyncio.Task:
         # The loop keeps only a weak reference to a running task, so one
