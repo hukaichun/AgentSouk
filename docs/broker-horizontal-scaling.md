@@ -7,10 +7,12 @@ two replicas do today; this document is the plan for walking through it.
 
 ## Goal
 
-N souk processes against one Postgres, behind a plain load balancer:
+**N souk processes on one host, sharing one database, behind a load
+balancer.** Not a multi-machine cluster — that scope is deliberate, and what
+it buys is in "Why one host" below.
 
-- a run created on node A is claimable by a worker whose connection landed
-  on node B;
+- a run created on node A is claimable by a worker whose call landed on
+  node B;
 - a consumer streaming on node A receives everything that worker reports to
   node B;
 - a cancel requested on any node reaches the worker, wherever its connection
@@ -20,16 +22,47 @@ N souk processes against one Postgres, behind a plain load balancer:
   terminal event to whoever is watching — the same account a stalled
   provider already gets.
 
+### Why one host
+
+Scoping to one host does not shrink the design much — the mechanism is a
+shared database either way, and every decision below would be the same for
+several machines. What it buys is narrower and worth naming, because each
+item is a thing that would otherwise have to be *designed* rather than
+assumed:
+
+- **One clock.** Leases expire by comparing timestamps, and `repo.py` writes
+  every timestamp from Python (`datetime.now(timezone.utc)`) rather than
+  from SQL — deliberately, for dialect neutrality. On one host that is one
+  clock and the comparison is sound. Across machines it is not, and the fix
+  would be to take lease times from the database instead. So: **the lease
+  columns are the one place where going multi-host later means a change**,
+  and it is a small, known one. Nothing else in this design cares.
+- **SQLite stops being obviously wrong.** See the non-goal below, which this
+  scope changes from "no" to "measure it".
+- **The probe harness is the deployment.** `scripts/probes/` runs N souk
+  processes on one host with a hand-rolled load balancer in front — which,
+  at this scope, is not a simulation of the target but literally it.
+
+Nothing here forecloses several machines. It just stops that being a thing
+this design claims to have thought about.
+
 ## Non-goals
 
+- **Multi-machine.** See above. The one dependency on co-location is lease
+  timestamps.
 - **Provider-side scaling.** Already settled in `library-architecture.md`:
   how a provider divides work between its own processes is its business, and
   souk will not move a run between worker instances.
-- **SQLite multi-node.** SQLite stays what `config.py` says it is:
-  single-node. The distributed broker must still *run* on SQLite — the suite
-  runs there, and `souk-db-dialect-neutral` is a standing constraint — but
-  nobody deploys two processes against one SQLite file, and no design
-  decision here is allowed to depend on doing so.
+- **SQLite as a *supported* multi-process backend — but no longer ruled
+  out.** The earlier version of this document dismissed it, reasoning that
+  `config.py` positions SQLite as single-node. Several processes on one host
+  sharing one file is exactly what WAL mode is for, and the probe harness
+  runs three souk processes against one SQLite file today without trouble
+  (see below) — so the honest position is that it is unmeasured under
+  contention, not that it is wrong. The claim query is a short conditional
+  UPDATE and `busy_timeout` is already set to 5s, so the question is real.
+  Postgres stays the recommendation; SQLite gets measured under load in
+  phase 3 rather than assumed either way.
 - **New infrastructure.** v1 uses the database and nothing else. A pub/sub
   bus is one of the three relay options the architecture doc lists; it is
   rejected for v1 because core knows a database and nothing else, and a bus
@@ -39,41 +72,62 @@ N souk processes against one Postgres, behind a plain load balancer:
   door (see "Non-owned pushes"), but the acknowledgement the architecture
   doc calls "worth having" remains its own design.
 
-## Measured first, on two Souks against one database
+## The baseline, measured
 
-Before designing anything, a throwaway probe stood up two `Souk` instances
-on one SQLite file (the dialect is irrelevant to every line below — none of
-this is a locking or SQL question) and walked what a load balancer would do
-by accident. Every claim the architecture doc's table makes held, and two
-things it does not say showed up:
+`scripts/probes/probe_multiprocess.py` is the harness this design is measured
+against: real OS processes, one database, and a load balancer that
+round-robins every single call with no affinity (see `scripts/probes/`).
+Against current code, on **both SQLite and Postgres, identically** — this is
+not a dialect question:
 
 ```
-A enqueued run run_33653ade…            status: queued
-B claim_work            -> 0 run(s)     A's run is invisible to B
-A claim_work            -> 1 run(s)
-  status after A claim:    queued       ← not 'running'
-B start()               -> reaped ['run_33653ade…']
-  status after B start:    failed  {'failureReason': 'orphaned_by_souk_restart'}
-  A still dispatching it:  True
-B report_event          -> False        silently dropped, worker never learns
-  status 0.5s later:       failed       the verdict stands
-A report_event          -> True, persisted events: 1
+[1] cross-node claim
+  BROKEN a worker on B can claim a run enqueued on A: B claimed 0 run(s)
+[2] a new replica boots mid-run
+  BROKEN a booting replica leaves another node's live run alone: C reaped 2 run(s);
+         the run now reads 'failed' (orphaned_by_souk_restart) while A is still
+         dispatching it: True
+  BROKEN nothing lands in a run already declared failed: the run reads 'failed',
+         yet A accepted a further event (True) and 1 event(s) are persisted
+[3] event reported to the node that does not hold the run
+  BROKEN B answered False and 0 event(s) persisted — the worker is not told
+[4] consumer on the node that does not own the run
+  BROKEN B's stream yielded 0 event(s) for a run producing on A
+[5] the owning node dies
+       (the row reads 'queued' at the moment A dies)
+  BROKEN B's sweep leaves the run at 'queued'
+
+0/6 healthy, 6 broken
 ```
 
-- **A keeps writing into a run the database says failed.** The doc records
-  that B marks A's live runs failed; what it does not say is that A does not
-  find out and does not stop. It goes on persisting `run_events` rows and
-  relaying to its consumer, against a `run_status` row reading `failed` with
-  a `failureReason` naming a restart that did not happen. A caller polling
-  `get_run` and a caller on the stream get contradictory accounts of the same
-  run, indefinitely.
-- **`claim_work` returns before the run is `running`.** The status write is
-  `_handle_claim`'s, and that runs on the pipeline task, so between the two
-  there is a window in which the run has been handed to a worker and the
-  database still says `queued`. In-process this is invisible (nothing else
-  reads the row that fast); it is exactly the window that makes another node
-  reap a run that was already claimed, and it is why claiming and marking
-  `running` become one transaction below.
+Three of these the architecture doc already records. Three it does not:
+
+- **[2b] The reaped node keeps writing.** The doc says a booting replica
+  marks another node's live runs failed. What it does not say is that the
+  owner never finds out and does not stop: it goes on persisting
+  `run_events` rows and relaying them, against a `run_status` row reading
+  `failed` with a `failureReason` naming a restart that did not happen. A
+  caller polling the run and a caller on its stream get contradictory
+  accounts, indefinitely. This is the sharpest failure of the six, and
+  reading the code would not have found it.
+- **[5] No sweep keys off a node being dead.** Kill the owner and every
+  surviving node is blind: the stall sweep judges `last_activity_at`, which
+  says the *provider* went quiet, not that the *node* is gone. Cleanup only
+  ever happens at the next boot — which is also the thing that damages live
+  runs. Both halves are the same missing fact, and the lease supplies it.
+- **[5, aside] `claim_work` returns before the run is `running`.** The
+  status write is `_handle_claim`'s, on the run's pipeline task, after the
+  claim call has already returned. The window is short — an intervening IPC
+  round trip is enough to miss it, which is why scenario 2 sleeps before
+  measuring — but SIGKILLing the owner right after a claim lands squarely
+  in it, and the row reads `queued` for a run that was handed to a worker.
+
+  An earlier draft of this document overstated that window, calling it the
+  reason a booting node reaps a claimed run. It is not: `fail_orphaned_runs`
+  matches `running` too, so the reap happens either way. The window's real
+  cost is the one above — a claim that no other process ever learns about —
+  and it is still why claiming and marking `running` become one transaction
+  below.
 
 ## The shape in one paragraph
 
@@ -178,8 +232,8 @@ no-window property `RunBroker.claim` provides in memory today ("claiming is
 also being claimed"), enforced by the database instead of by the absence of
 an `await`. The `Claim` command survives as the pipeline's ordering marker,
 but `_handle_claim`'s status write moves into the claim transaction — which
-is what closes the measured `queued`-after-claim window above, the one
-another node's sweep reads as an unclaimed run.
+closes the measured `queued`-after-claim window, where a run has been handed
+to a worker and no other process has any way to know.
 
 The synchronous `cancel_requested` guarantee — a cancel is visible the
 instant it is requested, with no queue in between — becomes a transactional
@@ -282,7 +336,18 @@ is the broker's question, not a rule in `health.py`. Concretely:
   it is dispatching. The lease asserts *the node is alive*, distinct from
   `last_activity_at`, which asserts *the provider is producing* — conflating
   them would let a chatty run keep a dead node's lease fresh or a quiet-but-
-  healthy node's runs get reaped.
+  healthy node's runs get reaped. The measured [5] is exactly this gap:
+  today nothing anywhere records the first fact, so a SIGKILLed owner's runs
+  are indistinguishable from runs whose provider is merely thinking.
+- **This is the one place the one-host scope is load-bearing.**
+  `lease_expires_at` is written by one process and compared by another, and
+  `repo.py` writes every timestamp from Python rather than from SQL (a
+  deliberate dialect-neutrality choice — see its module docstring). One host
+  is one clock, so the comparison is sound. Across machines it would not be,
+  and the fix is known and local: take lease times from the database
+  (`func.now()`), which is the one piece of dialect-specific-ish SQL this
+  design would then have to justify. Written down here so that a later
+  multi-host attempt finds the constraint instead of the bug.
 - `fail_stalled_runs` / `fail_stale_paused_runs` keep their meaning
   (provider silent, human absent — judgeable by any node from
   `last_activity_at`) but become idempotent under concurrent sweepers: the
@@ -355,8 +420,11 @@ New `CoreSettings`: `broker` (`"memory"` default | `"database"`),
 `lease_ttl_seconds` (~60, comfortably above the sweep interval),
 `cross_node_poll_interval_seconds`. Existing but newly load-bearing:
 `token_signing_secret` is already mandatory with no default — replicas must
-share one value or a token minted by A fails verification on B; the docs
-for the setting should say so once this ships.
+share one value or a token minted by A fails verification on B. The probe
+harness hands every node the same secret for exactly this reason (see
+`cluster.py`), which is the sort of thing that reads as boilerplate until a
+deployment sets it per-pod; `config.py`'s comment for the field should say
+so once this ships.
 
 ## What this deliberately does not change
 
@@ -380,28 +448,35 @@ for the setting should say so once this ships.
 
 ## Phasing
 
-Each phase lands green on SQLite and Postgres, per CLAUDE.md.
+Each phase lands green on SQLite and Postgres, per CLAUDE.md, and each names
+the probe scenarios it is expected to turn from BROKEN to OK. Nothing is
+"done" while its scenario still fails.
 
-1. **Leases and sweep ownership.** `instance_id`; the four columns; in-memory
-   broker stamps them too (cheap, and it makes phase 1 testable without the
-   new broker); sweeps become conditional/idempotent; lease sweep replaces
-   `fail_orphaned_runs`. **This is the only phase fixing damage that already
-   occurs** — the doc's "third replica booting marks A's live runs failed" —
-   and it is useful even to people who never deploy a second node on
-   purpose, because load balancers and orchestrators create second nodes by
-   accident.
+1. **Leases and sweep ownership** → fixes **[2]**, **[2b]** and **[5]**.
+   `instance_id`; the four columns; the in-memory broker stamps them too
+   (cheap, and it makes this phase testable before the new broker exists);
+   sweeps become conditional/idempotent; the lease sweep replaces
+   `fail_orphaned_runs`. **The only phase fixing damage that already
+   occurs**, and useful to people who never deploy a second node on purpose
+   — rolling deploys and orchestrators create a second process for you.
 2. **Persist claim facts.** `claimed_by` / `cancel_requested` written in the
    claim and cancel transactions; `RunBroker.claim` and `request_cancel`
    become `async` on the broker surface (`claim_work` is already async;
-   `cancel_run` / `RunHandle.cancel` change signature).
-3. **`DatabaseRunBroker`, claim side.** Claim-from-rows, the wake poll, the
-   pipeline created at claim time on the claiming node, resume (`reopen_run`
-   already writes `queued` — cross-node resume falls out). Two-process probe:
-   enqueue on A, claim and complete on B.
-4. **Cross-node read and command paths.** Tail-based `subscribe`, status
-   watching, cancel forwarding, the non-owned-push outbox. Probe: consumer
-   on A, worker on B; kill B mid-run and watch A's consumer get the lease
-   sweep's RUN_ERROR.
+   `cancel_run` / `RunHandle.cancel` change signature). No scenario flips
+   here — it is the groundwork phase 3 and 4 both stand on, which is worth
+   saying out loud so its lack of a visible win is not read as a problem.
+3. **`DatabaseRunBroker`, claim side** → fixes **[1]**. Claim-from-rows, the
+   wake poll, the pipeline created at claim time on the claiming node,
+   resume (`reopen_run` already writes `queued`, so cross-node resume falls
+   out). Also where SQLite-under-contention gets measured rather than
+   assumed (see non-goals): N processes claiming hard against one file, and
+   the answer decides whether SQLite is documented as viable here or as
+   dev-only.
+4. **Cross-node read and command paths** → fixes **[3]** and **[4]**.
+   Tail-based `subscribe`, status watching, cancel forwarding, the
+   non-owned-push outbox. The probe gains a scenario the current six do not
+   cover: kill the owner mid-stream and watch a consumer on another node
+   receive the lease sweep's terminal RUN_ERROR rather than hanging.
 5. **Declare the `Broker` protocol** — now that a second implementation has
    met it, which is the architecture doc's own criterion for writing one —
    and rewrite `library-architecture.md`'s horizontal-scaling section to
@@ -409,19 +484,52 @@ Each phase lands green on SQLite and Postgres, per CLAUDE.md.
 
 ## How this gets verified
 
-Per CLAUDE.md, by running something, and the something is two real
-processes:
+Per CLAUDE.md, by running something. The something is built and runs today,
+against current code, where it fails 6/6 — which is what makes it a check
+rather than a demo:
 
-- A probe script that stands up two `Souk` instances **in separate OS
-  processes** on one throwaway Postgres, with an in-process provider
-  attached to one and a caller on the other, and walks: claim across nodes;
-  events across nodes; cancel across nodes; `SIGKILL` the owner mid-run and
-  time the lease sweep's verdict. Every line of the doc's measured
-  two-replica failure table becomes an assertion with the opposite outcome.
-- The suite additions run the `DatabaseRunBroker` on SQLite single-process
-  (the mechanics — claim atomicity, tail termination, idempotent sweeps
-  under two Souk objects in one process) and on Postgres for the dialect
-  half, same as everything else.
+```bash
+cd souk && uv run python ../scripts/probes/probe_multiprocess.py
+```
+
+`scripts/probes/` holds three files and no dependencies beyond souk itself:
+
+- **`node.py`** — one souk process behind a unix socket, newline-delimited
+  JSON, one request per connection. The smallest possible stand-in for a
+  serving layer. Every op is a plain call into `Souk` with no shortcut past
+  `claim_work`'s identity checks or `report_event`'s ownership check; a
+  probe that cheated on those would prove nothing about the thing being
+  probed. It is deliberately crude, because every real decision it might
+  make (framework, port, auth) belongs to the gateway in its own repository,
+  and making one here would be this repo growing a serving layer under
+  another name.
+- **`cluster.py`** — spawns N nodes as real OS processes and round-robins
+  calls across them. **Harsher than a real load balancer on purpose:** no
+  affinity of any kind, so the call that starts a run, the worker's claim,
+  each reported event and the caller's read can land on four different
+  processes. Real load balancers are kinder, and kindness is what makes this
+  class of bug surface in production six months late instead of here. A
+  probe names a node explicitly (`node="c"`) only when *which* node is the
+  scenario — "boot a fresh replica *now*, while A holds a run".
+- **`probe_multiprocess.py`** — the six scenarios above. Each prints what
+  happened and what should happen instead, so the same script becomes the
+  pass/fail check as each phase lands rather than being thrown away.
+
+Two things this harness already corrected in this document, both of which a
+single-process probe had got wrong:
+
+- Two `Souk` objects in one process share an event loop, so an earlier probe
+  proved less than it appeared to. These are separate processes.
+- `Souk.start()` runs once per process by design, so a second `souk_start`
+  on a node that already started is a no-op — which quietly made the
+  "booting replica reaps live runs" scenario *pass*. It needs a genuinely
+  fresh process, which is why `cluster.spawn("c")` exists.
+
+Alongside it:
+
+- The suite additions run the `DatabaseRunBroker` in-process (claim
+  atomicity, tail termination, idempotent sweeps under two `Souk` objects)
+  on both backends, same as everything else.
 - `docker compose up` with two gateway replicas is downstream
   (AgentSoukServer), after the library lands — the wire was touched, so per
   CLAUDE.md it gets run.
