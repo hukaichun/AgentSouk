@@ -16,7 +16,13 @@ changes:
 2. **Going quiet is the only thing absence can do.** `online` is already
    derived from `last_seen_at`, so this needs no new state.
 3. **Deleting is its own explicit act**, and only possible for an agent
-   nothing is currently using.
+   nothing is using and nothing ever used — a registration with no
+   conversation behind it.
+
+Retiring an agent and deleting one come apart, and only the first is a
+lifecycle stage. Retiring is (1): stop offering it, and it goes offline and
+eventually off the roster, with its record and everything it did intact.
+Deleting only ever removes a registration that never became anything.
 
 ## Why absence-means-de-listed was wrong
 
@@ -96,72 +102,77 @@ Freshness still bounds replay of a *deletion* signature the same way it does a
 registration's: a captured one is usable until the timestamp goes stale, which
 is why `is_timestamp_fresh` applies here unchanged.
 
-### "Nothing is currently using it"
+### What may be deleted: only an agent nothing has ever used
 
-Refused unless all three hold:
+Refused unless all four hold. The first three are "nothing is using it right
+now"; the fourth is "nothing ever did".
 
 | check | why |
 |---|---|
-| not online (`last_seen_at` outside `online_window_seconds`) | a provider that is still checking in is still serving it |
+| not online (`last_seen_at` outside `online_window_seconds`) | a provider still checking in is still serving it |
 | no attached in-process worker serving it (`Souk._workers`) | a wedged worker can be offline *and* attached; both are evidence |
 | no active run (`queued`, `running`, `cancelling`, `input-required`) | the same set `get_active_run_for_thread` already treats as active |
+| **no threads at all** | a conversation is not the provider's alone to destroy |
 
-`input-required` matters most and is the one a narrower check would miss: that
-run is paused on a human who is coming back, and deleting it destroys
-something nobody has finished with.
+`input-required` is the one a narrower liveness check would miss: that run is
+paused on a human who is coming back.
 
-**Known gap, until the broker work lands.** The active-run check reads this
+The fourth check is what makes `threads`' foreign key to `agents` real rather
+than an obstacle. A thread must name an agent; therefore an agent with threads
+cannot be removed. The constraint and the rule are the same statement.
+
+Checking `threads` is sufficient for "any history": a run always lives in a
+thread owned by the same agent (`ensure_thread` raises
+`ThreadOwnershipMismatch` otherwise), so there is no way for `thread_history`
+or `run_events` rows to exist for an agent with no threads. The
+implementation should still check both — the cost is one query and the claim
+above is an invariant, which is exactly the kind of thing that quietly stops
+being true.
+
+So the delete is a plain single-row `DELETE`, with no cascade, in every case
+it is allowed to run. Three problems the earlier cascading design had are not
+solved but *absent*:
+
+- it cannot destroy a caller's messages, which souk stores deliberately so
+  that it is "a source of truth for the full conversation, not just the
+  caller's half of it" (`handlers._handle_finish`)
+- it cannot break another agent's delegation lineage through
+  `threads.parent_thread_id`, the self-referencing FK that made cascade order
+  a judgement call rather than a rule
+- there is no multi-statement, FK-ordered deletion whose behaviour differs
+  per dialect
+
+**What this method is actually for**, stated plainly because "delete an
+agent" promises more than it delivers: clearing rows that were never used — a
+typo in a name, a test registration, a batch pushed from the wrong config. It
+is a tidy-up, not a lifecycle stage.
+
+**Retirement is a different act, and it is the one that already works.** A
+provider that no longer offers an agent stops including it; it goes offline
+immediately, and after `stale_hidden_window_seconds` it drops off the roster
+without being deleted. The row survives, along with everything it ever did.
+That is the whole answer to "don't let a registered agent simply vanish" —
+deletion is not the retirement path and does not need to be.
+
+**Consequence to accept, not a gap:** an agent that has run once can never be
+removed. It can only go quiet. Rows accumulate for the lifetime of the
+deployment.
+
+**Known gap until the broker work lands.** The active-run check reads this
 process's broker plus the database; the online check reads the database only.
-Across several souk processes (`docs/broker-horizontal-scaling.md`), a run
-live on another node is visible in the database as `running` — so the DB half
-covers it — but this is exactly the kind of "one node cannot see another's
-live state" question that document exists for, and the check should be
-revisited when the run ownership columns land.
-
-### What deleting destroys
-
-A hard delete, cascading, in child-first order (the FKs give no choice about
-the order and SQLite has no `TRUNCATE ... CASCADE`):
-
-1. `run_events` for the agent's runs
-2. `thread_history` rows — its runs *and* the messages in its threads
-3. child threads elsewhere whose `parent_thread_id` points into this set:
-   **`parent_thread_id` set to NULL**, not deleted (see below)
-4. `threads` owned by the agent
-5. the `agents` row
-
-**This destroys callers' messages, not only the provider's output.** souk
-stores both halves of a conversation deliberately — `handlers._handle_finish`
-persists agent replies precisely so souk is "an actual source of truth for the
-full conversation, not just the caller's half of it" — so a thread is as much
-the caller's record as the provider's, and this is a provider unilaterally
-deleting it. That is the chosen behaviour and is what the offline guard exists
-to bound; it is written down here so nobody discovers it from a support
-ticket. `delete_agent` returns what it destroyed (threads, messages, runs,
-events) rather than a bare bool, so the act is at least legible to whoever
-performed it.
-
-**Step 3 is the one real judgement call.** `threads.parent_thread_id` is a
-self-referencing FK recording delegation lineage, so another agent's thread
-can point at one of this agent's. Deleting the parent would either violate
-that FK or cascade into a conversation belonging to somebody who was not
-mentioned in this request. Nulling the pointer loses the lineage record — the
-deleted agent is gone, so the lineage was going to be unreadable anyway — and
-keeps the other agent's conversation intact. Destroying data nobody asked
-about is the worse of the two.
+Across several souk processes (`docs/broker-horizontal-scaling.md`) a run live
+on another node is visible in the database as `running`, so the DB half covers
+it — but this is exactly the "one node cannot see another's live state"
+question that document exists for, and this check should be revisited when the
+run ownership columns land. The thread check is unaffected, being pure
+database state, and it is the one guarding anything irreversible.
 
 ### Resurrection
 
 Re-registering the same `(public_key, name)` afterwards produces a working
 agent again. Under `docs/retiring-agent-id.md` that pair *is* the identity, so
-this is the same agent by definition — with no history, because the history
-was deleted. Both halves of that sentence are true at once and neither is a
-bug: the name was always this key's to offer, and deletion was always meant to
-remove the record.
-
-Worth being explicit because the two answers pull in different directions if
-read quickly: soft deletion would have restored an identity *and* its past;
-hard deletion restores the identity only.
+it is the same agent by definition — and now trivially so, since the only
+agents that can be deleted have no past to be missing.
 
 ## Phasing
 
@@ -177,15 +188,23 @@ Lands with `docs/retiring-agent-id.md`, whose phases these slot into.
 
 ## How this gets verified
 
-- The guard is the part with something to get wrong, so each refusal gets a
-  test: online, attached, and each active status separately —
-  `input-required` above all, since that is the one a plausible narrower
-  implementation misses.
-- The cascade gets a probe rather than only a unit test: build a delegation
-  chain (agent A's thread parenting agent B's), delete B, and assert A's
-  thread survives with a NULL parent — on both backends, since this is
-  multi-statement FK-ordered deletion and that is where dialects differ.
+The guard is now the entire feature — what is left of the delete is one row —
+so that is where the tests go.
+
+- Each refusal separately: online, attached, each active status, and
+  has-threads. `input-required` above all, since that is the one a plausible
+  narrower liveness check misses.
+- **The has-threads refusal, tested through a real run rather than an
+  inserted row.** Register, run something to completion, let the provider go
+  offline, then try to delete: refused. Asserting it against a hand-inserted
+  `threads` row would pass even if the check were wired to the wrong column,
+  because the test would have built the state the check happens to read.
+- The delete that *is* allowed: register, never use it, delete, and assert
+  the row is gone and the name is registerable again.
 - Domain separation gets the test that matters: take a *registration*
   signature for one agent and present it as a deletion. It must be refused.
-  Written first, against the current payload, where it will pass and prove
-  the hole is real.
+  Written first, against the current payload, where it will **pass** — which
+  is what proves the hole is real rather than theoretical.
+- Both backends, per CLAUDE.md, though the dialect surface is now small: one
+  `DELETE`, and the `delisted_at` column drop, which on SQLite is a table
+  rebuild (`batch_alter_table`).
