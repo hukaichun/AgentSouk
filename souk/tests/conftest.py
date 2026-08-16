@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import CoreSettings
 from souk.core import Souk
-from souk_provider_sdk import ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessProvider, ProviderIdentity, ProviderRuntime
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -106,13 +106,13 @@ def new_identity() -> type[Identity]:
 
 @pytest.fixture
 async def attach(souk: Souk):
-    """Attach a provider the way a real one arrives: wrapped in the SDK's
-    runtime, which is what souk can hand a run to.
+    """Attach a provider the way a real one arrives: the SDK's runtime, with
+    an adapter in front of it that souk can hand a run to.
 
     souk used to take a bare object with `run_stream` and build the loop
     around it itself. It does not any more — the loop is the provider's — so
-    a test that wants an agent served goes through the same two steps a
-    deployment does: make a runtime, attach it.
+    a test that wants an agent served goes through the same steps a
+    deployment does: make a runtime, adapt it, attach it.
 
     Every runtime is stopped when the test ends. The `souk` fixture is
     session-scoped, so one left running stays registered with the broker and
@@ -121,10 +121,10 @@ async def attach(souk: Souk):
     started: list[ProviderRuntime] = []
 
     async def _attach(identity: ProviderIdentity, provider, names, **kwargs) -> ProviderRuntime:
-        runtime = ProviderRuntime(identity, provider, souk, **kwargs)
+        runtime = ProviderRuntime(identity, provider, **kwargs)
         started.append(runtime)
         runtime.start()
-        await souk.attach_provider(runtime, list(names))
+        await souk.attach_provider(InProcessProvider(souk, runtime), list(names))
         return runtime
 
     yield _attach
