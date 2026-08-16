@@ -46,7 +46,7 @@ from souk.identity import (
     verify_signature,
 )
 from souk.kyok import KyokBridge
-from souk.models import AgentRecord, AgentSummary, RunRecord
+from souk.models import AgentRecord, AgentRef, AgentSummary, RunRecord
 from souk.providers import Provider
 from souk.worker import ClaimedRun, Worker
 
@@ -55,9 +55,16 @@ logger = logging.getLogger("souk.core")
 
 @dataclass
 class Registration:
-    """What a provider gets back for proving who it is."""
+    """What a provider gets back for proving who it is.
 
-    agent_ids: dict[str, str]
+    `agents` are the pairs it just registered, indexed by name — which it
+    already knew, since
+    it chose the names and holds the key. souk used to hand back ids it had
+    minted, and a provider that held those could be cut off from its own work
+    by a database it never saw replaced (see docs/retiring-agent-id.md).
+    """
+
+    agents: dict[str, AgentRef]
     session_token: str
 
 
@@ -354,21 +361,21 @@ class Souk:
             raise InvalidRegistration("invalid registration signature")
 
         async with self.session() as session:
-            agent_ids = await repo.register_agents(
+            registered = await repo.register_agents(
                 session, public_key, agents, provider_name=provider_name
             )
         # Covers more than "an agent appeared": re-registering without a
         # name delists it, so this is also how a removal is announced.
         self._notify_change(RosterChanged())
         return Registration(
-            agent_ids=agent_ids,
+            agents=registered,
             session_token=issue_session_token(public_key, self.settings.token_signing_secret),
         )
 
     async def claim_work(
         self,
         session_token: str,
-        agent_ids: list[str],
+        agent_names: list[str],
         *,
         max_claim: int | None = None,
         wait_seconds: float = 0,
@@ -398,9 +405,9 @@ class Souk:
         - the session token is verified (`InvalidRegistration` if not),
           yielding the public key it was issued to — the provider's whole
           identity,
-        - requested agent_ids are filtered down to ones that key actually
-          owns, because a valid token for one provider must not be usable to
-          claim another's agents,
+        - requested names are filtered down to ones that key has actually
+          registered, because a valid token for one provider must not be
+          usable to claim another's agents,
         - and the agents it does own are marked as seen, which is how any
           provider — in-process or remote — stays online at all.
 
@@ -415,13 +422,17 @@ class Souk:
             raise InvalidRegistration("missing or invalid session token")
 
         async with self.session() as session:
-            owned = await repo.get_agent_ids_for_public_key(session, public_key)
-        allowed = [agent_id for agent_id in agent_ids if agent_id in owned]
-        if len(allowed) != len(agent_ids):
+            registered = await repo.get_agent_names_for_provider(session, public_key)
+        allowed = [
+            AgentRef(provider_key=public_key, name=name)
+            for name in agent_names
+            if name in registered
+        ]
+        if len(allowed) != len(agent_names):
             logger.warning(
-                "claim_work: provider %s asked for agent id(s) it does not own: %s",
+                "claim_work: provider %s asked for name(s) it has not registered: %s",
                 public_key,
-                sorted(set(agent_ids) - owned),
+                sorted(set(agent_names) - registered),
             )
 
         runs = self.broker.claim(
@@ -440,12 +451,11 @@ class Souk:
             )
 
         async with self.session() as session:
-            for agent_id in allowed:
-                await repo.touch_agent(session, agent_id)
+            await repo.touch_agents(session, public_key, [ref.name for ref in allowed])
         return [
             ClaimedRun(
                 run_id=run.run_id,
-                agent_id=run.agent_id,
+                agent=run.agent,
                 thread_id=run.thread_id,
                 run_input=run.input_json,
             )
@@ -510,7 +520,7 @@ class Souk:
         self,
         provider_id: str,
         provider: Provider,
-        agent_ids: list[str],
+        agent_names: list[str],
         *,
         max_claim: int | None = None,
     ) -> None:
@@ -518,15 +528,15 @@ class Souk:
 
         A provider, not an agent: `provider_id` is the identity that
         registered — its Ed25519 **public key** (hex), which is the only id a
-        provider has — and `agent_ids` are which of its agents it is here to
+        provider has — and `agent_names` are which of its agents it is here to
         serve. One object serving several agents is the ordinary case, not a
-        special one, which is why the port hands it the `agent_id` of each
+        special one, which is why the port hands it the name of each
         run and lets it route (see souk/providers.py).
 
         Deliberately *not* a shortcut past registration, in either
         direction:
 
-        - every agent_id must be one this key actually registered. Attaching
+        - every name must be one this key actually registered. Attaching
           used to derive the provider from the agent, which meant there was
           nothing to check — the answer was whatever the agent row said.
           Declaring the identity first is what makes it checkable, and
@@ -563,17 +573,17 @@ class Souk:
         provider object, its agent list and its budget. The worker keeps
         running, and runs already in flight are untouched.
         """
-        if not agent_ids:
+        if not agent_names:
             raise ValueError(
-                f"provider '{provider_id}' attached with no agent_ids — there would be "
+                f"provider '{provider_id}' attached with no agent names — there would be "
                 "nothing for it to claim"
             )
         async with self.session() as session:
-            owned = await repo.get_agent_ids_for_public_key(session, provider_id)
-        unowned = [agent_id for agent_id in agent_ids if agent_id not in owned]
-        if unowned:
+            registered = await repo.get_agent_names_for_provider(session, provider_id)
+        unknown = [name for name in agent_names if name not in registered]
+        if unknown:
             raise AgentNotFound(
-                f"provider '{provider_id}' has not registered agent id(s) {sorted(unowned)} — "
+                f"provider '{provider_id}' has not registered {sorted(unknown)} — "
                 "a provider must register before it can be attached, in-process or not"
             )
 
@@ -584,19 +594,18 @@ class Souk:
                 session_token=self._issue_worker_token(provider_id),
                 renew_token=partial(self._issue_worker_token, provider_id),
                 provider=provider,
-                agent_ids=agent_ids,
+                agent_names=agent_names,
                 max_claim=max_claim,
             )
             self._workers[provider_id] = worker
         else:
             worker.provider = provider
-            worker.agent_ids = list(agent_ids)
+            worker.agent_names = list(agent_names)
             worker.max_claim = max_claim
         # Online from this moment, rather than from whenever the worker's
         # loop next comes round — attaching is itself evidence it is here.
         async with self.session() as session:
-            for agent_id in agent_ids:
-                await repo.touch_agent(session, agent_id)
+            await repo.touch_agents(session, provider_id, agent_names)
         worker.start()
         # Reachability is part of the roster's answer (`AgentSummary.online`),
         # so attaching changes it even though no agent was added.
@@ -616,8 +625,12 @@ class Souk:
             return
         worker.stop()
         async with self.session() as session:
-            for agent_id in worker.agent_ids:
-                await repo.mark_agent_offline(session, agent_id, self.settings.online_window_seconds)
+            for name in worker.agent_names:
+                await repo.mark_agent_offline(
+                    session,
+                    AgentRef(provider_key=provider_id, name=name),
+                    self.settings.online_window_seconds,
+                )
         self._notify_change(RosterChanged())
 
     # ---- Watching a souk from inside the process
@@ -687,9 +700,9 @@ class Souk:
                 stale_hidden_window_seconds=self.settings.stale_hidden_window_seconds,
             )
 
-    async def get_agent(self, agent_id: str) -> AgentRecord | None:
+    async def get_agent(self, agent: AgentRef) -> AgentRecord | None:
         async with self.session() as session:
-            return await repo.get_agent_by_id(session, agent_id)
+            return await repo.get_agent(session, agent)
 
     async def resolve_agent(self, provider: str, name: str) -> dict[str, Any] | None:
         """Which agent a provider means by a name — `provider` being its
@@ -720,10 +733,10 @@ class Souk:
     # ---- Threads
 
     async def create_thread(
-        self, agent_id: str, parent_thread_id: str | None = None, metadata: dict | None = None
+        self, agent: AgentRef, parent_thread_id: str | None = None, metadata: dict | None = None
     ) -> str:
         async with self.session() as session:
-            thread_id = await repo.create_thread(session, agent_id, parent_thread_id, metadata)
+            thread_id = await repo.create_thread(session, agent, parent_thread_id, metadata)
             await session.commit()
             return thread_id
 
@@ -760,7 +773,8 @@ class Souk:
 
             return {
                 "thread_id": thread_id,
-                "agent_id": root["agent_id"],
+                "provider_key": root["provider_key"],
+                "agent_name": root["agent_name"],
                 "children": await build(thread_id),
             }
 
@@ -783,7 +797,7 @@ class Souk:
     def enqueue_run(
         self,
         run_id: str,
-        agent_id: str,
+        agent: AgentRef,
         thread_id: str,
         input_json: dict[str, Any],
         protocol: str,
@@ -803,17 +817,17 @@ class Souk:
         souk pushed, and nothing asked whether it had capacity.
         """
         return self.broker.enqueue_run(
-            run_id, agent_id, thread_id, input_json, protocol, make_handlers(self), seq=seq
+            run_id, agent, thread_id, input_json, protocol, make_handlers(self), seq=seq
         )
 
     async def start_run(
         self,
-        agent_id: str,
+        agent: AgentRef,
         run_input: dict[str, Any],
         thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RunHandle:
-        """Start a run against `agent_id` and hand back a handle to it.
+        """Start a run against `agent` and hand back a handle to it.
 
         The library entry point: persists the run, puts it into dispatch, and
         returns without waiting for it. `run_input` is an AG-UI RunAgentInput
@@ -827,14 +841,16 @@ class Souk:
         """
         async with self.session() as session:
             resolved_thread_id = await repo.ensure_thread(
-                session, agent_id, thread_id, metadata=metadata, create_if_missing=True
+                session, agent, thread_id, metadata=metadata, create_if_missing=True
             )
-            created = await repo.create_run(session, resolved_thread_id, agent_id, "ag-ui", run_input, metadata)
+            created = await repo.create_run(
+                session, resolved_thread_id, agent, "ag-ui", run_input, metadata
+            )
             run_id = created["run_id"]
 
         self.enqueue_run(
             run_id,
-            agent_id,
+            agent,
             resolved_thread_id,
             {**run_input, "threadId": resolved_thread_id, "runId": run_id},
             "ag-ui",
@@ -864,7 +880,7 @@ class Souk:
 
         self.enqueue_run(
             run_id,
-            stored.agent_id,
+            AgentRef(provider_key=stored.provider_key, name=stored.agent_name),
             stored.thread_id,
             run_input,
             stored.protocol or "ag-ui",

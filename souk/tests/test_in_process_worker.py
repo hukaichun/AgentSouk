@@ -70,7 +70,7 @@ async def test_a_local_agent_can_drive_a_run_with_no_transport(souk):
     HTTP, no AgentSession, no ports bound — and the same broker, handlers and
     persistence carrying it through as for a remote one."""
     registration, public_key = await _register(souk, "local")
-    agent_id = registration.agent_ids["local"]
+    agent_id = registration.agents["local"]
     seen: dict = {}
 
     class LocalProvider:
@@ -82,7 +82,7 @@ async def test_a_local_agent_can_drive_a_run_with_no_transport(souk):
             yield {"type": "TEXT_MESSAGE_END", "messageId": "m1"}
             yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
-    await souk.attach_provider(public_key, LocalProvider(), [agent_id])
+    await souk.attach_provider(public_key, LocalProvider(), [agent_id.name])
     handle = await souk.start_run(agent_id, {"messages": []})
 
     assert [e["type"] async for e in handle.events()] == [
@@ -110,7 +110,7 @@ async def test_max_claim_caps_what_an_in_process_provider_starts_at_once(brisk_s
     provider did, measured, because souk pushed rather than it claiming).
     """
     registration, public_key = await _register(brisk_souk, "capped")
-    agent_id = registration.agent_ids["capped"]
+    agent_id = registration.agents["capped"]
 
     running = 0
     high_water = 0
@@ -136,7 +136,7 @@ async def test_max_claim_caps_what_an_in_process_provider_starts_at_once(brisk_s
             finally:
                 running -= 1
 
-    await brisk_souk.attach_provider(public_key, SlowProvider(), [agent_id], max_claim=2)
+    await brisk_souk.attach_provider(public_key, SlowProvider(), [agent_id.name], max_claim=2)
 
     handles = [await brisk_souk.start_run(agent_id, {"messages": []}) for _ in range(5)]
     await _until(lambda: running == 2)
@@ -155,7 +155,7 @@ async def test_an_unlimited_worker_starts_everything_it_is_given(brisk_souk):
     """The default is still unlimited, matching the remote SDK's — the
     change is that it is now a choice."""
     registration, public_key = await _register(brisk_souk, "uncapped")
-    agent_id = registration.agent_ids["uncapped"]
+    agent_id = registration.agents["uncapped"]
 
     running = 0
     release = asyncio.Event()
@@ -174,7 +174,7 @@ async def test_an_unlimited_worker_starts_everything_it_is_given(brisk_souk):
             finally:
                 running -= 1
 
-    await brisk_souk.attach_provider(public_key, SlowProvider(), [agent_id])
+    await brisk_souk.attach_provider(public_key, SlowProvider(), [agent_id.name])
     for _ in range(5):
         await brisk_souk.start_run(agent_id, {"messages": []})
 
@@ -187,14 +187,14 @@ async def test_one_worker_serves_several_agents_on_one_budget(brisk_souk):
     like one SDK process registering a batch — so its capacity is a budget
     across both, not two independent ones."""
     registration, public_key = await _register(brisk_souk, "translator", "summarizer")
-    translator = registration.agent_ids["translator"]
-    summarizer = registration.agent_ids["summarizer"]
+    translator = registration.agents["translator"]
+    summarizer = registration.agents["summarizer"]
 
     running = 0
     high_water = 0
     release = asyncio.Event()
 
-    labels = {translator: "translated", summarizer: "summarized"}
+    labels = {translator.name: "translated", summarizer.name: "summarized"}
 
     class PairProvider:
         async def run_stream(self, agent_id: str, run_input: dict):
@@ -220,7 +220,7 @@ async def test_one_worker_serves_several_agents_on_one_budget(brisk_souk):
                 running -= 1
 
     await brisk_souk.attach_provider(
-        public_key, PairProvider(), [translator, summarizer], max_claim=1
+        public_key, PairProvider(), [translator.name, summarizer.name], max_claim=1
     )
 
     first = await brisk_souk.start_run(translator, {"messages": []})
@@ -235,5 +235,5 @@ async def test_one_worker_serves_several_agents_on_one_budget(brisk_souk):
         events = [e async for e in handle.events()]
         replies[agent_id] = next(e["delta"] for e in events if e.get("delta"))
     # Each run reached the agent it was for: the provider is handed the
-    # claimed run's agent_id and routes on it.
+    # claimed run's name and routes on it.
     assert replies == {translator: "translated", summarizer: "summarized"}

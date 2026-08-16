@@ -7,10 +7,9 @@ credentials beyond the public key itself. A provider's identity *is* its
 Ed25519 keypair (see souk_agent_sdk.identity, which generates and persists
 one on first run). This is enough to close the one gap that matters for a
 public, multi-tenant souk: nobody can act as a public_key they don't hold
-the private key for. `name` (the human-facing label an agent registers
-under) is deliberately *not* part of the ownership model — it isn't unique
-or exclusive (see souk/schema.py's UNIQUE(public_key, name)); the souk-assigned
-agent_id, scoped to (public_key, name), is what's actually owned.
+the private key for. A `name` on its own is deliberately *not* an identity —
+it is not exclusive, and two providers may both offer `translator`. What is
+owned is the pair: `PRIMARY KEY (provider_key, name)` in souk/schema.py.
 
 Two independent checks, at two different points:
   1. Registration (register_agents / verify_registration_signature):

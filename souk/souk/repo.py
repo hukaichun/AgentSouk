@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.identity import provider_fingerprint
 from souk.ids import new_id
-from souk.models import AgentRecord, AgentSummary, RunRecord
+from souk.models import AgentRecord, AgentRef, AgentSummary, RunRecord
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
 
 
@@ -166,28 +166,20 @@ async def register_agents(
 
     `name` is not exclusive — a different public_key may freely reuse the
     same name (see the UNIQUE(public_key, name) constraint in souk/schema.py).
-    An agent_id is assigned once per (public_key, name) pair and reused on
-    every subsequent registration of that same pair; a name reappearing
-    after being de-listed clears delisted_at again (self-heal).
+    A name reappearing after being de-listed clears delisted_at again
+    (self-heal).
 
-    Returns {name: agent_id} for this batch.
+    Returns this batch's `AgentRef`s indexed by name — the pairs, which the
+    caller already knew, rather than ids souk minted for it to hold. Handing
+    ids back is what made a provider's vocabulary depend on which database
+    answered (see docs/retiring-agent-id.md).
     """
     await ensure_provider(session, public_key)
     if provider_name is not None:
         await set_provider_name(session, public_key, provider_name)
 
-    names = [agent["name"] for agent in agents_batch]
-    existing = (
-        await session.execute(
-            select(agents.c.agent_id, agents.c.name).where(
-                agents.c.public_key == public_key, agents.c.name.in_(names)
-            )
-        )
-    ).all()
-    existing_ids = {row.name: row.agent_id for row in existing}
-
     now = _utcnow()
-    agent_ids: dict[str, str] = {}
+    registered: dict[str, AgentRef] = {}
     for agent in agents_batch:
         name = agent["name"]
         card = {
@@ -195,15 +187,9 @@ async def register_agents(
             "description": agent.get("description", ""),
             **agent.get("agent_card_extra", {}),
         }
-        # Reuse the existing id for an already-registered (public_key, name)
-        # pair so the upsert lands on that same row; mint a fresh one for a
-        # genuinely new pair. Either way the id is known here in Python —
-        # the database never generates it.
-        agent_id = existing_ids.get(name) or new_id("agent")
         stmt = _upsert(session, agents).values(
-            agent_id=agent_id,
             name=name,
-            public_key=public_key,
+            provider_key=public_key,
             agent_card=card,
             metadata=agent.get("metadata", {}),
             joined_at=now,
@@ -212,7 +198,7 @@ async def register_agents(
         # joined_at is deliberately left out of the update set — an existing
         # row keeps its original join time; only a re-list clears delisted_at.
         stmt = stmt.on_conflict_do_update(
-            index_elements=[agents.c.agent_id],
+            index_elements=[agents.c.provider_key, agents.c.name],
             set_={
                 "agent_card": stmt.excluded.agent_card,
                 "metadata": stmt.excluded.metadata,
@@ -221,45 +207,54 @@ async def register_agents(
             },
         )
         await session.execute(stmt)
-        agent_ids[name] = agent_id
+        registered[name] = AgentRef(provider_key=public_key, name=name)
 
     await session.execute(
         update(agents)
         .where(
-            agents.c.public_key == public_key,
+            agents.c.provider_key == public_key,
             agents.c.delisted_at.is_(None),
-            agents.c.agent_id.notin_(list(agent_ids.values())),
+            agents.c.name.notin_(list(registered)),
         )
         .values(delisted_at=now)
     )
     await session.commit()
-    return agent_ids
+    return registered
 
 
-async def get_agent_ids_for_public_key(session: AsyncSession, public_key: str) -> set[str]:
-    """Which agent_ids this key actually owns — what stops a valid token for
-    one provider being used to claim another's work (see Souk.claim_work).
+async def get_agent_names_for_provider(session: AsyncSession, provider_key: str) -> set[str]:
+    """Which names this key has registered — what stops a valid token for one
+    provider being used to claim another's work (see Souk.claim_work).
 
-    By public_key because that is what ownership *is* here: agent_id is
-    assigned per (public_key, name) and de-listing sweeps by public_key. This
-    used to filter on a self-declared `sdk_client_id` instead, which two
-    unrelated keypairs could pick the same value for — and then each could
-    claim the other's runs, measured, not theorised.
+    Names, because within one provider a name *is* unique
+    (`PRIMARY KEY (provider_key, name)`), and the key is already known: it
+    comes from the verified session token. souk-agent-sdk built a routing
+    table on the belief that "name is no longer a unique routing key", which
+    was the right observation at the wrong scope — names are not unique across
+    providers, and inside one they always were.
     """
     rows = (
-        await session.execute(select(agents.c.agent_id).where(agents.c.public_key == public_key))
+        await session.execute(
+            select(agents.c.name).where(agents.c.provider_key == provider_key)
+        )
     ).scalars().all()
     return set(rows)
 
 
-async def touch_agent(session: AsyncSession, agent_id: str) -> None:
+async def touch_agents(session: AsyncSession, provider_key: str, names: list[str]) -> None:
+    """Marks this provider's agents as seen — one statement for the batch,
+    where it used to be one per agent."""
+    if not names:
+        return
     await session.execute(
-        update(agents).where(agents.c.agent_id == agent_id).values(last_seen_at=_utcnow())
+        update(agents)
+        .where(agents.c.provider_key == provider_key, agents.c.name.in_(names))
+        .values(last_seen_at=_utcnow())
     )
     await session.commit()
 
 
-async def mark_agent_offline(session: AsyncSession, agent_id: str, online_window_seconds: int) -> None:
+async def mark_agent_offline(session: AsyncSession, agent: AgentRef, online_window_seconds: int) -> None:
     """Backdate last_seen_at past the online window, so an agent whose
     provider has genuinely gone shows as offline immediately instead of
     lingering until the window expires. Used when a provider detaches — a
@@ -268,45 +263,32 @@ async def mark_agent_offline(session: AsyncSession, agent_id: str, online_window
     """
     await session.execute(
         update(agents)
-        .where(agents.c.agent_id == agent_id)
+        .where(agents.c.provider_key == agent.provider_key, agents.c.name == agent.name)
         .values(last_seen_at=_utcnow() - timedelta(seconds=online_window_seconds + 1))
     )
     await session.commit()
 
 
-async def get_agent_by_id(session: AsyncSession, agent_id: str) -> AgentRecord | None:
-    """Direct, always-unambiguous lookup by the canonical key — a delisted
+async def get_agent(session: AsyncSession, agent: AgentRef) -> AgentRecord | None:
+    """Direct, always-unambiguous lookup by the identity itself — a delisted
     agent is treated as not found, same as one that never existed."""
     row = (
         await session.execute(
             select(
-                agents.c.agent_id,
+                agents.c.provider_key,
                 agents.c.name,
                 agents.c.agent_card,
                 agents.c.metadata,
                 agents.c.joined_at,
                 agents.c.last_seen_at,
-            ).where(agents.c.agent_id == agent_id, agents.c.delisted_at.is_(None))
+            ).where(
+                agents.c.provider_key == agent.provider_key,
+                agents.c.name == agent.name,
+                agents.c.delisted_at.is_(None),
+            )
         )
     ).mappings().first()
     return AgentRecord(**row) if row else None
-
-
-async def get_agent_public_key(session: AsyncSession, agent_id: str) -> str | None:
-    """Just the identity half of get_agent_by_id — see souk.protocols.kyok.
-    chat_completions, which needs this to verify a KyokSigningAuth
-    signature (souk_agent_sdk.kyok_auth) against the actual key this
-    agent_id registered with, without pulling the whole agent_card/
-    metadata row it doesn't need for that. A delisted agent has no usable
-    key here either, same as get_agent_by_id.
-    """
-    return (
-        await session.execute(
-            select(agents.c.public_key).where(
-                agents.c.agent_id == agent_id, agents.c.delisted_at.is_(None)
-            )
-        )
-    ).scalars().first()
 
 
 async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict[str, Any] | None:
@@ -318,8 +300,7 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
 
     Addressing an agent by *whose* it is and what they called it, which is
     what an agent's identity has been all along: `UNIQUE(public_key, name)`
-    is the natural key an agent_id is assigned per, and de-listing sweeps by
-    public_key. So unlike resolve_agents_by_name this can never be
+    is the primary key itself. So unlike resolve_agents_by_name this can never be
     ambiguous — the pair is either registered or it is not — and callers
     have nothing to disambiguate and no 409 to surface.
 
@@ -328,9 +309,8 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
     row = (
         await session.execute(
             select(
-                agents.c.agent_id,
+                agents.c.provider_key,
                 agents.c.name,
-                agents.c.public_key,
                 agents.c.agent_card,
                 agents.c.metadata,
                 agents.c.joined_at,
@@ -338,9 +318,9 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
             )
             # Outer, so addressing by the full key still works for an agent
             # whose identity somehow has no providers row.
-            .select_from(agents.outerjoin(providers, providers.c.public_key == agents.c.public_key))
+            .select_from(agents.outerjoin(providers, providers.c.public_key == agents.c.provider_key))
             .where(
-                or_(agents.c.public_key == provider, providers.c.fingerprint == provider),
+                or_(agents.c.provider_key == provider, providers.c.fingerprint == provider),
                 agents.c.name == name,
                 agents.c.delisted_at.is_(None),
             )
@@ -360,9 +340,8 @@ async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[
     rows = (
         await session.execute(
             select(
-                agents.c.agent_id,
+                agents.c.provider_key,
                 agents.c.name,
-                agents.c.public_key,
                 agents.c.agent_card,
                 agents.c.metadata,
                 agents.c.joined_at,
@@ -390,16 +369,15 @@ async def list_agents(
     rows = (
         await session.execute(
             select(
-                agents.c.agent_id,
+                agents.c.provider_key,
                 agents.c.name,
                 agents.c.agent_card,
                 agents.c.joined_at,
                 agents.c.last_seen_at,
-                agents.c.public_key,
                 providers.c.display_name.label("provider_name"),
             )
             .select_from(
-                agents.outerjoin(providers, providers.c.public_key == agents.c.public_key)
+                agents.outerjoin(providers, providers.c.public_key == agents.c.provider_key)
             )
             .where(agents.c.delisted_at.is_(None), agents.c.last_seen_at >= stale_cutoff)
             .order_by(agents.c.name)
@@ -407,14 +385,13 @@ async def list_agents(
     ).mappings().all()
     return [
         AgentSummary(
-            agent_id=row["agent_id"],
+            provider_key=row["provider_key"],
             name=row["name"],
             description=row["agent_card"].get("description", ""),
             skills=row["agent_card"].get("skills", []),
             joined_at=row["joined_at"],
             last_seen_at=row["last_seen_at"],
             online=is_agent_online(row["last_seen_at"], online_window_seconds),
-            public_key=row["public_key"],
             provider_name=row["provider_name"],
         )
         for row in rows
@@ -431,7 +408,7 @@ async def get_agent_name_for_public_key(session: AsyncSession, public_key: str) 
     return (
         await session.execute(
             select(agents.c.name)
-            .where(agents.c.public_key == public_key)
+            .where(agents.c.provider_key == public_key)
             .order_by(agents.c.joined_at)
             .limit(1)
         )
@@ -447,7 +424,7 @@ async def get_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | 
 
 async def create_thread(
     session: AsyncSession,
-    agent_id: str,
+    agent: AgentRef,
     parent_thread_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> str:
@@ -465,7 +442,8 @@ async def create_thread(
     await session.execute(
         insert(threads).values(
             thread_id=thread_id,
-            agent_id=agent_id,
+            provider_key=agent.provider_key,
+            agent_name=agent.name,
             parent_thread_id=parent_thread_id,
             metadata=metadata or {},
             created_at=now,
@@ -477,7 +455,7 @@ async def create_thread(
 
 async def ensure_thread(
     session: AsyncSession,
-    agent_id: str,
+    agent: AgentRef,
     thread_id: str | None,
     parent_thread_id: str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -489,7 +467,7 @@ async def ensure_thread(
     protocol they're speaking doesn't require).
 
     1. `thread_id` given and it already exists: use it (must belong to
-       `agent_id` — ThreadOwnershipMismatch otherwise, never silently
+       the agent addressed — ThreadOwnershipMismatch otherwise, never silently
        reassigned).
     2. `thread_id` given but unrecognized:
        - `create_if_missing=True` (api_agui.py — AG-UI's `threadId` is a
@@ -526,18 +504,21 @@ async def ensure_thread(
         existing = await get_thread(session, thread_id)
         if existing is None:
             if create_if_missing:
-                return await create_thread(session, agent_id, metadata=metadata)
+                return await create_thread(session, agent, metadata=metadata)
             raise ThreadNotFound(thread_id)
-        if existing["agent_id"] != agent_id:
+        owner = AgentRef(
+            provider_key=existing["provider_key"], name=existing["agent_name"]
+        )
+        if owner != agent:
             raise ThreadOwnershipMismatch(
-                f"thread '{thread_id}' belongs to agent '{existing['agent_id']}', not '{agent_id}'"
+                f"thread '{thread_id}' belongs to agent '{owner}', not '{agent}'"
             )
         await session.execute(
             update(threads).where(threads.c.thread_id == thread_id).values(last_activity_at=_utcnow())
         )
         return thread_id
 
-    return await create_thread(session, agent_id, parent_thread_id, metadata)
+    return await create_thread(session, agent, parent_thread_id, metadata)
 
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
@@ -551,7 +532,12 @@ async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dic
     """
     rows = (
         await session.execute(
-            select(threads.c.thread_id, threads.c.agent_id, threads.c.created_at)
+            select(
+                threads.c.thread_id,
+                threads.c.provider_key,
+                threads.c.agent_name,
+                threads.c.created_at,
+            )
             .where(threads.c.parent_thread_id == thread_id)
             .order_by(threads.c.created_at)
         )
@@ -606,7 +592,7 @@ async def get_thread_messages(session: AsyncSession, thread_id: str) -> list[dic
 async def create_run(
     session: AsyncSession,
     thread_id: str,
-    agent_id: str,
+    agent: AgentRef,
     protocol: str,
     input_json: dict[str, Any],
     metadata: dict[str, Any] | None = None,
@@ -620,7 +606,8 @@ async def create_run(
         insert(runs).values(
             run_id=run_id,
             thread_id=thread_id,
-            agent_id=agent_id,
+            provider_key=agent.provider_key,
+            agent_name=agent.name,
             protocol=protocol,
             status="queued",
             input_json=input_json,
@@ -889,7 +876,13 @@ async def fail_unclaimed_runs(
     rows = (
         await session.execute(
             select(runs.c.run_id, runs.c.metadata)
-            .select_from(runs.join(agents, agents.c.agent_id == runs.c.agent_id))
+            .select_from(
+                runs.join(
+                    agents,
+                    (agents.c.provider_key == runs.c.provider_key)
+                    & (agents.c.name == runs.c.agent_name),
+                )
+            )
             .where(
                 runs.c.status == "queued",
                 runs.c.created_at < created_cutoff,

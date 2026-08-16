@@ -6,7 +6,7 @@ process or sits behind a wire — `souk_agent_sdk.client` runs it on the far
 side of one, and which wire that is has no bearing on anything here:
 
     while True:
-        runs = await souk.claim_work(token, agent_ids, max_claim=capacity)
+        runs = await souk.claim_work(token, agent_names, max_claim=capacity)
         for run in runs:
             spawn(execute(run))          # events reported back per run
 
@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any
 
 from souk.errors import InvalidRegistration
 from souk.identity import verify_session_token
+from souk.models import AgentRef
 from souk.providers import Provider
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ class ClaimedRun:
     """
 
     run_id: str
-    agent_id: str
+    agent: AgentRef
     thread_id: str
     run_input: dict[str, Any]
 
@@ -86,7 +87,7 @@ class Worker:
         session_token: str,
         renew_token: Callable[[], str],
         provider: Provider,
-        agent_ids: list[str],
+        agent_names: list[str],
         max_claim: int | None = None,
     ) -> None:
         self.souk = souk
@@ -99,9 +100,11 @@ class Worker:
         self.renew_token = renew_token
         self.provider = provider
         # Which of this provider's agents to claim for. Routing to the right
-        # one is the provider's own job — it gets the agent_id — so this is a
-        # list of ids, not a table of callables souk would look up.
-        self.agent_ids = list(agent_ids)
+        # one is the provider's own job — it gets the name — so this is a list
+        # of names, not a table of callables souk would look up. Names,
+        # because within one provider a name is unique and the key is already
+        # this worker's own.
+        self.agent_names = list(agent_names)
         self.max_claim = max_claim
         self._in_flight: dict[str, asyncio.Task] = {}
         self._loop_task: asyncio.Task | None = None
@@ -164,7 +167,7 @@ class Worker:
                 full = capacity == 0
                 claimed = await self.souk.claim_work(
                     self.session_token,
-                    list(self.agent_ids),
+                    list(self.agent_names),
                     max_claim=capacity,
                     wait_seconds=(
                         0
@@ -217,23 +220,23 @@ class Worker:
         outcome from what it actually saw (see handlers._handle_finish), and
         it cannot decide anything until it knows the stream is over.
         """
-        if run.agent_id not in self.agent_ids:
+        if run.agent.name not in self.agent_names:
             # Only reachable if this provider's agent list changed between
             # the claim and now. Ending the run beats holding one nobody is
             # going to run.
             logger.warning(
-                "worker %s: claimed run %s for agent_id '%s', which it no longer serves",
+                "worker %s: claimed run %s for '%s', which it no longer serves",
                 self.public_key,
                 run.run_id,
-                run.agent_id,
+                run.agent,
             )
             self.souk.finish_run(run.run_id, claimed_by=self.public_key)
             return
         try:
-            # The provider routes: it is given the agent_id, because one
-            # provider serving several agents is ordinary (see
-            # souk/providers.py) and RunAgentInput carries no agent identity.
-            async for event in self.provider.run_stream(run.agent_id, run.run_input):
+            # The provider routes: it is given the name, because one provider
+            # serving several agents is ordinary (see souk/providers.py) and
+            # RunAgentInput carries no agent identity.
+            async for event in self.provider.run_stream(run.agent.name, run.run_input):
                 self.souk.report_event(run.run_id, event, claimed_by=self.public_key)
         except asyncio.CancelledError:
             logger.info("run %s: agent stopped", run.run_id)

@@ -60,11 +60,11 @@ async def _register(souk, *names: str):
 
 async def test_one_provider_serves_several_agents(souk):
     registration, public_key = await _register(souk, "translator", "summarizer")
-    translator = registration.agent_ids["translator"]
-    summarizer = registration.agent_ids["summarizer"]
+    translator = registration.agents["translator"]
+    summarizer = registration.agents["summarizer"]
 
     provider = TwoAgentProvider()
-    await souk.attach_provider(public_key, provider, [translator, summarizer])
+    await souk.attach_provider(public_key, provider, [translator.name, summarizer.name])
 
     replies = {}
     for agent_id in (translator, summarizer):
@@ -74,9 +74,9 @@ async def test_one_provider_serves_several_agents(souk):
 
     # Each run reached the provider tagged with the agent it was for, and the
     # provider could answer accordingly.
-    assert provider.seen == [translator, summarizer]
-    assert replies[translator] == f"handled by {translator}"
-    assert replies[summarizer] == f"handled by {summarizer}"
+    assert provider.seen == [translator.name, summarizer.name]
+    assert replies[translator] == f"handled by {translator.name}"
+    assert replies[summarizer] == f"handled by {summarizer.name}"
 
 
 async def test_the_run_input_itself_still_carries_no_agent_id(souk):
@@ -84,12 +84,12 @@ async def test_the_run_input_itself_still_carries_no_agent_id(souk):
     it, and souk does not smuggle one in — RunAgentInput stays exactly what
     the protocol says it is."""
     registration, public_key = await _register(souk, "solo")
-    agent_id = registration.agent_ids["solo"]
+    agent_id = registration.agents["solo"]
     seen: dict = {}
 
     class Recorder:
         async def run_stream(self, agent_id: str, run_input: dict):
-            seen["agent_id"] = agent_id
+            seen["agent_name"] = agent_id
             seen["keys"] = set(run_input)
             yield {
                 "type": "RUN_FINISHED",
@@ -97,11 +97,11 @@ async def test_the_run_input_itself_still_carries_no_agent_id(souk):
                 "runId": run_input["runId"],
             }
 
-    await souk.attach_provider(public_key, Recorder(), [agent_id])
+    await souk.attach_provider(public_key, Recorder(), [agent_id.name])
     handle = await souk.start_run(agent_id, {"messages": []})
     [_ async for _ in handle.events()]
 
-    assert seen["agent_id"] == agent_id
+    assert seen["agent_name"] == agent_id.name
     assert not {"agentId", "agent_id"} & seen["keys"]
 
 
@@ -109,10 +109,10 @@ async def test_a_provider_cannot_attach_an_agent_it_did_not_register(souk):
     """The check that only became possible once the identity is declared
     up front. Attaching used to derive the provider from the agent, so there
     was nothing to verify it against."""
-    mine, _mine_key = await _register(souk, "mine")
+    mine, mine_key = await _register(souk, "mine")
     theirs, _theirs_key = await _register(souk, "theirs")
 
     with pytest.raises(AgentNotFound):
         await souk.attach_provider(
-            _mine_key, TwoAgentProvider(), [mine.agent_ids["mine"], theirs.agent_ids["theirs"]]
+            mine_key, TwoAgentProvider(), ["mine", "theirs"]
         )

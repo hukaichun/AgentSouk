@@ -16,6 +16,7 @@ import time
 import pytest
 
 from souk import repo
+from souk.models import AgentRef
 from souk.protocols.kyok import collapse_stream
 from souk.kyok import KyokBridge, issue_kyok_token, verify_kyok_token
 
@@ -40,32 +41,35 @@ def _kyok_headers(bearer: str, private_key, body: bytes) -> dict:
 
 async def _register_agent(session, new_identity, name: str = "greeter"):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": name}])
-    return identity, agent_ids[name]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": name}])
+    return identity, registered[name]
+
+
+_AGENT = AgentRef(provider_key="ab" * 32, name="translator")
 
 
 # --- souk/kyok.py: token issue/verify -----------------------------------
 
 
 def test_kyok_token_roundtrip():
-    token = issue_kyok_token("run_1", "sess_1", "agent_1", "test-signing-secret")
+    token = issue_kyok_token("run_1", "sess_1", _AGENT, "test-signing-secret")
     result = verify_kyok_token(token, "test-signing-secret")
     assert result is not None
     assert result.run_id == "run_1"
     assert result.session_id == "sess_1"
-    assert result.agent_id == "agent_1"
+    assert result.agent == _AGENT
 
 
 def test_expired_kyok_token_rejected(monkeypatch):
     import souk.kyok as kyok_module
 
     monkeypatch.setattr(kyok_module, "KYOK_TOKEN_TTL_SECONDS", -1)
-    token = kyok_module.issue_kyok_token("run_1", "sess_1", "agent_1", "test-signing-secret")
+    token = kyok_module.issue_kyok_token("run_1", "sess_1", _AGENT, "test-signing-secret")
     assert verify_kyok_token(token, "test-signing-secret") is None
 
 
 def test_tampered_kyok_token_signature_rejected():
-    token = issue_kyok_token("run_1", "sess_1", "agent_1", "test-signing-secret")
+    token = issue_kyok_token("run_1", "sess_1", _AGENT, "test-signing-secret")
     body, signature = token.split(".", 1)
     tampered = f"{body}.{'0' * len(signature)}"
     assert verify_kyok_token(tampered, "test-signing-secret") is None

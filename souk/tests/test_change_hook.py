@@ -34,11 +34,11 @@ async def _register(souk: Souk, name: str = "echo"):
         timestamp,
         [{"name": name}],
     )
-    return registration.agent_ids[name], public_key
+    return registration.agents[name]
 
 
 class _Provider:
-    async def run_stream(self, agent_id: str, run_input: dict):
+    async def run_stream(self, agent: str, run_input: dict):
         yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
@@ -55,11 +55,11 @@ async def test_registering_and_attaching_both_change_the_roster(souk: Souk) -> N
     seen: list = []
     souk.on_change(seen.append)
 
-    agent_id, public_key = await _register(souk)
+    agent = await _register(souk)
     assert seen == [RosterChanged()]
 
-    await souk.attach_provider(public_key, _Provider(), [agent_id])
-    await souk.detach_provider(public_key)
+    await souk.attach_provider(agent.provider_key, _Provider(), [agent.name])
+    await souk.detach_provider(agent.provider_key)
 
     assert seen == [RosterChanged(), RosterChanged(), RosterChanged()]
 
@@ -68,9 +68,9 @@ async def test_a_run_reports_every_status_it_moves_through(souk: Souk) -> None:
     seen: list = []
     souk.on_change(lambda e: seen.append(e) if isinstance(e, RunStatusChanged) else None)
 
-    agent_id, public_key = await _register(souk)
-    await souk.attach_provider(public_key, _Provider(), [agent_id])
-    handle = await souk.start_run(agent_id, {"messages": []})
+    agent = await _register(souk)
+    await souk.attach_provider(agent.provider_key, _Provider(), [agent.name])
+    handle = await souk.start_run(agent, {"messages": []})
     [event async for event in handle.events()]
     await _until(lambda: any(e.status == "completed" for e in seen))
 
@@ -106,9 +106,9 @@ async def test_a_subscriber_that_raises_does_not_break_the_thing_that_notified_i
     survivor: list = []
     souk.on_change(survivor.append)
 
-    agent_id, _ = await _register(souk)
+    agent = await _register(souk)
 
-    assert agent_id
+    assert agent
     assert survivor == [RosterChanged()]
     assert "on_change subscriber raised" in caplog.text
 

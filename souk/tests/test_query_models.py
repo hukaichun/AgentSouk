@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from souk.core import Souk
 from souk.identity import registration_signing_payload
-from souk.models import AgentRecord, AgentSummary, RunRecord
+from souk.models import AgentRef, AgentRecord, AgentSummary, RunRecord
 
 
 async def _register(souk: Souk, name: str = "translator", provider_name: str | None = "Demo"):
@@ -36,7 +36,7 @@ async def _register(souk: Souk, name: str = "translator", provider_name: str | N
         [{"name": name, "description": "d"}],
         provider_name=provider_name,
     )
-    return registration.agent_ids[name], public_key
+    return registration.agents[name]
 
 
 class _Provider:
@@ -52,26 +52,25 @@ async def test_the_roster_is_agent_summaries(souk: Souk) -> None:
 
     assert all(isinstance(a, AgentSummary) for a in roster)
     assert set(roster[0].model_dump()) == {
-        "agent_id",
+        "provider_key",
         "name",
         "description",
         "skills",
         "joined_at",
         "last_seen_at",
         "online",
-        "public_key",
         "provider_name",
     }
 
 
 async def test_get_agent_is_an_agent_record(souk: Souk) -> None:
-    agent_id, _ = await _register(souk)
+    agent_id = await _register(souk)
 
     agent = await souk.get_agent(agent_id)
 
     assert isinstance(agent, AgentRecord)
     assert set(agent.model_dump()) == {
-        "agent_id",
+        "provider_key",
         "name",
         "agent_card",
         "metadata",
@@ -81,14 +80,17 @@ async def test_get_agent_is_an_agent_record(souk: Souk) -> None:
 
 
 async def test_get_run_is_a_run_record_without_the_storage_columns(souk: Souk) -> None:
-    """Runs live in `thread_history` next to messages, and `get_run` used to
-    `select(thread_history)` — so it also returned `id`, `kind`, `message_id`
-    and `message_json`, which say where souk keeps a run rather than anything
-    about the run. Nothing read them; a caller that started to would be
-    depending on the storage layout.
+    """Runs used to live in `thread_history` next to messages, and `get_run`
+    used to `select(thread_history)` — so it also returned `id`, `kind`,
+    `message_id` and `message_json`, which say where souk keeps a run rather
+    than anything about the run.
+
+    Runs have their own table now, so `select(runs)` is safe again and this
+    pins the consequence: the table's columns and this model's fields are the
+    same set by construction, not by two lists agreeing.
     """
-    agent_id, public_key = await _register(souk)
-    await souk.attach_provider(public_key, _Provider(), [agent_id])
+    agent_id = await _register(souk)
+    await souk.attach_provider(agent_id.provider_key, _Provider(), [agent_id.name])
     handle = await souk.start_run(agent_id, {"messages": []})
     [event async for event in handle.events()]
 
@@ -98,7 +100,8 @@ async def test_get_run_is_a_run_record_without_the_storage_columns(souk: Souk) -
     assert set(run.model_dump()) == {
         "run_id",
         "thread_id",
-        "agent_id",
+        "provider_key",
+        "agent_name",
         "protocol",
         "status",
         "input_json",
@@ -110,23 +113,24 @@ async def test_get_run_is_a_run_record_without_the_storage_columns(souk: Souk) -
     }
     assert run.run_id == handle.run_id
     assert run.thread_id == handle.thread_id
-    assert run.agent_id == agent_id
+    assert AgentRef(provider_key=run.provider_key, name=run.agent_name) == agent_id
     assert run.protocol == "ag-ui"
 
 
 async def test_an_unknown_id_is_still_none(souk: Souk) -> None:
     """Typing the hit does not change what a miss looks like."""
-    assert await souk.get_agent("agent_nope") is None
+    assert await souk.get_agent(AgentRef(provider_key="00" * 32, name="nope")) is None
     assert await souk.get_run("run_nope") is None
 
 
 async def test_the_models_serialise(souk: Souk) -> None:
     """The gateway turns these into JSON, so `mode="json"` has to work on
     every field — the datetimes are the ones that would bite."""
-    agent_id, _ = await _register(souk)
+    agent_id = await _register(souk)
 
     dumped = (await souk.list_agents())[0].model_dump(mode="json")
 
     assert isinstance(dumped["joined_at"], str)
-    assert dumped["agent_id"] == agent_id
+    assert dumped["provider_key"] == agent_id.provider_key
+    assert dumped["name"] == agent_id.name
     assert dumped["provider_name"] == "Demo"

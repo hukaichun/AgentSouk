@@ -29,8 +29,8 @@ async def test_native_ag_ui_interrupt_outcome_pauses_a_run(session, souk, new_id
     that).
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
-    agent_b = agent_ids["b"]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
+    agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
     run_id = created["run_id"]
@@ -59,8 +59,8 @@ async def test_native_ag_ui_success_outcome_completes_a_run_normally(session, so
     check must not fire on the common case.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
-    agent_b = agent_ids["b"]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
+    agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
     run_id = created["run_id"]
@@ -86,9 +86,9 @@ async def test_finalize_delegated_call_reports_honestly_without_registering_any_
     left in this codebase called "waitingOnRunId" for it to write.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "b"}, {"name": "c"}]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "b"}, {"name": "c"}]
     )
-    agent_b, agent_c = agent_ids["b"], agent_ids["c"]
+    agent_b, agent_c = registered["b"], registered["c"]
 
     thread_b = await repo.create_thread(session, agent_b)
     thread_c = await repo.ensure_thread(session, agent_c, None, parent_thread_id=thread_b)
@@ -116,8 +116,8 @@ async def test_a_delegating_agent_gets_an_honest_answer_by_just_asking_again(ses
     mechanism a delegating agent relies on to eventually get C's answer.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "c"}])
-    agent_c = agent_ids["c"]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "c"}])
+    agent_c = registered["c"]
     thread_c = await repo.create_thread(session, agent_c)
 
     run_c = await repo.create_run(session, thread_c, agent_c, "a2a", {})

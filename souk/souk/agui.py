@@ -35,7 +35,7 @@ def rewrite_message_ids(event: dict[str, Any], id_map: dict[str, str]) -> dict[s
     """Agents generate their own `messageId` for streamed replies (e.g.
     pydantic-ai's AGUIAdapter mints a plain uuid4) — provider-internal and
     in no way souk's id scheme. souk otherwise assigns every id a caller
-    sees (thread_id, run_id, agent_id, inbound message ids — the last via
+    sees (thread_id, run_id, inbound message ids — the last via
     repo.append_thread_messages, a real database-generated id), so a raw
     provider uuid leaking through here is the one inconsistency left. Not
     a database id itself — an assistant reply is never persisted as a

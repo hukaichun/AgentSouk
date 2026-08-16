@@ -30,7 +30,7 @@ DEFAULT_DATABASE_URL = "sqlite+aiosqlite:///./souk.db"
 # no migration directory to read a head from. It cannot drift, though —
 # tests/test_schema_revision.py fails if it stops matching alembic's actual
 # head, which is checkable in the repo where the directory does exist.
-EXPECTED_SCHEMA_REVISION = "6f326dc19242"
+EXPECTED_SCHEMA_REVISION = "9b22d55e32fc"
 
 
 def quoted_schema(db_schema: str) -> str:

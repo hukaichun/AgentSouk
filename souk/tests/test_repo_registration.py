@@ -15,6 +15,7 @@ from sqlalchemy import select, update
 
 from souk import repo
 from souk.identity import provider_fingerprint
+from souk.models import AgentRef
 from souk.schema import agents, providers
 
 
@@ -28,37 +29,63 @@ async def _listed(session, souk):
     )
 
 
-async def test_registration_assigns_and_reuses_agent_id(session, new_identity):
-    identity = new_identity()
-    agents = [{"name": "greeter", "description": "hi"}]
+async def test_registering_the_same_agent_twice_is_the_same_agent(session, new_identity):
+    """Once a tautology, and worth keeping for the half that is not.
 
-    first = await repo.register_agents(session, identity.public_key, agents)
-    second = await repo.register_agents(session, identity.public_key, agents)
+    That the two registrations name the same agent is now true by
+    construction: an agent *is* `(provider_key, name)`, so there is nothing
+    for souk to assign and nothing to reuse. This used to be the test that
+    souk minted an id and looked it up again, `startswith("agent_")` and all.
+
+    What still needs checking is the storage: the second registration updates
+    the existing row rather than adding a second, and leaves `joined_at`
+    alone — an agent that re-registers has not just joined.
+    """
+    identity = new_identity()
+    batch = [{"name": "greeter", "description": "hi"}]
+
+    first = await repo.register_agents(session, identity.public_key, batch)
+    joined_at = (
+        await session.execute(
+            select(agents.c.joined_at).where(agents.c.provider_key == identity.public_key)
+        )
+    ).scalars().one()
+    second = await repo.register_agents(session, identity.public_key, batch)
 
     assert first["greeter"] == second["greeter"]
-    assert first["greeter"].startswith("agent_")
+    rows = (
+        await session.execute(
+            select(agents.c.joined_at).where(agents.c.provider_key == identity.public_key)
+        )
+    ).scalars().all()
+    assert rows == [joined_at]
 
 
-async def test_different_identity_same_name_gets_distinct_agent_id(session, new_identity):
+async def test_the_same_name_under_two_identities_is_two_agents(session, new_identity):
+    """A name is not exclusive, which is exactly why it is not an identity on
+    its own — and why addressing an agent takes the pair."""
     a = new_identity()
     b = new_identity()
-    agents = [{"name": "greeter"}]
+    batch = [{"name": "greeter"}]
 
-    result_a = await repo.register_agents(session, a.public_key, agents)
-    result_b = await repo.register_agents(session, b.public_key, agents)
+    result_a = await repo.register_agents(session, a.public_key, batch)
+    result_b = await repo.register_agents(session, b.public_key, batch)
 
     assert result_a["greeter"] != result_b["greeter"]
+    assert result_a["greeter"].name == result_b["greeter"].name == "greeter"
 
     candidates = await repo.resolve_agents_by_name(session, "greeter")
-    assert {c["agent_id"] for c in candidates} == {result_a["greeter"], result_b["greeter"]}
+    assert {
+        AgentRef(provider_key=c["provider_key"], name=c["name"]) for c in candidates
+    } == {result_a["greeter"], result_b["greeter"]}
 
 
 async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(session, souk, new_identity):
     identity = new_identity()
     both = [{"name": "greeter"}, {"name": "translator"}]
 
-    ids = await repo.register_agents(session, identity.public_key, both)
-    translator_id = ids["translator"]
+    registered = await repo.register_agents(session, identity.public_key, both)
+    translator = registered["translator"]
 
     # Re-register with translator omitted — the batch is the declarative
     # full statement of what this identity offers now.
@@ -66,7 +93,10 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
 
     row = (
         await session.execute(
-            select(agents.c.delisted_at).where(agents.c.agent_id == translator_id)
+            select(agents.c.delisted_at).where(
+                agents.c.provider_key == translator.provider_key,
+                agents.c.name == translator.name,
+            )
         )
     ).mappings().first()
     assert row["delisted_at"] is not None
@@ -78,7 +108,10 @@ async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(sessi
     await repo.register_agents(session, identity.public_key, both)
     row = (
         await session.execute(
-            select(agents.c.delisted_at).where(agents.c.agent_id == translator_id)
+            select(agents.c.delisted_at).where(
+                agents.c.provider_key == translator.provider_key,
+                agents.c.name == translator.name,
+            )
         )
     ).mappings().first()
     assert row["delisted_at"] is None
@@ -110,7 +143,7 @@ async def test_list_agents_reports_public_key_and_provider_name(session, souk, n
     )
 
     listed = await _listed(session, souk)
-    assert listed[0].public_key == identity.public_key
+    assert listed[0].provider_key == identity.public_key
     assert listed[0].provider_name == "Ada's Stall"
 
 
@@ -150,8 +183,8 @@ async def test_an_agent_is_addressable_by_whose_it_is_and_what_it_is_called(sess
     mine = await repo.register_agents(session, a.public_key, [{"name": "translator"}])
     theirs = await repo.register_agents(session, b.public_key, [{"name": "translator"}])
 
-    assert (await repo.resolve_agent(session, a.public_key, "translator"))["agent_id"] == mine["translator"]
-    assert (await repo.resolve_agent(session, b.public_key, "translator"))["agent_id"] == theirs["translator"]
+    assert AgentRef(**{k: (await repo.resolve_agent(session, a.public_key, "translator"))[k] for k in ("provider_key", "name")}) == mine["translator"]
+    assert AgentRef(**{k: (await repo.resolve_agent(session, b.public_key, "translator"))[k] for k in ("provider_key", "name")}) == theirs["translator"]
     # ...while the name alone still answers with both, which is the other
     # question: who offers this, not which one do I mean.
     assert len(await repo.resolve_agents_by_name(session, "translator")) == 2
@@ -187,7 +220,9 @@ async def test_a_provider_is_addressable_by_its_fingerprint(session, new_identit
     by_fingerprint = await repo.resolve_agent(session, fingerprint, "translator")
 
     assert by_fingerprint == by_key
-    assert by_fingerprint["agent_id"] == ids["translator"]
+    assert AgentRef(
+        provider_key=by_fingerprint["provider_key"], name=by_fingerprint["name"]
+    ) == ids["translator"]
 
 
 async def test_an_identity_that_never_named_itself_is_still_addressable(session, new_identity):
@@ -217,7 +252,7 @@ async def test_a_second_key_cannot_take_an_existing_fingerprint(session, new_ide
         await repo.register_agents(session, theirs.public_key, [{"name": "impostor"}])
 
     # Refused outright: the colliding registration left nothing behind.
-    assert await repo.get_agent_ids_for_public_key(session, theirs.public_key) == set()
+    assert await repo.get_agent_names_for_provider(session, theirs.public_key) == set()
 
 
 async def test_junk_resolves_to_nothing_rather_than_raising(session, new_identity):

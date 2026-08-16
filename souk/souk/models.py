@@ -31,7 +31,34 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class AgentRef(BaseModel):
+    """Which agent — the whole of it.
+
+    An agent is its provider's key plus the name that provider gave it, so
+    this is not a convenience wrapper around an id; it *is* the identity, and
+    there is no other. Frozen, and therefore hashable, which is what lets the
+    broker key its pending queue by an agent directly rather than by a
+    stand-in string.
+
+    Deliberately one parameter rather than two adjacent strings: `(key, name)`
+    and `(name, key)` are both `(str, str)`, and every signature in souk that
+    names an agent would otherwise take that pair positionally.
+
+    Not an address. A caller may *say* `(fingerprint, name)` — see
+    `repo.resolve_agent`, which accepts either form of the key — and what it
+    resolves to is one of these, holding the full key.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    provider_key: str
+    name: str
+
+    def __str__(self) -> str:  # for log lines, which are full of these
+        return f"{self.provider_key[:16]}…/{self.name}"
 
 
 class AgentSummary(BaseModel):
@@ -42,24 +69,22 @@ class AgentSummary(BaseModel):
     calls a minute apart can legitimately disagree.
     """
 
-    agent_id: str
+    provider_key: str
     name: str
     description: str = ""
     skills: list[dict[str, Any]] = Field(default_factory=list)
     joined_at: datetime
     last_seen_at: datetime
     online: bool
-    # Whoever holds this key owns this agent (see repo.register_agents).
-    # `provider_name` is the optional storefront label for that key — None
-    # means that key never set one, not that it was cleared.
-    public_key: str
+    # `provider_name` is the optional storefront label for `provider_key` —
+    # None means that key never set one, not that it was cleared.
     provider_name: str | None = None
 
 
 class AgentRecord(BaseModel):
     """One agent as souk stored it — see `Souk.get_agent`."""
 
-    agent_id: str
+    provider_key: str
     name: str
     agent_card: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -81,7 +106,8 @@ class RunRecord(BaseModel):
 
     run_id: str
     thread_id: str
-    agent_id: str
+    provider_key: str
+    agent_name: str
     # "ag-ui" | "a2a" — which protocol started this run.
     protocol: str
     status: str

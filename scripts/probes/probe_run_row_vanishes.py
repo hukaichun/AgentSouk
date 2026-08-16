@@ -77,10 +77,10 @@ async def main() -> int:
         timestamp,
         [{"name": "a"}],
     )
-    agent_id = registration.agent_ids["a"]
+    agent = registration.agents["a"]
 
-    handle = await souk.start_run(agent_id, {"messages": []})
-    await souk.claim_work(registration.session_token, [agent_id])
+    handle = await souk.start_run(agent, {"messages": []})
+    await souk.claim_work(registration.session_token, ["a"])
     await asyncio.sleep(0.2)
 
     # The database is replaced underneath a live run: a restore, or a souk

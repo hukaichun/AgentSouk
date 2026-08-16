@@ -18,8 +18,8 @@ from souk.handlers import _handle_finish, _handle_relay
 
 async def test_a_tool_call_reply_is_persisted_as_real_thread_history_messages(session, souk, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
-    agent_b = agent_ids["b"]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
+    agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
     run_id = created["run_id"]
@@ -65,8 +65,8 @@ async def test_a_tool_call_reply_is_persisted_as_real_thread_history_messages(se
 
 async def test_a_plain_text_only_reply_is_still_persisted(session, souk, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
-    agent_b = agent_ids["b"]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
+    agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
     run_id = created["run_id"]
@@ -100,8 +100,8 @@ async def test_a_failed_run_persists_nothing_to_thread_history(session, souk, ne
     from souk.handlers import _handle_fail
 
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
-    agent_b = agent_ids["b"]
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "b"}])
+    agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
     run_id = created["run_id"]

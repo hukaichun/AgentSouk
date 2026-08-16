@@ -33,6 +33,7 @@ from souk import repo
 from souk.agui import build_run_agent_input
 from souk.errors import AgentNotFound, AmbiguousAgentName, InvalidRunInput, RunNotFound
 from souk.identity import verify_actor_chain
+from souk.models import AgentRef
 from souk.pause import is_resuming
 from souk.protocols.a2a_translate import (
     a2a_message_to_agui_messages,
@@ -102,36 +103,102 @@ class A2AStream:
             yield json.dumps(item)
 
 
+# A2A's own names for its transport bindings, read off the enum so this
+# tracks the spec instead of a list souk maintains.
+_BINDINGS = frozenset(member.name for member in TransportProtocol)
+
+
+@dataclass(frozen=True)
+class ServedInterface:
+    """One way this souk is actually reachable, as a fact supplied to core.
+
+    A2A's `AgentCard` mixes two kinds of field: what an agent *is* (name,
+    skills, capabilities, protocol version) and where it can be *reached*
+    (`supported_interfaces`, and the auth those interfaces want). The first is
+    souk's own data in the protocol's shape, and translating it is exactly
+    what protocol adapters are for. The second is a statement about a
+    deployment — which transports exist, at which addresses — and core does
+    not know whether anyone is serving it at all.
+
+    So the card's interfaces are an input, like a run's input is. This class
+    is the fact; building `pb.AgentInterface` from it, with the right enum
+    spelling and protocol version, stays core's job, so whoever serves souk
+    never hand-writes an A2A field name (see this module's notes on -32601).
+
+    The previous version passed a `public_base_url` and interpolated
+    `f"{base}/a2a/id/{agent}/rpc"` — which meant core had decided the route
+    layout of every gateway that would ever serve it. Its own docstring said
+    core "has no business knowing what souk is called on a network" two lines
+    above the line that named the path. Fixing the *value* and keeping the
+    *concept* is what left that gap; the concept goes here.
+
+    Verified against the installed `a2a-sdk` rather than assumed: a card with
+    no `supported_interfaces` serialises cleanly (the field is `repeated`, and
+    proto3 has no required fields), so leaving it to whoever knows the answer
+    is not a deviation.
+    """
+
+    url: str
+    # Which binding this URL speaks, by A2A's own name for it.
+    #
+    # No default. souk serves A2A over JSON-RPC today and A2A also defines a
+    # gRPC binding, so defaulting this would quietly make "JSON-RPC" core's
+    # standing assumption about how it is served — which is the assumption
+    # this class exists to remove.
+    binding: str
+
+    def __post_init__(self) -> None:
+        # Checked here rather than when the card is built, because this is
+        # constructed once at startup by whoever serves souk: a misspelling
+        # fails that process on boot instead of failing a client's card read.
+        # The valid set comes from the A2A enum, so it follows the spec rather
+        # than a list written down here.
+        if self.binding not in _BINDINGS:
+            raise ValueError(
+                f"unknown A2A binding {self.binding!r} — A2A defines {sorted(_BINDINGS)}"
+            )
+
+
 class A2AAdapter:
     """A2A semantics over a Souk.
 
-    `public_base_url` is only used to build the URLs an Agent Card
-    advertises. It is passed in rather than read from settings because core
-    has no business knowing what souk is called on a network — whoever serves
-    souk does.
+    Holds no address of its own: see `ServedInterface` for why the Agent
+    Card's `supported_interfaces` is something a caller supplies rather than
+    something core builds.
     """
 
-    def __init__(self, souk: "Souk", public_base_url: str = "") -> None:
+    def __init__(self, souk: "Souk") -> None:
         self._souk = souk
-        self._public_base_url = public_base_url.rstrip("/")
 
-    async def resolve_agent_id(self, name: str) -> str:
+    async def resolve_agent(self, name: str) -> AgentRef:
+        """Which agent a bare display name means — zero, one, or ambiguous.
+
+        A browsing question, and it can legitimately fail: names are not
+        exclusive across providers. Addressing an agent unambiguously is
+        `AgentRef(provider_key, name)`, which needs no resolution at all.
+        """
         candidates = await self._souk.resolve_agents_by_name(name)
         if not candidates:
             raise AgentNotFound(f"agent '{name}' is not registered")
         if len(candidates) > 1:
             raise AmbiguousAgentName(name, candidates)
-        return candidates[0]["agent_id"]
+        return AgentRef(
+            provider_key=candidates[0]["provider_key"], name=candidates[0]["name"]
+        )
 
-    async def agent_card(self, agent_id: str) -> dict[str, Any]:
-        agent = await self._souk.get_agent(agent_id)
-        if agent is None:
-            raise AgentNotFound(f"agent '{agent_id}' is not registered")
-        card = dict(agent.agent_card)
-        base = f"{self._public_base_url}/a2a/id/{agent_id}"
+    async def agent_card(
+        self, agent: AgentRef, interfaces: "list[ServedInterface] | None" = None
+    ) -> dict[str, Any]:
+        """This agent's card. `interfaces` says where it can be reached, and
+        comes from whoever is serving souk — a card built with none simply
+        advertises none, which is the truth about a souk nobody is serving."""
+        record = await self._souk.get_agent(agent)
+        if record is None:
+            raise AgentNotFound(f"agent '{agent}' is not registered")
+        card = dict(record.agent_card)
         return to_wire(
             pb.AgentCard(
-                name=card.get("name", agent.name),
+                name=card.get("name", record.name),
                 description=card.get("description", ""),
                 version="0.1.0",
                 # v1.0 replaced the card's single `url` + `preferredTransport`
@@ -142,10 +209,11 @@ class A2AAdapter:
                 # unnoticed, since nothing else on the card stated a version.
                 supported_interfaces=[
                     pb.AgentInterface(
-                        url=f"{base}/rpc",
-                        protocol_binding=TransportProtocol.JSONRPC.value,
+                        url=served.url,
+                        protocol_binding=TransportProtocol[served.binding].value,
                         protocol_version=PROTOCOL_VERSION,
                     )
+                    for served in (interfaces or [])
                 ],
                 capabilities=pb.AgentCapabilities(streaming=True),
                 default_input_modes=["text/plain"],
@@ -154,7 +222,7 @@ class A2AAdapter:
             )
         )
 
-    async def handle_rpc(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any] | A2AStream:
+    async def handle_rpc(self, agent: AgentRef, payload: dict[str, Any]) -> dict[str, Any] | A2AStream:
         """The wire rung: a JSON-RPC envelope in, a JSON-RPC envelope out.
 
         A thin wrapper over the semantic methods below, which is the point —
@@ -169,31 +237,31 @@ class A2AAdapter:
         rpc_id = payload.get("id")
 
         if method in SEND:
-            return await self._envelope(rpc_id, self.send_task(agent_id, **_send_args(params)))
+            return await self._envelope(rpc_id, self.send_task(agent, **_send_args(params)))
         if method in STREAM:
-            return await self._envelope_stream(rpc_id, params, agent_id)
+            return await self._envelope_stream(rpc_id, params, agent)
         if method in GET:
-            return await self._envelope(rpc_id, self.get_task(agent_id, params.get("id")))
+            return await self._envelope(rpc_id, self.get_task(agent, params.get("id")))
         if method in CANCEL:
-            return await self._envelope(rpc_id, self.cancel_task(agent_id, params.get("id")))
+            return await self._envelope(rpc_id, self.cancel_task(agent, params.get("id")))
         if method in SUBSCRIBE:
-            return await self._envelope_resubscribe(rpc_id, params, agent_id)
+            return await self._envelope_resubscribe(rpc_id, params, agent)
         return _error(rpc_id, METHOD_NOT_FOUND, f"method not found: {method}")
 
     async def _envelope_stream(
-        self, rpc_id: Any, params: dict[str, Any], agent_id: str
+        self, rpc_id: Any, params: dict[str, Any], agent: AgentRef
     ) -> dict[str, Any] | A2AStream:
         try:
-            stream = await self.send_task_streaming(agent_id, **_send_args(params))
+            stream = await self.send_task_streaming(agent, **_send_args(params))
         except RunNotFound:
             return _error(rpc_id, TASK_NOT_FOUND, "task not found")
         return A2AStream(_wrap(rpc_id, stream))
 
     async def _envelope_resubscribe(
-        self, rpc_id: Any, params: dict[str, Any], agent_id: str
+        self, rpc_id: Any, params: dict[str, Any], agent: AgentRef
     ) -> dict[str, Any] | A2AStream:
         try:
-            stream = await self.resubscribe_task(agent_id, params.get("id"))
+            stream = await self.resubscribe_task(agent, params.get("id"))
         except RunNotFound:
             return _error(rpc_id, TASK_NOT_FOUND, "task not found")
         return A2AStream(_wrap(rpc_id, stream))
@@ -211,7 +279,7 @@ class A2AAdapter:
 
     async def send_task(
         self,
-        agent_id: str,
+        agent: AgentRef,
         message: dict[str, Any],
         *,
         context_id: str | None = None,
@@ -231,7 +299,7 @@ class A2AAdapter:
         where provenance stops).
         """
         run_id, thread_id, is_live = await self._start_run(
-            agent_id, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
+            agent, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
         live = is_live and self._souk.broker.get(run_id) is not None
         if live:
@@ -247,14 +315,14 @@ class A2AAdapter:
         return build_task(
             run_id,
             thread_id,
-            await self._display_name(agent_id),
+            await self._display_name(agent),
             stored.status if stored else "completed",
             events,
         )
 
     async def send_task_streaming(
         self,
-        agent_id: str,
+        agent: AgentRef,
         message: dict[str, Any],
         *,
         context_id: str | None = None,
@@ -266,7 +334,7 @@ class A2AAdapter:
         """Same as send_task, but yields A2A status/artifact updates as they
         arrive instead of waiting for the task to finish."""
         run_id, thread_id, is_live = await self._start_run(
-            agent_id, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
+            agent, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
         live = is_live and self._souk.broker.get(run_id) is not None
         # Subscribed before `results` is iterated, for the same reason as
@@ -296,7 +364,7 @@ class A2AAdapter:
 
         return results()
 
-    async def resubscribe_task(self, agent_id: str, task_id: str) -> AsyncIterator[dict[str, Any]]:
+    async def resubscribe_task(self, agent: AgentRef, task_id: str) -> AsyncIterator[dict[str, Any]]:
         """`tasks/resubscribe`: rejoin a task's stream after losing the
         connection it was started on.
 
@@ -307,7 +375,7 @@ class A2AAdapter:
         empty stream, so a caller reconnecting a moment too late still learns
         the outcome instead of watching nothing.
         """
-        run = await self._run_of(agent_id, task_id)
+        run = await self._run_of(agent, task_id)
         thread_id = run.thread_id
         events = self._souk.broker.subscribe(task_id) if self._souk.broker.get(task_id) else None
 
@@ -323,20 +391,20 @@ class A2AAdapter:
 
         return results()
 
-    async def get_task(self, agent_id: str, task_id: str) -> dict[str, Any]:
+    async def get_task(self, agent: AgentRef, task_id: str) -> dict[str, Any]:
         """A task's current state. `task_id` is a run_id — A2A's Task.id is
-        not a separate concept. Scoped to agent_id, so a request against one
+        not a separate concept. Scoped to agent, so a request against one
         agent's endpoint can't read another agent's run."""
-        run = await self._run_of(agent_id, task_id)
+        run = await self._run_of(agent, task_id)
         return build_task(
             task_id,
             run.thread_id,
-            await self._display_name(agent_id),
+            await self._display_name(agent),
             run.status,
             await self._souk.get_run_events(task_id),
         )
 
-    async def cancel_task(self, agent_id: str, task_id: str) -> dict[str, Any]:
+    async def cancel_task(self, agent: AgentRef, task_id: str) -> dict[str, Any]:
         """Requests cancellation and reports the run's *real* state.
 
         Deliberately not hardcoded to "canceled": souk asks a provider to
@@ -348,7 +416,7 @@ class A2AAdapter:
         actually reports (typically `cancelling` while the provider is still
         winding down).
         """
-        run = await self._run_of(agent_id, task_id)
+        run = await self._run_of(agent, task_id)
         self._souk.cancel_run(task_id)
         # Re-read: the request may already have settled the run (nothing had
         # claimed it), or moved it to `cancelling`.
@@ -356,24 +424,24 @@ class A2AAdapter:
         return build_task(
             task_id,
             run.thread_id,
-            await self._display_name(agent_id),
+            await self._display_name(agent),
             current.status,
             await self._souk.get_run_events(task_id),
         )
 
     # ---- internals
 
-    async def _run_of(self, agent_id: str, task_id: str) -> dict[str, Any]:
+    async def _run_of(self, agent: AgentRef, task_id: str) -> dict[str, Any]:
         run = await self._souk.get_run(task_id) if task_id else None
-        if run is None or run.agent_id != agent_id:
-            raise RunNotFound(f"no task '{task_id}' for agent '{agent_id}'")
+        if run is None or AgentRef(provider_key=run.provider_key, name=run.agent_name) != agent:
+            raise RunNotFound(f"no task '{task_id}' for agent '{agent}'")
         return run
 
-    async def _display_name(self, agent_id: str) -> str:
-        agent = await self._souk.get_agent(agent_id)
-        return agent.name if agent else agent_id
+    async def _display_name(self, agent: AgentRef) -> str:
+        record = await self._souk.get_agent(agent)
+        return record.name if record else agent.name
 
-    async def _start_run(self, agent_id: str, params: dict) -> tuple[str, str, bool]:
+    async def _start_run(self, agent: AgentRef, params: dict) -> tuple[str, str, bool]:
         """Queues a run from tasks/send(Subscribe) params.
 
         Returns (run_id, thread_id, is_live). `is_live=False` means nothing
@@ -389,9 +457,9 @@ class A2AAdapter:
         """
         souk = self._souk
         async with souk.session() as session:
-            agent = await repo.get_agent_by_id(session, agent_id)
-            if agent is None:
-                raise AgentNotFound(f"agent '{agent_id}' is not registered")
+            record = await repo.get_agent(session, agent)
+            if record is None:
+                raise AgentNotFound(f"agent '{agent}' is not registered")
 
             metadata = params.get("metadata", {})
             parent_thread_id = await _lineage_parent(session, params)
@@ -420,7 +488,7 @@ class A2AAdapter:
             # is optional, so omitting it still yields a fresh thread, but
             # supplying an unrecognized one is a caller error (ThreadNotFound).
             thread_id = await repo.ensure_thread(
-                session, agent_id, context_id, parent_thread_id, metadata=metadata
+                session, agent, context_id, parent_thread_id, metadata=metadata
             )
 
             active = await repo.get_active_run_for_thread(session, thread_id)
@@ -441,14 +509,14 @@ class A2AAdapter:
                 await repo.reopen_run(session, run_id, run_input, metadata=metadata)
             else:
                 created = await repo.create_run(
-                    session, thread_id, agent_id, "a2a", run_input, metadata=metadata
+                    session, thread_id, agent, "a2a", run_input, metadata=metadata
                 )
                 run_id = created["run_id"]
                 starting_seq = 0
 
             messages = await repo.append_thread_messages(session, thread_id, run_id, messages)
 
-            if not repo.is_agent_online(agent.last_seen_at, souk.settings.online_window_seconds):
+            if not repo.is_agent_online(record.last_seen_at, souk.settings.online_window_seconds):
                 await souk.mark_run_status(
                     session, run_id, "failed", metadata={"failureReason": "agent_offline"}
                 )
@@ -472,7 +540,7 @@ class A2AAdapter:
 
             await session.commit()
 
-        souk.enqueue_run(run_id, agent_id, thread_id, agui_input, "a2a", seq=starting_seq)
+        souk.enqueue_run(run_id, agent, thread_id, agui_input, "a2a", seq=starting_seq)
         return run_id, thread_id, True
 
 

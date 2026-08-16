@@ -44,7 +44,7 @@ async def _register(souk, name: str = "local"):
     registration = await souk.register_agents(
         public_key, signature, timestamp, [{"name": name}]
     )
-    return registration, public_key, registration.agent_ids[name]
+    return registration, public_key, registration.agents[name]
 
 
 async def test_registration_must_prove_it_holds_the_key(souk):
@@ -85,10 +85,10 @@ async def test_an_attached_provider_is_actually_online_and_reachable(souk):
     offline and fast-failed calls to a provider that was right there."""
     _registration, public_key, agent_id = await _register(souk)
 
-    await souk.attach_provider(public_key, LocalProvider(), [agent_id])
+    await souk.attach_provider(public_key, LocalProvider(), [agent_id.name])
 
     roster = await souk.list_agents()
-    assert [a.agent_id for a in roster] == [agent_id]
+    assert [a.name for a in roster] == [agent_id.name]
     assert roster[0].online is True
 
     handle = await souk.start_run(agent_id, {"messages": []})
@@ -100,7 +100,7 @@ async def test_detaching_marks_it_offline_immediately(souk):
     stops polling and has to be inferred — so it shouldn't have to age out
     of the online window first."""
     _registration, public_key, agent_id = await _register(souk)
-    await souk.attach_provider(public_key, LocalProvider(), [agent_id])
+    await souk.attach_provider(public_key, LocalProvider(), [agent_id.name])
     assert (await souk.list_agents())[0].online is True
 
     await souk.detach_provider(public_key)
@@ -108,7 +108,7 @@ async def test_detaching_marks_it_offline_immediately(souk):
     roster = await souk.list_agents()
     assert roster[0].online is False
     # Still listed, just not available — de-listing is a different act.
-    assert roster[0].agent_id == agent_id
+    assert roster[0].name == agent_id.name
 
 
 async def test_registration_issues_a_session_token(souk):

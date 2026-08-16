@@ -42,7 +42,7 @@ async def _register(souk, *names: str):
     return registration, public_key
 
 
-async def _enqueue(souk, agent_id, run_input=None):
+async def _enqueue(souk, agent, run_input=None):
     """A run that exists in the database, not only in the broker.
 
     These tests used to dispatch fabricated ids (`souk.enqueue_run("run_1",
@@ -54,21 +54,21 @@ async def _enqueue(souk, agent_id, run_input=None):
     """
     run_input = run_input if run_input is not None else {}
     async with souk.session() as session:
-        thread_id = await repo.ensure_thread(session, agent_id, None)
-        created = await repo.create_run(session, thread_id, agent_id, "ag-ui", run_input)
+        thread_id = await repo.ensure_thread(session, agent, None)
+        created = await repo.create_run(session, thread_id, agent, "ag-ui", run_input)
         await session.commit()
-    souk.enqueue_run(created["run_id"], agent_id, thread_id, run_input, "ag-ui")
+    souk.enqueue_run(created["run_id"], agent, thread_id, run_input, "ag-ui")
     return created["run_id"], thread_id
 
 
 async def test_claiming_returns_queued_runs_with_their_input(souk):
     registration, public_key = await _register(souk, "a")
-    agent_id = registration.agent_ids["a"]
-    run_id, thread_id = await _enqueue(souk, agent_id, {"messages": [{"role": "user"}]})
+    agent = registration.agents["a"]
+    run_id, thread_id = await _enqueue(souk, agent, {"messages": [{"role": "user"}]})
 
-    runs = await souk.claim_work(registration.session_token, [agent_id])
+    runs = await souk.claim_work(registration.session_token, [agent.name])
 
-    assert [(r.run_id, r.agent_id, r.thread_id) for r in runs] == [(run_id, agent_id, thread_id)]
+    assert [(r.run_id, r.agent, r.thread_id) for r in runs] == [(run_id, agent, thread_id)]
     # With the input, not just a pointer to it — a worker leaves this call
     # able to start, rather than waiting to be told what to run.
     assert runs[0].run_input == {"messages": [{"role": "user"}]}
@@ -79,11 +79,11 @@ async def test_a_claimed_run_is_recorded_as_taken(souk):
     so it asks and waits rather than recording an outcome itself (see
     handlers._handle_cancel's two cases)."""
     registration, public_key = await _register(souk, "a")
-    agent_id = registration.agent_ids["a"]
-    run_id, _thread_id = await _enqueue(souk, agent_id)
+    agent = registration.agents["a"]
+    run_id, _thread_id = await _enqueue(souk, agent)
     assert souk.broker.get(run_id).claimed_by is None
 
-    await souk.claim_work(registration.session_token, [agent_id])
+    await souk.claim_work(registration.session_token, [agent.name])
 
     assert souk.broker.get(run_id).claimed_by == public_key
 
@@ -92,11 +92,11 @@ async def test_souk_asks_the_worker_that_claimed_the_run_to_stop(souk):
     """Cancellation reaches a worker through what it supplied when it
     claimed — souk holds no provider object to call into."""
     registration, public_key = await _register(souk, "a")
-    agent_id = registration.agent_ids["a"]
-    run_id, _thread_id = await _enqueue(souk, agent_id)
+    agent = registration.agents["a"]
+    run_id, _thread_id = await _enqueue(souk, agent)
     asked: list[str] = []
 
-    await souk.claim_work(registration.session_token, [agent_id], on_cancel=asked.append)
+    await souk.claim_work(registration.session_token, [agent.name], on_cancel=asked.append)
     souk.cancel_run(run_id)
 
     async with asyncio.timeout(1):
@@ -113,14 +113,14 @@ async def test_a_token_cannot_claim_another_providers_agents(souk):
     must not reach the other's work."""
     mine, _mine_key = await _register(souk, "mine")
     theirs, _theirs_key = await _register(souk, "theirs")
-    their_agent = theirs.agent_ids["theirs"]
+    their_agent = theirs.agents["theirs"]
     their_run, _thread_id = await _enqueue(souk, their_agent)
 
-    runs = await souk.claim_work(mine.session_token, [their_agent])
+    runs = await souk.claim_work(mine.session_token, [their_agent.name])
 
     assert runs == []
     # And it is still there for its rightful owner.
-    assert [r.run_id for r in await souk.claim_work(theirs.session_token, [their_agent])] == [
+    assert [r.run_id for r in await souk.claim_work(theirs.session_token, [their_agent.name])] == [
         their_run
     ]
 
@@ -134,41 +134,41 @@ async def test_claiming_marks_the_agent_as_seen(souk):
     """How a remote provider stays online at all — the mirror of the
     heartbeat that keeps an attached one visible."""
     registration, public_key = await _register(souk, "a")
-    agent_id = registration.agent_ids["a"]
+    agent = registration.agents["a"]
 
-    await souk.claim_work(registration.session_token, [agent_id])
+    await souk.claim_work(registration.session_token, [agent.name])
 
     assert (await souk.list_agents())[0].online is True
 
 
 async def test_max_claim_limits_and_zero_claims_nothing(souk):
     registration, public_key = await _register(souk, "a")
-    agent_id = registration.agent_ids["a"]
+    agent = registration.agents["a"]
     for _ in range(3):
-        await _enqueue(souk, agent_id)
+        await _enqueue(souk, agent)
 
     # 0 is explicitly "no capacity", not "unlimited" — and must not be
     # confused with None, which is what unlimited means.
-    assert await souk.claim_work(registration.session_token, [agent_id], max_claim=0) == []
+    assert await souk.claim_work(registration.session_token, [agent.name], max_claim=0) == []
 
-    claimed = await souk.claim_work(registration.session_token, [agent_id], max_claim=2)
+    claimed = await souk.claim_work(registration.session_token, [agent.name], max_claim=2)
     assert len(claimed) == 2
-    assert len(await souk.claim_work(registration.session_token, [agent_id])) == 1
+    assert len(await souk.claim_work(registration.session_token, [agent.name])) == 1
 
 
 async def test_long_polling_returns_as_soon_as_work_arrives(souk):
     registration, public_key = await _register(souk, "a")
-    agent_id = registration.agent_ids["a"]
+    agent = registration.agents["a"]
 
     late: dict[str, str] = {}
 
     async def enqueue_soon():
         await asyncio.sleep(0.05)
-        late["run_id"], _ = await _enqueue(souk, agent_id)
+        late["run_id"], _ = await _enqueue(souk, agent)
 
     task = asyncio.create_task(enqueue_soon())
     started = time.monotonic()
-    runs = await souk.claim_work(registration.session_token, [agent_id], wait_seconds=5)
+    runs = await souk.claim_work(registration.session_token, [agent.name], wait_seconds=5)
     elapsed = time.monotonic() - started
     await task
 
@@ -180,7 +180,7 @@ async def test_long_polling_gives_up_when_nothing_arrives(souk):
     registration, public_key = await _register(souk, "a")
 
     runs = await souk.claim_work(
-        registration.session_token, [registration.agent_ids["a"]], wait_seconds=0.1
+        registration.session_token, [registration.agents["a"]], wait_seconds=0.1
     )
 
     assert runs == []
