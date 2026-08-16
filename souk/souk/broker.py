@@ -77,6 +77,8 @@ from collections.abc import Awaitable, Callable, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from souk.models import AgentRef
+
 logger = logging.getLogger("souk.broker")
 
 # Sentinel put on a run's out_queue to signal the stream has ended.
@@ -151,12 +153,12 @@ class Run:
     a run happens by pushing a Command onto `in_queue` and letting this
     run's own pipeline task (see `_pipeline` below) apply it; nothing
     else should ever assign to these fields directly, including this
-    module's own RunBroker (it only ever reads run_id/agent_id to route,
+    module's own RunBroker (it only ever reads run_id/agent to route,
     never mutates) — except `cancelled`, see its own docstring just below.
     """
 
     run_id: str
-    agent_id: str
+    agent: AgentRef
     thread_id: str
     input_json: dict[str, Any]
     protocol: str  # "ag-ui" | "a2a"
@@ -234,7 +236,7 @@ class RunSnapshot:
     """
 
     run_id: str
-    agent_id: str
+    agent: AgentRef
     thread_id: str
     protocol: str
     claimed_by: str | None
@@ -248,7 +250,7 @@ class RunSnapshot:
 def _snapshot(run: Run) -> RunSnapshot:
     return RunSnapshot(
         run_id=run.run_id,
-        agent_id=run.agent_id,
+        agent=run.agent,
         thread_id=run.thread_id,
         protocol=run.protocol,
         claimed_by=run.claimed_by,
@@ -339,6 +341,20 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
             break
         if isinstance(cmd, RequestCancel) and run.claimed_by is None:
             break
+    # Closing the stream belongs here rather than to the handlers, and the
+    # reason is the `except` just above: a handler that raises is logged and
+    # the pipeline carries on, so a handler that ended a run by putting
+    # END_OF_STREAM itself would skip it exactly when it failed — leaving
+    # every consumer of that run waiting forever on a run nothing will ever
+    # produce for again.
+    #
+    # Not hypothetical. `run_events.run_id` became a real foreign key when
+    # runs got their own table, and the probe that wipes souk's tables mid-run
+    # went from silently writing orphan rows to hanging: _handle_finish raised
+    # on the failed insert, before its own put. The three terminating cases
+    # are already exactly the three this loop breaks on, so there is one place
+    # to put it and it is here.
+    run.out_queue.put_nowait(END_OF_STREAM)
     owner.forget(run.run_id)
 
 
@@ -350,21 +366,24 @@ class RunBroker:
         # usable on its own, which its tests rely on.
         self._spawn = spawn or self._spawn_unsupervised
         self._runs: dict[str, Run] = {}
-        self._pending_by_agent: dict[str, deque[str]] = defaultdict(deque)
+        # Keyed by the agent itself, which is possible because an agent *is*
+        # `(provider_key, name)` and AgentRef is frozen (see souk/models.py).
+        # It used to be keyed by a souk-minted id standing in for that pair.
+        self._pending_by_agent: dict[AgentRef, deque[str]] = defaultdict(deque)
         # Lets a long-polling claim block until a run actually
-        # shows up for one of its agent_ids instead of sleeping through a
+        # shows up for one of its agents instead of sleeping through a
         # fixed poll interval — see core.claim_work. A plain asyncio.Event
         # rather than anything shaped like a wire frame, so this stays
         # a swap-in seam for a distributed backend (e.g. Postgres
         # LISTEN/NOTIFY) if souk is ever split across multiple processes;
         # nothing above this depends on wakes being in-process.
-        self._wake_subscribers: dict[str, set[asyncio.Event]] = defaultdict(set)
+        self._wake_subscribers: dict[AgentRef, set[asyncio.Event]] = defaultdict(set)
         self._pipeline_tasks: set[asyncio.Task] = set()
 
     def enqueue_run(
         self,
         run_id: str,
-        agent_id: str,
+        agent: AgentRef,
         thread_id: str,
         input_json: dict[str, Any],
         protocol: str,
@@ -389,7 +408,7 @@ class RunBroker:
         """
         run = Run(
             run_id=run_id,
-            agent_id=agent_id,
+            agent=agent,
             thread_id=thread_id,
             input_json=input_json,
             protocol=protocol,
@@ -397,8 +416,8 @@ class RunBroker:
             round_starting_seq=seq,
         )
         self._runs[run_id] = run
-        self._pending_by_agent[agent_id].append(run_id)
-        for event in self._wake_subscribers.get(agent_id, ()):
+        self._pending_by_agent[agent].append(run_id)
+        for event in self._wake_subscribers.get(agent, ()):
             event.set()
         if handlers is not None:
             self._spawn(_pipeline(run, handlers, self), name=f"pipeline:{run_id}")
@@ -417,25 +436,25 @@ class RunBroker:
         task.add_done_callback(self._pipeline_tasks.discard)
         return task
 
-    def subscribe_wake(self, agent_ids: list[str]) -> asyncio.Event:
+    def subscribe_wake(self, agents: list[AgentRef]) -> asyncio.Event:
         event = asyncio.Event()
-        for agent_id in agent_ids:
-            self._wake_subscribers[agent_id].add(event)
+        for agent in agents:
+            self._wake_subscribers[agent].add(event)
         return event
 
-    def unsubscribe_wake(self, agent_ids: list[str], event: asyncio.Event) -> None:
-        for agent_id in agent_ids:
-            self._wake_subscribers[agent_id].discard(event)
+    def unsubscribe_wake(self, agents: list[AgentRef], event: asyncio.Event) -> None:
+        for agent in agents:
+            self._wake_subscribers[agent].discard(event)
 
     def claim(
         self,
-        agent_ids: list[str],
+        agents: list[AgentRef],
         *,
         claimed_by: str,
         cancel_notify: Callable[[str], None] | None = None,
         max_claim: int | None = None,
     ) -> list[Run]:
-        """Hands up to `max_claim` runs across `agent_ids` to one worker,
+        """Hands up to `max_claim` runs across `agents` to one worker,
         round-robining between agents so a cap doesn't starve later ids in
         the list.
 
@@ -461,7 +480,7 @@ class RunBroker:
             return []
 
         found: list[Run] = []
-        queues = [self._pending_by_agent.get(agent_id) for agent_id in agent_ids]
+        queues = [self._pending_by_agent.get(agent) for agent in agents]
         while any(queues):
             if max_claim is not None and len(found) >= max_claim:
                 break

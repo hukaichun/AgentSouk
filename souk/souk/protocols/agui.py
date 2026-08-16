@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from ag_ui.core import RunAgentInput
 
 from souk import repo
+from souk.models import AgentRef
 from souk.agui import build_run_agent_input, rewrite_message_ids
 from souk.errors import AgentNotFound, InvalidRunInput
 from souk.identity import verify_actor_chain
@@ -67,7 +68,7 @@ class AGUIAdapter:
         self._souk = souk
 
     async def resolve_agent_id(self, name: str) -> str:
-        """A display name to an agent_id. Raises AgentNotFound for none and
+        """A display name to an agent. Raises AgentNotFound for none and
         AmbiguousAgentName for several — a name is not exclusive across
         identities, so both are ordinary outcomes."""
         from souk.errors import AmbiguousAgentName
@@ -77,10 +78,10 @@ class AGUIAdapter:
             raise AgentNotFound(f"agent '{name}' is not registered")
         if len(candidates) > 1:
             raise AmbiguousAgentName(name, candidates)
-        return candidates[0]["agent_id"]
+        return candidates[0]["agent"]
 
-    async def run(self, agent_id: str, body: RunAgentInput) -> EventStream | ThreadSnapshot:
-        """Start a run for `agent_id` from a real `ag_ui.core.RunAgentInput`.
+    async def run(self, agent: AgentRef, body: RunAgentInput) -> EventStream | ThreadSnapshot:
+        """Start a run for `agent` from a real `ag_ui.core.RunAgentInput`.
 
         `body.run_id`, whatever the caller sent, is never used — souk always
         mints its own; the field is only present because AG-UI's schema
@@ -88,9 +89,9 @@ class AGUIAdapter:
         """
         souk = self._souk
         async with souk.session() as session:
-            agent = await repo.get_agent_by_id(session, agent_id)
+            agent = await repo.get_agent_by_id(session, agent)
             if agent is None:
-                raise AgentNotFound(f"agent '{agent_id}' is not registered")
+                raise AgentNotFound(f"agent '{agent}' is not registered")
 
             # Not a declared field on ag_ui.core.RunAgentInput (extra="allow"
             # — see that model), so it's absent rather than defaulted when
@@ -110,7 +111,7 @@ class AGUIAdapter:
             # 404ing — see souk-no-forced-protocol-deviation: a standard
             # AG-UI client that has never heard of `POST /threads` must work.
             thread_id = await repo.ensure_thread(
-                session, agent_id, body.thread_id, metadata=metadata, create_if_missing=True
+                session, agent, body.thread_id, metadata=metadata, create_if_missing=True
             )
 
             # A thread only ever has one active run at a time — a second
@@ -133,7 +134,7 @@ class AGUIAdapter:
                 await repo.reopen_run(session, run_id, input_dump, metadata=metadata)
             else:
                 created = await repo.create_run(
-                    session, thread_id, agent_id, "ag-ui", input_dump, metadata=metadata
+                    session, thread_id, agent, "ag-ui", input_dump, metadata=metadata
                 )
                 run_id = created["run_id"]
                 starting_seq = 0
@@ -168,7 +169,7 @@ class AGUIAdapter:
                     forwarded_props=build_forwarded_props(
                         souk.settings.token_signing_secret,
                         run_id,
-                        agent_id,
+                        agent,
                         metadata,
                         body.forwarded_props,
                         verified_subject,
@@ -182,7 +183,7 @@ class AGUIAdapter:
 
             await session.commit()
 
-        souk.enqueue_run(run_id, agent_id, thread_id, input_json, "ag-ui", seq=starting_seq)
+        souk.enqueue_run(run_id, agent, thread_id, input_json, "ag-ui", seq=starting_seq)
         # Subscribed here, not inside _relay: an async generator's body does
         # not run until it is first iterated, and a run that finishes before
         # the caller starts reading would have nothing left to subscribe to.
@@ -243,7 +244,7 @@ async def _verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict]
 def build_forwarded_props(
     signing_secret: str,
     run_id: str,
-    agent_id: str,
+    agent: AgentRef,
     metadata: dict,
     caller_forwarded_props: Any,
     verified_subject: Any = None,
@@ -268,7 +269,7 @@ def build_forwarded_props(
     session_id = metadata.get("kyok", {}).get("sessionId") if isinstance(metadata.get("kyok"), dict) else None
     extra: dict[str, Any] = {}
     if session_id:
-        extra["kyok"] = {"token": issue_kyok_token(run_id, session_id, agent_id, signing_secret)}
+        extra["kyok"] = {"token": issue_kyok_token(run_id, session_id, agent, signing_secret)}
     if verified_subject is not None:
         # The raw chain travels too, not just the resolved summary: a
         # provider that wants to delegate further needs the actual prior JWTs

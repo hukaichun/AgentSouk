@@ -46,9 +46,13 @@ class Callee:
         yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
-async def _register(souk, name: str) -> tuple[str, str]:
-    """Returns (agent_id, provider public key) — attaching needs the key,
-    since that is what a provider is."""
+async def _register(souk, name: str) -> AgentRef:
+    """The agent that was registered.
+
+    One value, not two: an `AgentRef` is `(provider_key, name)`, so the key
+    attaching needs is already in it. This used to hand back the pair
+    `(agent_id, public_key)` because the id said nothing about whose it was.
+    """
     key = Ed25519PrivateKey.generate()
     public_key = key.public_key().public_bytes_raw().hex()
     timestamp = int(time.time())
@@ -58,7 +62,7 @@ async def _register(souk, name: str) -> tuple[str, str]:
         timestamp,
         [{"name": name}],
     )
-    return registration.agent_ids[name], public_key
+    return registration.agents[name]
 
 
 def _message(text: str) -> dict:
@@ -70,11 +74,10 @@ def _message(text: str) -> dict:
 
 
 async def test_delegate_without_building_a_json_rpc_envelope(souk):
-    callee_id, callee_key = await _register(souk, "callee")
-    callee = Callee()
-    await souk.attach_provider(callee_key, callee, [callee_id])
+    callee = await _register(souk, "callee")
+    await souk.attach_provider(callee.provider_key, Callee(), [callee.name])
 
-    task = await A2AAdapter(souk).send_task(callee_id, _message("do the thing"))
+    task = await A2AAdapter(souk).send_task(callee, _message("do the thing"))
 
     assert task["status"]["state"] == "TASK_STATE_COMPLETED"
     assert task["id"].startswith("run_")
@@ -83,48 +86,48 @@ async def test_delegate_without_building_a_json_rpc_envelope(souk):
 async def test_identity_is_carried_through_an_in_process_hop(souk):
     """The reason extend_actor_chain belongs in core: an agent inside souk
     has to be able to relay who it is acting for, or provenance stops here."""
-    callee_id, callee_key = await _register(souk, "callee")
-    callee = Callee()
-    await souk.attach_provider(callee_key, callee, [callee_id])
+    callee = await _register(souk, "callee")
+    provider = Callee()
+    await souk.attach_provider(callee.provider_key, provider, [callee.name])
 
     agency, relaying_agent = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
     chain = extend_actor_chain(relaying_agent, new_actor_chain(agency, USER))
 
-    await A2AAdapter(souk).send_task(callee_id, _message("hi"), actor_chain=chain)
+    await A2AAdapter(souk).send_task(callee, _message("hi"), actor_chain=chain)
 
     # The callee sees who it is ultimately for, and every actor in between.
-    assert callee.seen_caller["subject"] == USER
-    assert [a["publicKey"] for a in callee.seen_caller["actors"]] == [
+    assert provider.seen_caller["subject"] == USER
+    assert [a["publicKey"] for a in provider.seen_caller["actors"]] == [
         agency.public_key().public_bytes_raw().hex(),
         relaying_agent.public_key().public_bytes_raw().hex(),
     ]
     # The raw chain travels too, so the callee can extend it further.
-    assert callee.seen_caller["chain"] == chain
+    assert provider.seen_caller["chain"] == chain
 
 
 async def test_a_tampered_chain_is_rejected_on_this_path_too(souk):
     """Entering at the semantic rung is a shortcut past the envelope, not
     past verification."""
-    callee_id, callee_key = await _register(souk, "callee")
-    await souk.attach_provider(callee_key, Callee(), [callee_id])
+    callee = await _register(souk, "callee")
+    await souk.attach_provider(callee.provider_key, Callee(), [callee.name])
 
     chain = new_actor_chain(Ed25519PrivateKey.generate(), USER)
     tampered = [chain[0][:-4] + "AAAA"]
 
     with pytest.raises(InvalidActorChain):
-        await A2AAdapter(souk).send_task(callee_id, _message("hi"), actor_chain=tampered)
+        await A2AAdapter(souk).send_task(callee, _message("hi"), actor_chain=tampered)
 
 
 async def test_lineage_links_the_callee_thread_back_to_the_caller(souk):
-    caller_id, _caller_key = await _register(souk, "caller")
-    callee_id, callee_key = await _register(souk, "callee")
-    await souk.attach_provider(callee_key, Callee(), [callee_id])
+    caller = await _register(souk, "caller")
+    callee = await _register(souk, "callee")
+    await souk.attach_provider(callee.provider_key, Callee(), [callee.name])
 
-    caller_thread = await souk.create_thread(caller_id)
-    caller_run = await souk.start_run(caller_id, {"messages": []}, thread_id=caller_thread)
+    caller_thread = await souk.create_thread(caller)
+    caller_run = await souk.start_run(caller, {"messages": []}, thread_id=caller_thread)
 
     await A2AAdapter(souk).send_task(
-        callee_id, _message("hi"), reference_task_ids=[caller_run.run_id]
+        callee, _message("hi"), reference_task_ids=[caller_run.run_id]
     )
 
     tree = await souk.get_thread_tree(caller_thread)
@@ -132,13 +135,13 @@ async def test_lineage_links_the_callee_thread_back_to_the_caller(souk):
 
 
 async def test_context_id_continues_the_same_conversation(souk):
-    callee_id, callee_key = await _register(souk, "callee")
-    await souk.attach_provider(callee_key, Callee(), [callee_id])
+    callee = await _register(souk, "callee")
+    await souk.attach_provider(callee.provider_key, Callee(), [callee.name])
     adapter = A2AAdapter(souk)
 
-    first = await adapter.send_task(callee_id, _message("one"))
+    first = await adapter.send_task(callee, _message("one"))
     second = await adapter.send_task(
-        callee_id, _message("two"), context_id=first["contextId"]
+        callee, _message("two"), context_id=first["contextId"]
     )
 
     assert second["contextId"] == first["contextId"]
@@ -149,13 +152,13 @@ async def test_the_wire_rung_and_the_semantic_rung_agree(souk):
     """handle_rpc is a wrapper, not a second implementation — if these ever
     diverge, a remote caller and an in-process one are getting different
     behaviour from the same protocol."""
-    callee_id, callee_key = await _register(souk, "callee")
-    await souk.attach_provider(callee_key, Callee(), [callee_id])
+    callee = await _register(souk, "callee")
+    await souk.attach_provider(callee.provider_key, Callee(), [callee.name])
     adapter = A2AAdapter(souk)
 
-    direct = await adapter.send_task(callee_id, _message("hi"))
+    direct = await adapter.send_task(callee, _message("hi"))
     envelope = await adapter.handle_rpc(
-        callee_id,
+        callee,
         {"jsonrpc": "2.0", "id": "1", "method": "SendMessage", "params": {"message": _message("hi")}},
     )
 
@@ -167,26 +170,26 @@ async def test_the_wire_rung_and_the_semantic_rung_agree(souk):
 
 
 async def test_get_and_cancel_are_callable_without_an_envelope(souk):
-    callee_id, callee_key = await _register(souk, "callee")
-    await souk.attach_provider(callee_key, Callee(), [callee_id])
+    callee = await _register(souk, "callee")
+    await souk.attach_provider(callee.provider_key, Callee(), [callee.name])
     adapter = A2AAdapter(souk)
 
-    task = await adapter.send_task(callee_id, _message("hi"))
-    assert (await adapter.get_task(callee_id, task["id"]))["id"] == task["id"]
+    task = await adapter.send_task(callee, _message("hi"))
+    assert (await adapter.get_task(callee, task["id"]))["id"] == task["id"]
 
     # Already finished, so cancelling changes nothing — and says so honestly.
-    cancelled = await adapter.cancel_task(callee_id, task["id"])
+    cancelled = await adapter.cancel_task(callee, task["id"])
     assert cancelled["status"]["state"] == "TASK_STATE_COMPLETED"
 
     with pytest.raises(RunNotFound):
-        await adapter.get_task(callee_id, "run_does_not_exist")
+        await adapter.get_task(callee, "run_does_not_exist")
 
 
 async def test_an_unknown_task_is_an_error_not_an_exception_over_the_wire(souk):
     """The wire rung turns it into a JSON-RPC error, since a caller asking
     about an unknown task is an ordinary answer rather than a failed call."""
-    callee_id, callee_key = await _register(souk, "callee")
+    callee = await _register(souk, "callee")
     response = await A2AAdapter(souk).handle_rpc(
-        callee_id, {"jsonrpc": "2.0", "id": "9", "method": "tasks/get", "params": {"id": "run_nope"}}
+        callee, {"jsonrpc": "2.0", "id": "9", "method": "tasks/get", "params": {"id": "run_nope"}}
     )
     assert response["error"]["message"] == "task not found"

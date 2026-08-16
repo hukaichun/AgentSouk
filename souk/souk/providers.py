@@ -9,9 +9,9 @@ the same thing for a provider that happens to live in souk's own process.
 An **agent** is still exactly what AG-UI says it is: a run input in, a stream
 of events out. The only thing added is which agent a run is for:
 
-    async def run_stream(self, agent_id: str, run_input: dict) -> AsyncIterator[AgentEvent]
+    async def run_stream(self, agent_name: str, run_input: dict) -> AsyncIterator[AgentEvent]
 
-`agent_id` is on the method, not smuggled into the input, because AG-UI's
+`agent_name` is on the method, not smuggled into the input, because AG-UI's
 RunAgentInput carries thread and run ids and no agent identity, and souk does
 not widen someone else's schema. Without it a provider serving a translator
 and a summarizer cannot tell which of them a run is for — which made
@@ -61,7 +61,7 @@ class Provider(Protocol):
     produce — is a couple of lines:
 
         class Local:
-            async def run_stream(self, agent_id, run_input):
+            async def run_stream(self, agent_name, run_input):
                 async for event in my_agent.run_stream(run_input):
                     yield event
 
@@ -77,4 +77,4 @@ class Provider(Protocol):
     observed. See docs/library-architecture.md on cancellation.
     """
 
-    def run_stream(self, agent_id: str, run_input: dict) -> AsyncIterator[AgentEvent]: ...
+    def run_stream(self, agent_name: str, run_input: dict) -> AsyncIterator[AgentEvent]: ...

@@ -38,14 +38,14 @@ async def test_a_provider_that_raises_reaches_the_caller_as_run_error(brisk):
     emitting anything, so the stream's only content is souk's own account of
     what happened."""
     registration, public_key = await _register(brisk, "explodes")
-    agent_id = registration.agent_ids["explodes"]
+    agent_id = registration.agents["explodes"]
 
     class Exploding:
         async def run_stream(self, agent_id: str, run_input: dict):
             raise KeyError("token")
             yield  # pragma: no cover — makes this an async generator
 
-    await brisk.attach_provider(public_key, Exploding(), [agent_id])
+    await brisk.attach_provider(public_key, Exploding(), [agent_id.name])
     handle = await brisk.start_run(agent_id, {"messages": []})
 
     events = [e async for e in handle.events()]
@@ -68,14 +68,14 @@ async def test_a_provider_that_reports_its_own_failure_is_not_corrected(brisk):
     itself has already told the caller — and its own message is the useful
     one, so a second, vaguer event on top of it would be noise."""
     registration, public_key = await _register(brisk, "polite")
-    agent_id = registration.agent_ids["polite"]
+    agent_id = registration.agents["polite"]
 
     class ReportsItsOwn:
         async def run_stream(self, agent_id: str, run_input: dict):
             yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
             yield {"type": "RUN_ERROR", "message": "upstream model refused the request"}
 
-    await brisk.attach_provider(public_key, ReportsItsOwn(), [agent_id])
+    await brisk.attach_provider(public_key, ReportsItsOwn(), [agent_id.name])
     handle = await brisk.start_run(agent_id, {"messages": []})
 
     events = [e async for e in handle.events()]
@@ -93,7 +93,7 @@ async def test_a_cancelled_run_gets_no_run_error(brisk):
     the stream simply ends. Inventing a RUN_ERROR here would tell the one
     party who already knows that their own request was a fault."""
     registration, public_key = await _register(brisk, "stoppable")
-    agent_id = registration.agent_ids["stoppable"]
+    agent_id = registration.agents["stoppable"]
     started = asyncio.Event()
 
     class WaitsForever:
@@ -102,7 +102,7 @@ async def test_a_cancelled_run_gets_no_run_error(brisk):
             started.set()
             await asyncio.Event().wait()
 
-    await brisk.attach_provider(public_key, WaitsForever(), [agent_id])
+    await brisk.attach_provider(public_key, WaitsForever(), [agent_id.name])
     handle = await brisk.start_run(agent_id, {"messages": []})
 
     stream = handle.events()

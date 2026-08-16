@@ -10,25 +10,32 @@ A2A-call concern, not a repo-level one).
 from __future__ import annotations
 
 from souk import repo
+from souk.models import AgentRef
 
 
-async def test_register_agents_assigns_a_database_generated_agent_id(session, new_identity):
+async def test_registering_mints_no_id_at_all(session, new_identity):
+    """The exception in this file, and the point of it.
+
+    Every other entity here gets an id souk mints (`thread_`, `run_`, `msg_`)
+    because it has no natural one. An agent does: it is the provider's key
+    plus the name that provider chose, both known to the caller before it
+    asked. souk used to mint an `agent_` id anyway and hand it back, and this
+    test asserted that it did — see docs/retiring-agent-id.md for what that
+    cost.
+    """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    assert agent_ids["a"].startswith("agent_")
 
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
 
-async def test_register_agents_reuses_the_same_agent_id_on_re_registration(session, new_identity):
-    identity = new_identity()
-    first = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    second = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    assert first["a"] == second["a"]
+    assert registered["a"] == AgentRef(provider_key=identity.public_key, name="a")
+    # Nothing here that the caller did not already hold.
+    assert registered["a"].provider_key == identity.public_key
 
 
 async def test_create_thread_assigns_a_database_generated_thread_id(session, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    thread_id = await repo.create_thread(session, agent_ids["a"])
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    thread_id = await repo.create_thread(session, registered["a"])
     assert thread_id.startswith("thread_")
 
 
@@ -38,8 +45,8 @@ async def test_ensure_thread_mints_a_fresh_thread_when_neither_id_is_given(sessi
     call `POST /threads` first.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    thread_id = await repo.ensure_thread(session, agent_ids["a"], None)
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    thread_id = await repo.ensure_thread(session, registered["a"], None)
     assert thread_id.startswith("thread_")
 
 
@@ -49,9 +56,9 @@ async def test_ensure_thread_rejects_an_unknown_thread_id_by_default(session, ne
     continue something specific, unlike the no-id-at-all case above.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
     try:
-        await repo.ensure_thread(session, agent_ids["a"], "thread_made_up")
+        await repo.ensure_thread(session, registered["a"], "thread_made_up")
         assert False, "expected ThreadNotFound"
     except repo.ThreadNotFound:
         pass
@@ -63,9 +70,9 @@ async def test_ensure_thread_creates_under_an_unknown_id_when_told_to(session, n
     caller's own string is discarded, not reused as the primary key.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
     thread_id = await repo.ensure_thread(
-        session, agent_ids["a"], "thread_made_up", create_if_missing=True
+        session, registered["a"], "thread_made_up", create_if_missing=True
     )
     assert thread_id.startswith("thread_")
     assert thread_id != "thread_made_up"
@@ -73,13 +80,13 @@ async def test_ensure_thread_creates_under_an_unknown_id_when_told_to(session, n
 
 async def test_create_run_assigns_a_database_generated_run_id(session, new_identity):
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    thread_id = await repo.create_thread(session, agent_ids["a"])
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    thread_id = await repo.create_thread(session, registered["a"])
 
-    first = await repo.create_run(session, thread_id, agent_ids["a"], "ag-ui", {})
+    first = await repo.create_run(session, thread_id, registered["a"], "ag-ui", {})
     assert first["run_id"].startswith("run_")
 
-    second = await repo.create_run(session, thread_id, agent_ids["a"], "ag-ui", {})
+    second = await repo.create_run(session, thread_id, registered["a"], "ag-ui", {})
     # A different run than the first — ids aren't reused across calls.
     assert second["run_id"] != first["run_id"]
 
@@ -90,9 +97,9 @@ async def test_append_thread_messages_discards_any_caller_supplied_id(session, n
     reflects that, not whatever the caller sent.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    thread_id = await repo.create_thread(session, agent_ids["a"])
-    run = await repo.create_run(session, thread_id, agent_ids["a"], "ag-ui", {})
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    thread_id = await repo.create_thread(session, registered["a"])
+    run = await repo.create_run(session, thread_id, registered["a"], "ag-ui", {})
 
     stored = await repo.append_thread_messages(
         session,
@@ -117,9 +124,9 @@ async def test_append_thread_messages_never_deduplicates_by_content(session, new
     dedup.
     """
     identity = new_identity()
-    agent_ids = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
-    thread_id = await repo.create_thread(session, agent_ids["a"])
-    run = await repo.create_run(session, thread_id, agent_ids["a"], "ag-ui", {})
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    thread_id = await repo.create_thread(session, registered["a"])
+    run = await repo.create_run(session, thread_id, registered["a"], "ag-ui", {})
 
     same_content = [{"role": "user", "content": "hi"}]
     await repo.append_thread_messages(session, thread_id, run["run_id"], same_content)

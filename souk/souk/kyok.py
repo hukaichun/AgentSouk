@@ -12,9 +12,9 @@ since the payload shape (and what a forged one could be used for —
 routing a completion, not authenticating a worker call) is different enough
 to be worth keeping separate.
 
-Also carries `agent_id` — souk already knows, at the moment it mints this
+Also carries the agent — souk already knows, at the moment it mints this
 token (souk.api_agui._build_forwarded_props, called with the run's own
-agent_id), exactly which provider identity this run belongs to; the
+the pair), exactly which provider identity this run belongs to; the
 token says so explicitly rather than leaving that implicit. See
 protocols.kyok's KyokAdapter.complete for where this gets checked against
 souk.broker's live view of who's actually running run_id right now — a
@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from souk.ids import new_id
+from souk.models import AgentRef
 
 # Deliberately short: a KYOK token only needs to live from "souk minted
 # it into this run's forwardedProps" to "the provider's last completion
@@ -51,16 +52,17 @@ KYOK_TOKEN_TTL_SECONDS = 3600
 class KyokToken:
     run_id: str
     session_id: str
-    agent_id: str
+    agent: AgentRef
 
 
-def issue_kyok_token(run_id: str, session_id: str, agent_id: str, signing_secret: str) -> str:
+def issue_kyok_token(run_id: str, session_id: str, agent: AgentRef, signing_secret: str) -> str:
     body = base64.urlsafe_b64encode(
         json.dumps(
             {
                 "runId": run_id,
                 "sessionId": session_id,
-                "agentId": agent_id,
+                "providerKey": agent.provider_key,
+                "agentName": agent.name,
                 "exp": int(time.time()) + KYOK_TOKEN_TTL_SECONDS,
             }
         ).encode()
@@ -70,10 +72,10 @@ def issue_kyok_token(run_id: str, session_id: str, agent_id: str, signing_secret
 
 
 def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
-    """Returns the decoded (run_id, session_id, agent_id) if `token` is a
+    """Returns the decoded (run_id, session_id, agent) if `token` is a
     well-formed, correctly-signed, unexpired KYOK token, else None. Called
     on every /kyok/v1/chat/completions request — see api_llm_bridge.py,
-    which additionally checks the returned agent_id against souk.broker's
+    which additionally checks the returned agent against souk.broker's
     live record of who's running run_id right now; this function only
     checks the token is genuinely souk's own and hasn't expired.
     """
@@ -92,10 +94,17 @@ def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
         return None
     run_id = payload.get("runId")
     session_id = payload.get("sessionId")
-    agent_id = payload.get("agentId")
-    if not isinstance(run_id, str) or not isinstance(session_id, str) or not isinstance(agent_id, str):
+    provider_key = payload.get("providerKey")
+    agent_name = payload.get("agentName")
+    if not all(
+        isinstance(v, str) for v in (run_id, session_id, provider_key, agent_name)
+    ):
         return None
-    return KyokToken(run_id=run_id, session_id=session_id, agent_id=agent_id)
+    return KyokToken(
+        run_id=run_id,
+        session_id=session_id,
+        agent=AgentRef(provider_key=provider_key, name=agent_name),
+    )
 
 
 # Sentinel put on a completion's response_queue once its bridge finishes

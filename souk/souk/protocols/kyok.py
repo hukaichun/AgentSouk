@@ -90,7 +90,7 @@ class KyokAdapter:
            which caps a leaked token's usable window to the life of that run,
            rather than leaving the token's own hour-long TTL as the only thing
            between a finished run and someone spending the caller's budget,
-        3. the call is signed by the agent_id's registered key, over this
+        3. the call is signed by the agent's own key, over this
            exact token + timestamp + body, so a signature can't be replayed
            onto another request.
         """
@@ -99,7 +99,7 @@ class KyokAdapter:
             raise KyokRejected("invalid or expired KYOK token", status=401)
 
         run = self._souk.broker.get(token.run_id)
-        if run is None or run.cancel_requested or run.agent_id != token.agent_id:
+        if run is None or run.cancel_requested or run.agent != token.agent:
             raise KyokRejected("run is not currently active for this token", status=403)
 
         await self._verify_caller(token, bearer, body, timestamp, signature)
@@ -143,7 +143,7 @@ class KyokAdapter:
     ) -> None:
         """The half the token can't cover: souk_agent_sdk.KyokSigningAuth
         signs every call with the calling provider's registration identity, so
-        this looks up what key actually owns that agent_id — souk being the
+        the key is the token's own — souk being the
         one source of truth for that — and checks the signature really came
         from it. Reuses souk.identity's freshness window rather than a second
         constant; no reason KYOK's should ever diverge.
@@ -157,13 +157,19 @@ class KyokAdapter:
         if not fresh:
             raise KyokRejected("KYOK signature timestamp is stale", status=401)
 
+        # Still asked, because a de-listed agent must not keep spending a
+        # caller's key — but no longer asked in order to *learn* the key.
+        # The token carries it: an agent is `(provider_key, name)`, souk
+        # signed the token itself, and there used to be a whole lookup here
+        # (`repo.get_agent_public_key`) whose only job was turning an id back
+        # into the identity it always stood for.
         async with self._souk.session() as session:
-            public_key = await repo.get_agent_public_key(session, token.agent_id)
-        if public_key is None:
-            raise KyokRejected(f"agent '{token.agent_id}' is not registered", status=403)
+            registered = await repo.get_agent(session, token.agent)
+        if registered is None:
+            raise KyokRejected(f"agent '{token.agent}' is not registered", status=403)
 
         payload = f"{bearer}:{timestamp}:{hashlib.sha256(body).hexdigest()}".encode()
-        if not verify_signature(public_key, signature, payload):
+        if not verify_signature(token.agent.provider_key, signature, payload):
             raise KyokRejected("KYOK call-time signature verification failed", status=401)
 
     async def _drain(self, request_id: str, queue: asyncio.Queue) -> AsyncIterator[dict[str, Any]]:

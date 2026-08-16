@@ -40,6 +40,35 @@ jobs:
           SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
           SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
 
+      # The probes, which are the acceptance checks the design documents name
+      # — a green suite is not the bar (see docs/work-objectives.md's opening
+      # table for five things that were true while 210 tests passed). Each of
+      # these reproduces a specific failure and asserts the verdict changed,
+      # and each exits non-zero when it has not.
+      #
+      # Two of the five probes are deliberately *not* here.
+      # `probe_multiprocess.py` is the target for the horizontal-scaling work
+      # and currently fails 6/6 on purpose; `probe_broker_surface.py` reports
+      # what escapes the broker rather than judging it. Listing them would
+      # either break CI or quietly pass, and both would teach the wrong thing
+      # about what is covered.
+      - name: probes (schema agrees, on Postgres)
+        run: uv run python ../scripts/probes/probe_schema_agrees.py
+        working-directory: souk
+        env:
+          SOUK_DATABASE_URL: postgresql+psycopg://souk:souk@localhost:5432/souk
+          SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
+      # The rest stand up their own throwaway SQLite file, so they must not
+      # inherit the Postgres DSN above.
+      - name: probes (schema agrees, run row vanishes, registration survives — SQLite)
+        run: |
+          uv run python ../scripts/probes/probe_schema_agrees.py
+          uv run python ../scripts/probes/probe_run_row_vanishes.py
+          uv run python ../scripts/probes/probe_registration_survives_a_new_database.py
+        working-directory: souk
+        env:
+          SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
+
   # Everything else — the gateway, both SDKs, the reference providers and
   # the directory UI — lives in AgentSoukServer, which carries its own CI,
   # including the app-builds probe only it can run.

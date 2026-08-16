@@ -17,6 +17,7 @@ from __future__ import annotations
 from souk.repo import ProviderFingerprintTaken, ThreadNotFound, ThreadOwnershipMismatch
 
 __all__ = [
+    "AgentInUse",
     "AgentNotFound",
     "InvalidRegistration",
     "KyokRejected",
@@ -50,6 +51,30 @@ class AmbiguousAgentName(SoukError):
         super().__init__(f"agent name '{name}' matches {len(candidates)} agents")
         self.name = name
         self.candidates = candidates
+
+
+class AgentInUse(SoukError):
+    """Refused a deletion because something is still using the agent.
+
+    Deleting is for a registration that never became anything — a typo in a
+    name, a test, a batch pushed from the wrong config. Retiring a working
+    agent is a different act and needs no deletion at all: stop offering it,
+    and it goes offline and eventually off the roster with its record and
+    everything it did intact (see `Souk.register_agents`).
+
+    So an agent that has run even once can never be removed, only silenced.
+    That is the accepted consequence of the rule the foreign key already
+    states: a thread must name an agent, therefore an agent with threads
+    cannot go.
+
+    `reason` says which of the four checks refused, because "in use" is four
+    different situations to an operator: still checking in, still attached in
+    this process, mid-run, or has a conversation behind it.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class InvalidRegistration(SoukError):

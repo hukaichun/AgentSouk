@@ -17,22 +17,22 @@ from __future__ import annotations
 
 import pytest
 
-from souk.protocols.a2a import PROTOCOL_VERSION, A2AAdapter, A2AStream
+from souk.protocols.a2a import PROTOCOL_VERSION, A2AAdapter, A2AStream, ServedInterface
 
 from tests.test_in_process_delegation import Callee, _message, _register
 
 
-async def _rpc(souk, agent_id: str, method: str, params: dict):
+async def _rpc(souk, agent, method: str, params: dict):
     return await A2AAdapter(souk).handle_rpc(
-        agent_id, {"jsonrpc": "2.0", "id": "1", "method": method, "params": params}
+        agent, {"jsonrpc": "2.0", "id": "1", "method": method, "params": params}
     )
 
 
 @pytest.fixture
 async def callee(souk):
-    agent_id, key = await _register(souk, "callee")
-    await souk.attach_provider(key, Callee(), [agent_id])
-    return agent_id
+    agent = await _register(souk, "callee")
+    await souk.attach_provider(agent.provider_key, Callee(), [agent.name])
+    return agent
 
 
 @pytest.mark.parametrize("method", ["SendMessage", "message/send", "tasks/send"])
@@ -134,15 +134,39 @@ async def test_the_agent_card_says_which_spec_this_endpoint_speaks(souk, callee)
     """The card is where a client learns to call `SendMessage` instead of
     probing for a method and getting -32601 — the failure this whole file
     exists because of. v1.0 moved that statement into `supportedInterfaces`,
-    each entry carrying its own binding and version."""
-    card = await A2AAdapter(souk, "http://souk.example").agent_card(callee)
+    each entry carrying its own binding and version.
+
+    *Where* to call is supplied by whoever serves souk — here, this test
+    playing that part. souk translates it into A2A's own spelling; it does
+    not decide it.
+    """
+    served = ServedInterface(url="https://souk.example/a2a/ab12/callee/rpc", binding="JSONRPC")
+    card = await A2AAdapter(souk).agent_card(callee, interfaces=[served])
 
     assert PROTOCOL_VERSION == "1.0"
     assert card["supportedInterfaces"] == [
         {
-            "url": f"http://souk.example/a2a/id/{callee}/rpc",
+            "url": "https://souk.example/a2a/ab12/callee/rpc",
             "protocolBinding": "JSONRPC",
             "protocolVersion": "1.0",
         }
     ]
+    assert card["capabilities"]["streaming"] is True
+
+
+async def test_a_card_for_a_souk_nobody_serves_advertises_nowhere(souk, callee):
+    """No interfaces in, none out — and that is the honest answer, because
+    core does not know whether anything is serving it.
+
+    It used to answer this case by interpolating a path of its own
+    (`{base}/a2a/id/{agent_id}/rpc`), which meant core had decided the route
+    layout of every gateway that would ever serve it, and a caller embedding
+    souk with no HTTP at all still got a URL. Checked against the installed
+    a2a-sdk rather than assumed: a card with no `supportedInterfaces`
+    serialises cleanly, so leaving it empty is not a protocol deviation.
+    """
+    card = await A2AAdapter(souk).agent_card(callee)
+
+    assert "supportedInterfaces" not in card
+    # Everything souk does know is still there.
     assert card["capabilities"]["streaming"] is True

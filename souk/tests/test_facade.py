@@ -15,6 +15,7 @@ import pytest
 
 from souk import repo
 from souk.core import Souk
+from souk.models import AgentRef
 
 
 class EchoProvider:
@@ -42,8 +43,8 @@ class NeverFinishesProvider:
 
 async def _register(souk, name: str, identity) -> str:
     async with souk.session() as session:
-        agent_ids = await repo.register_agents(session, identity.public_key, [{"name": name}])
-    return agent_ids[name]
+        registered = await repo.register_agents(session, identity.public_key, [{"name": name}])
+    return registered[name]
 
 
 async def _register_with_token(souk, name: str, identity):
@@ -64,7 +65,7 @@ async def _until(predicate, timeout: float = 1.0) -> None:
 async def test_attach_start_and_read_back(souk, new_identity):
     identity = new_identity()
     agent_id = await _register(souk, "echo", identity)
-    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id.name])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "hi"}]})
 
@@ -99,14 +100,17 @@ async def test_roster_and_agent_lookup(souk, new_identity):
     assert roster[0].online is True
 
     assert (await souk.get_agent(agent_id)).name == "echo"
-    assert [a["agent_id"] for a in await souk.resolve_agents_by_name("echo")] == [agent_id]
-    assert await souk.get_agent("agent_nope") is None
+    assert [
+        AgentRef(provider_key=a["provider_key"], name=a["name"])
+        for a in await souk.resolve_agents_by_name("echo")
+    ] == [agent_id]
+    assert await souk.get_agent(AgentRef(provider_key=agent_id.provider_key, name="nope")) is None
 
 
 async def test_cancel_a_running_agent(souk, new_identity):
     identity = new_identity()
     agent_id = await _register(souk, "slow", identity)
-    await souk.attach_provider(identity.public_key, NeverFinishesProvider(), [agent_id])
+    await souk.attach_provider(identity.public_key, NeverFinishesProvider(), [agent_id.name])
 
     handle = await souk.start_run(agent_id, {"messages": []})
     # Read the agent's first event before cancelling, so a worker
@@ -139,11 +143,11 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
     """
     identity = new_identity()
     registration = await _register_with_token(souk, "stubborn", identity)
-    agent_id = registration.agent_ids["stubborn"]
+    agent_id = registration.agents["stubborn"]
     # This "worker" is the identity that claimed — its key, nothing else.
 
     handle = await souk.start_run(agent_id, {"messages": []})
-    claimed = await souk.claim_work(registration.session_token, [agent_id])
+    claimed = await souk.claim_work(registration.session_token, [agent_id.name])
     assert [c.run_id for c in claimed] == [handle.run_id]
 
     souk.cancel_run(handle.run_id)
@@ -199,14 +203,15 @@ async def test_thread_lineage(souk, new_identity):
 async def test_start_run_reuses_an_existing_thread(souk, new_identity):
     identity = new_identity()
     agent_id = await _register(souk, "echo", identity)
-    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id.name])
 
     thread_id = await souk.create_thread(agent_id)
     first = await souk.start_run(agent_id, {"messages": []}, thread_id=thread_id)
     assert first.thread_id == thread_id
     [_ async for _ in first.events()]
 
-    assert (await souk.get_thread(thread_id))["agent_id"] == agent_id
+    thread = await souk.get_thread(thread_id)
+    assert AgentRef(provider_key=thread["provider_key"], name=thread["agent_name"]) == agent_id
 
 
 async def test_resume_keeps_the_same_run_id(souk, new_identity):
@@ -215,7 +220,7 @@ async def test_resume_keeps_the_same_run_id(souk, new_identity):
     life instead of chasing a chain of new ids."""
     identity = new_identity()
     agent_id = await _register(souk, "echo", identity)
-    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id])
+    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id.name])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "one"}]})
     first_round = [e async for e in handle.events()]

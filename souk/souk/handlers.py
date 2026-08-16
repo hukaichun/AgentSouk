@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING
 from souk import repo
 from souk.agui_reduce import reduce_events_to_messages
 from souk.broker import (
-    END_OF_STREAM,
     Claim,
     Fail,
     FinishStream,
@@ -172,7 +171,9 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
     # question its *caller* asks, via the run's own status.
     if failure_event is not None:
         await run.out_queue.put(failure_event)
-    await run.out_queue.put(END_OF_STREAM)
+    # END_OF_STREAM is the pipeline's to send, not this handler's — see
+    # broker._pipeline, which sends it for all three terminating commands and
+    # therefore sends it even when one of these handlers raises.
 
 
 async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
@@ -208,7 +209,6 @@ async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
     if run.claimed_by is None:
         async with souk.session() as session:
             await souk.mark_run_status(session, run.run_id, "cancelled")
-        await run.out_queue.put(END_OF_STREAM)
         return
 
     async with souk.session() as session:
@@ -228,7 +228,6 @@ async def _handle_fail(souk: "Souk", run: Run, cmd: Fail) -> None:
         await repo.append_run_event(session, run.run_id, run.seq, event)
         await souk.mark_run_status(session, run.run_id, "failed", metadata={"failureReason": cmd.reason})
     await run.out_queue.put(event)
-    await run.out_queue.put(END_OF_STREAM)
 
 
 def make_handlers(souk: "Souk") -> HandlerMap:
