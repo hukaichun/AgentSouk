@@ -710,8 +710,13 @@ the code would not have distinguished those two.
 
 ## What this leaves open: horizontal scaling
 
-Not a goal now, but the layering should not foreclose it. Where souk's state
-lives today:
+Not a goal now, but the layering should not foreclose it. This section
+records why the door was left open and what two replicas actually do; the
+plan for walking through it is `docs/broker-horizontal-scaling.md`, which
+takes the three requirements below as its starting point and adds the
+measurements behind each decision.
+
+Where souk's state lives today:
 
 | Durable, already shared | Live, per-process |
 |---|---|
