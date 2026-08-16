@@ -38,7 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import CoreSettings
 from souk.core import Souk
-from souk.identity import registration_signing_payload
+from souk_provider_sdk import ProviderIdentity
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -101,43 +101,34 @@ async def session(souk: Souk) -> AsyncIterator[AsyncSession]:
         yield s
 
 
-class Identity:
-    """A throwaway Ed25519 keypair plus a helper to build a signed
-    registration — mirrors souk_agent_sdk.identity's
-    sign/public_key_hex/registration_signing_payload exactly (souk doesn't
-    depend on souk_agent_sdk, so this is reimplemented directly against
-    `cryptography` rather than pulled in as a cross-project test-only
-    dependency).
+class Identity(ProviderIdentity):
+    """A throwaway provider, signing the way a real one does.
+
+    This is `souk_provider_sdk.ProviderIdentity`, deliberately, and not a
+    local reimplementation: the SDK states the payload bytes independently of
+    souk, so every test that registers is checking that souk still accepts
+    what a provider actually sends.
+
+    The version this replaced said in its own docstring that it mirrored the
+    SDK's signing "exactly" and then called `souk.identity`'s builder. The two
+    could not disagree, so when souk's payload gained an operation prefix,
+    both sides moved together: 219 tests passed and no provider could
+    register. A copy that is really a call is not a second opinion.
     """
 
     def __init__(self) -> None:
-        self._key = Ed25519PrivateKey.generate()
-        self.public_key = self._key.public_key().public_bytes_raw().hex()
+        super().__init__(Ed25519PrivateKey.generate())
 
     def sign_chain_hop(self, subject: dict, prev_token: str | None = None, exp_offset: int = 300) -> str:
-        """Mirrors souk_agent_sdk.identity._sign_hop exactly (see that
-        module's docstring) — reimplemented here for the same reason
-        register_body reimplements the registration signing helper: souk's
-        own test suite doesn't depend on souk_agent_sdk as a package.
-        `exp_offset` can be negative to build an already-expired hop, for
-        testing souk.identity.verify_actor_chain's per-hop exp handling.
-        """
-        now = int(time.time())
-        payload = {
-            "subject": subject,
-            "actorPublicKey": self.public_key,
-            "prevHash": hashlib.sha256(prev_token.encode()).hexdigest() if prev_token is not None else None,
-            "iat": now,
-            "exp": now + exp_offset,
-        }
-        return jwt.encode(payload, self._key, algorithm="EdDSA")
+        """`exp_offset` may be negative, to build an already-expired hop for
+        souk.identity.verify_actor_chain's per-hop expiry handling."""
+        return self.sign_hop(subject, prev_token, ttl=exp_offset)
 
     def register_body(self, agents: list[dict]) -> dict:
-        timestamp = int(time.time())
-        payload = registration_signing_payload([a["name"] for a in agents], timestamp)
+        signature, timestamp = self.sign_registration([a["name"] for a in agents])
         return {
             "public_key": self.public_key,
-            "signature": self._key.sign(payload).hex(),
+            "signature": signature,
             "timestamp": timestamp,
             "agents": agents,
         }

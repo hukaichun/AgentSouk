@@ -23,9 +23,9 @@ from souk.identity import (
     InvalidActorChain,
     extend_actor_chain,
     new_actor_chain,
-    registration_signing_payload,
 )
 from souk.protocols.a2a import A2AAdapter
+from souk_provider_sdk import ProviderIdentity
 
 USER = {"type": "user", "id": "employee_x"}
 
@@ -53,14 +53,10 @@ async def _register(souk, name: str) -> AgentRef:
     attaching needs is already in it. This used to hand back the pair
     `(agent_id, public_key)` because the id said nothing about whose it was.
     """
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes_raw().hex()
-    timestamp = int(time.time())
+    identity = ProviderIdentity.generate()
+    signature, timestamp = identity.sign_registration([name])
     registration = await souk.register_agents(
-        public_key,
-        key.sign(registration_signing_payload([name], timestamp)).hex(),
-        timestamp,
-        [{"name": name}],
+        identity.public_key, signature, timestamp, [{"name": name}]
     )
     return registration.agents[name]
 

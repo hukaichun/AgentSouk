@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from souk.errors import AgentNotFound, InvalidRegistration
 from souk.identity import registration_signing_payload
+from souk_provider_sdk import ProviderIdentity
 
 
 class LocalProvider:
@@ -28,28 +29,25 @@ class LocalProvider:
         yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
-def _signed(key: Ed25519PrivateKey, names: list[str]) -> tuple[str, str, int]:
-    timestamp = int(time.time())
-    payload = registration_signing_payload(names, timestamp)
-    return (
-        key.public_key().public_bytes_raw().hex(),
-        key.sign(payload).hex(),
-        timestamp,
-    )
+def _signed(identity: ProviderIdentity, names: list[str]) -> tuple[str, str, int]:
+    """Signed the way a provider signs — through the SDK, so this is also a
+    check that souk still accepts what one actually sends."""
+    signature, timestamp = identity.sign_registration(names)
+    return identity.public_key, signature, timestamp
 
 
 async def _register(souk, name: str = "local"):
-    key = Ed25519PrivateKey.generate()
-    public_key, signature, timestamp = _signed(key, [name])
+    identity = ProviderIdentity.generate()
+    public_key, signature, timestamp = _signed(identity, [name])
     registration = await souk.register_agents(
         public_key, signature, timestamp, [{"name": name}]
     )
-    return registration, public_key, registration.agents[name]
+    return registration, identity.public_key, registration.agents[name]
 
 
 async def test_registration_must_prove_it_holds_the_key(souk):
-    key = Ed25519PrivateKey.generate()
-    public_key, _signature, timestamp = _signed(key, ["a"])
+    identity = ProviderIdentity.generate()
+    public_key, _signature, timestamp = _signed(identity, ["a"])
 
     with pytest.raises(InvalidRegistration):
         await souk.register_agents(public_key, "00" * 64, timestamp, [{"name": "a"}])
@@ -59,6 +57,8 @@ async def test_registration_refuses_a_stale_timestamp(souk):
     """Bounds how long an observed-but-valid signature stays replayable."""
     key = Ed25519PrivateKey.generate()
     stale = int(time.time()) - 3600
+    # Built here rather than through the SDK on purpose: this test is about
+    # a payload souk must *refuse*, so it needs to construct one directly.
     payload = registration_signing_payload(["a"], stale)
 
     with pytest.raises(InvalidRegistration):

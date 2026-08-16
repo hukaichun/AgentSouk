@@ -21,17 +21,16 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from souk.core import Souk
-from souk.identity import registration_signing_payload
+from souk_provider_sdk import ProviderIdentity
 from souk.models import AgentRef, AgentRecord, AgentSummary, RunRecord
 
 
 async def _register(souk: Souk, name: str = "translator", provider_name: str | None = "Demo"):
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes_raw().hex()
-    timestamp = int(time.time())
+    identity = ProviderIdentity.generate()
+    signature, timestamp = identity.sign_registration([name])
     registration = await souk.register_agents(
-        public_key,
-        key.sign(registration_signing_payload([name], timestamp)).hex(),
+        identity.public_key,
+        signature,
         timestamp,
         [{"name": name, "description": "d"}],
         provider_name=provider_name,

@@ -19,20 +19,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from souk.changes import RosterChanged, RunStatusChanged
 from souk.core import Souk
-from souk.identity import registration_signing_payload
+from souk_provider_sdk import ProviderIdentity
 
 SOUK_PACKAGE = Path(__file__).resolve().parent.parent / "souk"
 
 
 async def _register(souk: Souk, name: str = "echo"):
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes_raw().hex()
-    timestamp = int(time.time())
+    identity = ProviderIdentity.generate()
+    signature, timestamp = identity.sign_registration([name])
     registration = await souk.register_agents(
-        public_key,
-        key.sign(registration_signing_payload([name], timestamp)).hex(),
-        timestamp,
-        [{"name": name}],
+        identity.public_key, signature, timestamp, [{"name": name}]
     )
     return registration.agents[name]
 

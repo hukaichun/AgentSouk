@@ -27,23 +27,19 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from souk import repo
 from souk.config import CoreSettings
 from souk.core import Souk
-from souk.identity import registration_signing_payload
+from souk_provider_sdk import ProviderIdentity
 
 
 async def _register(souk, *names: str):
     """Registers a fresh provider identity, and hands back both halves a
     caller needs afterwards: what souk issued, and the public key that *is*
     this provider (what it attaches and claims as)."""
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes_raw().hex()
-    timestamp = int(time.time())
+    identity = ProviderIdentity.generate()
+    signature, timestamp = identity.sign_registration(list(names))
     registration = await souk.register_agents(
-        public_key,
-        key.sign(registration_signing_payload(list(names), timestamp)).hex(),
-        timestamp,
-        [{"name": n} for n in names],
+        identity.public_key, signature, timestamp, [{"name": n} for n in names]
     )
-    return registration, public_key
+    return registration, identity.public_key
 
 
 async def _until(predicate, timeout: float = 5.0) -> None:

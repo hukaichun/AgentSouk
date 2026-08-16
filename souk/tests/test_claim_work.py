@@ -25,26 +25,21 @@ from souk import repo
 from sqlalchemy import delete
 
 from souk.core import Souk
+from souk_provider_sdk import ProviderIdentity
 from souk.errors import InvalidRegistration, NothingOwned
-from souk.identity import agent_deletion_signing_payload
 from souk.schema import agents
-from souk.identity import registration_signing_payload
 
 
 async def _register(souk, *names: str):
     """Registers a fresh provider identity, and hands back both halves a
     caller needs afterwards: what souk issued, and the public key that *is*
     this provider (what it attaches and claims as)."""
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes_raw().hex()
-    timestamp = int(time.time())
+    identity = ProviderIdentity.generate()
+    signature, timestamp = identity.sign_registration(list(names))
     registration = await souk.register_agents(
-        public_key,
-        key.sign(registration_signing_payload(list(names), timestamp)).hex(),
-        timestamp,
-        [{"name": n} for n in names],
+        identity.public_key, signature, timestamp, [{"name": n} for n in names]
     )
-    return registration, public_key
+    return registration, identity.public_key
 
 
 async def _enqueue(souk, agent, run_input=None):
@@ -251,21 +246,14 @@ async def test_an_agent_deleted_while_offline_is_told_when_its_provider_returns(
     than inherited from the original issue."""
     souk = Souk(settings.model_copy(update={"online_window_seconds": 0}))
     try:
-        key = Ed25519PrivateKey.generate()
-        public_key = key.public_key().public_bytes_raw().hex()
-        timestamp = int(time.time())
+        identity = ProviderIdentity.generate()
+        signature, timestamp = identity.sign_registration(["gone"])
         registration = await souk.register_agents(
-            public_key,
-            key.sign(registration_signing_payload(["gone"], timestamp)).hex(),
-            timestamp,
-            [{"name": "gone"}],
+            identity.public_key, signature, timestamp, [{"name": "gone"}]
         )
-        deletion_ts = int(time.time())
+        deletion_signature, deletion_ts = identity.sign_deletion("gone")
         await souk.delete_agent(
-            public_key,
-            "gone",
-            key.sign(agent_deletion_signing_payload("gone", deletion_ts)).hex(),
-            deletion_ts,
+            identity.public_key, "gone", deletion_signature, deletion_ts
         )
 
         with pytest.raises(NothingOwned):

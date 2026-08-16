@@ -23,7 +23,7 @@ from souk import repo
 from souk.config import CoreSettings
 from souk.core import Souk
 from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration
-from souk.identity import agent_deletion_signing_payload, registration_signing_payload
+from souk_provider_sdk import ProviderIdentity
 from souk.models import AgentRef
 
 
@@ -33,31 +33,29 @@ class _Provider:
         yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
-class _Identity:
-    """A provider that can sign for itself, which is what deleting requires."""
+class _Identity(ProviderIdentity):
+    """A provider that can sign for itself, which is what deleting requires.
+
+    The SDK's identity, not a local one: both payloads it signs are stated
+    there independently of souk, so these tests check that souk still accepts
+    what a provider sends rather than that souk agrees with itself.
+    """
 
     def __init__(self) -> None:
-        self.key = Ed25519PrivateKey.generate()
-        self.public_key = self.key.public_key().public_bytes_raw().hex()
+        super().__init__(Ed25519PrivateKey.generate())
 
     async def register(self, souk: Souk, *names: str):
-        timestamp = int(time.time())
+        signature, timestamp = self.sign_registration(list(names))
         return await souk.register_agents(
-            self.public_key,
-            self.key.sign(registration_signing_payload(list(names), timestamp)).hex(),
-            timestamp,
-            [{"name": n} for n in names],
+            self.public_key, signature, timestamp, [{"name": n} for n in names]
         )
 
     def deletion(self, name: str, timestamp: int | None = None) -> tuple[str, int]:
-        timestamp = timestamp if timestamp is not None else int(time.time())
-        return (
-            self.key.sign(agent_deletion_signing_payload(name, timestamp)).hex(),
-            timestamp,
-        )
+        return self.sign_deletion(name, timestamp)
 
     def registration_signature(self, names: list[str], timestamp: int) -> str:
-        return self.key.sign(registration_signing_payload(names, timestamp)).hex()
+        signature, _ = self.sign_registration(names, timestamp)
+        return signature
 
 
 @pytest.fixture
