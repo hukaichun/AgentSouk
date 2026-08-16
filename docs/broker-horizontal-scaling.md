@@ -499,6 +499,88 @@ harness hands every node the same secret for exactly this reason (see
 deployment sets it per-pod; `config.py`'s comment for the field should say
 so once this ships.
 
+## How the agent-identity work changes this
+
+`docs/retiring-agent-id.md` and `docs/agent-lifecycle.md` land on the same
+claim path this document rebuilds, so the interaction is worth stating rather
+than discovering. It is mostly favourable, and it fixes the sequencing
+question.
+
+**The ownership check moves inside the claim, and stops having a gap.** Today
+claiming is three steps: read which ids this key owns, filter the request
+against them in Python, then claim. The property that stops one provider
+claiming another's work lives *between* two statements — tolerable in one
+process, and exactly the shape this document spends its length worrying about
+everywhere else. With `(public_key, name)`, the filter is a column on the row
+being claimed:
+
+```sql
+UPDATE thread_history
+   SET status='running', claimed_by=:key, owner_id=:me, lease_expires_at=:t
+ WHERE kind='run_status' AND status='queued'
+   AND agent_public_key = :key AND agent_name IN (:names)
+```
+
+One statement, atomic, and the authorization is the same `WHERE` clause that
+does the claim. A separate ownership query cannot get out of step with it,
+because there isn't one.
+
+**`claimed_by` never needed changing**, which is worth noticing: the part of
+this design that identifies a *provider* was already the natural key. Only the
+part identifying an *agent* was a surrogate. The two halves of the same table
+were built to different rules.
+
+**#37's `NothingOwned` gets a better home.** Merging the check into the claim
+loses the ability to tell "nothing queued" from "you own none of these" —
+0 rows updated means both — which is precisely the ambiguity that issue is
+about. So the registration lookup survives, but only on the empty path: claim
+first, and ask "is this key registered for these names at all" only when
+nothing came back. That makes it free in the busy case and, on an idle
+long-polling worker, it runs every cycle — which is the behaviour #37 wants,
+since that worker is exactly the one that needs to find out it has been
+de-registered.
+
+**The deletion guard's cross-node gap mostly dissolves.** `agent-lifecycle.md`
+flags that "no active run" is read from this process's broker, so another
+node's live run might be missed. With deletion refused for any agent that has
+threads, and `thread_history.thread_id` being a NOT NULL foreign key — so a
+run cannot exist without a thread, at the schema level — "no threads" implies
+no runs anywhere, on any node. What is left is the in-process `attached` check,
+which genuinely is node-local: node A cannot see that the provider is attached
+on node B. That degrades into the previous item rather than into damage — B's
+worker claims for a name that no longer exists and gets `NothingOwned`, loudly.
+
+**`delisted_at` disappearing takes a column out of the hot path.** The claim
+index is on queued runs and is consulted by every worker on every node; one
+fewer nullable column to reason about there is small but free.
+
+**The one real cost: the claim index gets wider.** `(agent_id, created_at)`
+becomes `(agent_public_key, agent_name, created_at)` — a 64-hex key plus a
+name, against a 30-character id. Roughly two to three times the width on the
+one index this design puts on the hottest path. Irrelevant at the deployment
+size souk is aimed at, and named here so that if it ever is relevant, the fix
+is already identified: `providers.fingerprint` is the 16-hex form of the same
+key and is already unique.
+
+### What this means for the order of work
+
+- **Phase 1 (leases) is independent.** It touches runs and nodes, never
+  agents, and it is the only phase fixing damage that already occurs. Do it
+  first regardless.
+- **Phases 3 and 4 should follow the agent-identity contract change.** Phase 3
+  *is* the claim query and its index. Writing it against `agent_id` means
+  writing the hardest query in this design twice and rebuilding its index
+  after — for no benefit, since phase 1 does not depend on it.
+- **The schema changes want to be one migration, or deliberately two.** Both
+  add or replace columns on `thread_history`: this document's four dispatch
+  columns, `retiring-agent-id.md`'s split of `agent_id` into two. Doing them
+  together is one table rebuild on SQLite instead of two.
+- **`scripts/probes/probe_multiprocess.py` is on the contract.** It calls
+  `start_run` and `claim_work` with agent_ids, so the contract change updates
+  it — which is fine and worth saying, because that probe is the pass/fail
+  gate for every phase here and must not be allowed to rot into "the version
+  that still compiles".
+
 ## What this deliberately does not change
 
 - The in-memory broker, byte for byte. Single-process embedding stays the
