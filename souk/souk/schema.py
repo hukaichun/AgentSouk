@@ -109,7 +109,7 @@ providers = Table(
 # in-process worker could not recover even after re-registering, because fresh
 # ids were minted and it kept serving the ones it was attached with.
 #
-# See docs/retiring-agent-id.md. `provider_key` rather than `public_key`
+# `provider_key` rather than `public_key`
 # because an agent has no key: the key is its provider's, and this column has
 # always meant that (its old comment said so).
 agents = Table(

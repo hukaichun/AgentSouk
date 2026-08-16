@@ -42,8 +42,8 @@ This document provides a technical comparison between **Agent Souk** and existin
 - **Similarities**: Both use outbound connections from the agent to a relay server to bypass NAT / firewalls without public IPs.
 - **Differences**:
   - `a2a-relay` only handles A2A (JSON-RPC) traffic and is stateless. It does not provide human streaming endpoints (**AG-UI**).
-  - `a2a-relay` relies on a single shared secret across the entire relay. Any caller with the secret can mint tokens for *any* `agent_id` (impersonation vulnerability).
-  - **Agent Souk** gives each agent a cryptographic **Ed25519 identity keypair**. Only the key holder can register or claim runs for their assigned `agent_id`.
+  - `a2a-relay` relies on a single shared secret across the entire relay. Any caller with the secret can mint tokens for *any* agent (impersonation vulnerability).
+  - **Agent Souk** gives each agent a cryptographic **Ed25519 identity keypair**. An agent *is* `(public key, name)`, so only the key holder can register one or be given its runs.
 
 ### 2. vs. `agentgateway.dev` (genuinely closest gateway comparison)
 - **Similarities**: Both natively bridge A2A (and, in agentgateway's case, MCP) traffic; both are open-source and self-hostable.

@@ -84,7 +84,7 @@ repo as a regression fixture, not a live demo):
   happen to delegate to the *same* third agent): safe by construction.
   Every call with no `context_id` gets an independent thread, so the
   shared callee ends up with two unrelated threads, one per caller — no
-  cross-talk, even though it's the same `agent_id` on both branches.
+  cross-talk, even though it is the same agent on both branches.
 - **Cycles** (agent A delegates to B, and B's own logic calls back into
   A): no *scheduling* deadlock — a callback lands on a fresh thread (no
   `context_id` reuse means it's a brand-new call from souk's point of
@@ -94,12 +94,12 @@ repo as a regression fixture, not a live demo):
   **Capacity is a different matter, and it is yours to get right.** If a
   provider delegates to an agent *it hosts itself* — including back to the
   same agent — the outer run is holding one of that provider's slots while
-  it waits, and the inner run needs the same provider to claim it. With
-  `max_claim=1` (in-process) or `max_concurrent_runs=1` (remote) that never
-  happens: the outer run sits `running` until the stall sweep gives up on
-  it, about two minutes later by default. Measured in-process; the remote
-  knob is the same number reaching the same queue. So a provider that
-  delegates to its own agents needs capacity for the whole chain, and one
+  it waits, and the inner run needs a slot from the same provider. With
+  `max_concurrent_runs=1` that never happens: souk offers the inner run,
+  you decline because you are full, and the outer run sits `running` until
+  the stall sweep gives up on it, about two minutes later by default.
+  Measured. So a provider that delegates to its own agents needs capacity
+  for the whole chain, and one
   that recurses should stay on the default (unlimited). Delegating to a
   *different* provider is unaffected — it has its own budget, and a caller
   capped at 1 is fine.
@@ -178,11 +178,12 @@ you up if you hand one to the wrong party — there isn't.
 ## Identity and registration
 
 A provider's identity to any souk it connects to is its Ed25519 keypair —
-not an account souk issues. Losing the key file means losing the ability
-to update your registration under its original `agent_id`: a regenerated
-key registers as a fresh, unrelated identity, and anything still pointed
-at the old `agent_id` (e.g. another provider's sub-agent delegation
-config) keeps talking to the orphaned one. Treat the key file like any
+not an account souk issues, and an agent *is* `(your public key, its name)`
+— there is no separate id souk mints for you to hold. Losing the key file
+therefore means losing the agents: a regenerated key registers as a fresh,
+unrelated identity, and anything pointed at the old pair (another
+provider's sub-agent delegation config, say) keeps talking to the orphaned
+one. Treat the key file like any
 other credential — back it up, never commit it.
 
 ## TLS

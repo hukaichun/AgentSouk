@@ -37,7 +37,6 @@ souk/souk/            # the library. Network-free.
   core.py             #   ① Souk: the domain surface an embedder uses
   broker.py           #     live dispatch: one queue pair and one task per run
   handlers.py         #     what a command does to a run (persist, decide)
-  providers.py        #   the Provider port (agent_id + the AG-UI shape)
   worker.py           #   the loop that claims work and drives a provider
   repo.py schema.py   #   the database, and the only thing core knows about
   protocols/          #   ② agui, a2a, kyok — pure translation, no I/O
@@ -148,117 +147,63 @@ an argument the server passes when constructing the protocol adapter:
 A2AAdapter(souk, public_base_url="https://souk.example.com")
 ```
 
-### Attaching providers: a worker claims, core never calls out
+### Attaching providers: souk hands work over, and takes an ack
+
+`Souk.attach_provider(provider, agent_names)`. `provider` is anything
+satisfying `broker.ConnectedProvider` — a public key, `deliver`, `cancel` —
+and what carries those is not core's business and does not appear:
 
 ```python
-await souk.attach_provider(public_key, my_provider, [translator, summarizer], max_claim=2)
+class ConnectedProvider(Protocol):
+    public_key: str
+    max_concurrent_runs: int | None
+    async def deliver(self, run: ClaimedRun) -> bool: ...
+    def cancel(self, run_id: str) -> None: ...
 ```
 
-A **provider** is one identity offering one or more agents — what souk has
-always meant by the word: registration is per provider and carries a batch of
-agents, the roster groups by it, and `souk-agent-sdk` is one process holding
-several `AgentHandle`s. The id it is attached under is its Ed25519 public
-key, because that is the only identity it has (see "A provider is its key"
-below). The port is that identity, in souk's own process:
+**Only the broker's loop delivers.** `run_forever` is the one caller of
+`_offer_pending`, and that is load-bearing rather than tidy: the queue's head
+is read, the provider awaited, and the run removed only afterwards — so two
+callers both hand out the same run, and the second `popleft` removes the
+*next* one along, which is thereby lost rather than delayed. `expire_queued`
+only looks at the pending queue, so a run taken out of it and given to nobody
+is never offered again and never given up on either. Enqueueing a run and
+registering a provider therefore set an event and hand out nothing
+themselves.
 
-```python
-class Provider(Protocol):
-    def run_stream(self, agent_id: str, run_input: dict) -> AsyncIterator[AgentEvent]: ...
-```
+**Delivery is the hand-over.** `ClaimedRun` carries the input, so there is no
+second call in which souk supplies it and no window where a provider holds a
+run and is still waiting to be told what to do. It is deliberately *not*
+`broker.Run`: that is souk's own dispatch state with the run's queues
+attached, which a provider could reach into in-process and could not be given
+over a wire at all.
 
-An **agent** is still exactly what AG-UI says it is — a run input in, events
-out. The only addition is `agent_id`, on the method rather than smuggled into
-the input, because AG-UI's RunAgentInput carries no agent identity and a
-provider serving a translator and a summarizer has to know which one a run is
-for. The provider routes; souk does not hold a callable per agent.
+**The ack is the provider saying it has the run.** True and the run is
+running, recorded in the same synchronous step it is handed over, so nothing
+can observe a run that has been given away and belongs to nobody. False, an
+exception, or silence past `deliver_timeout_seconds` leaves it exactly where
+it was — queued, to be offered again. A provider that answers after souk gave
+up is accepted (`accept_late_ack`) rather than having its run delivered
+twice.
 
-What changed is not the provider — it is who drives it. souk used to *call* a
-provider; now a **worker** claims runs for it and pushes events back, and
-that worker is per provider, which is why concurrency (`max_claim`) is a
-budget across everything it hosts.
+**Capacity is declared, and corrected by being refused.** souk cannot see
+inside a provider, so `max_concurrent_runs` is a claim: souk keeps a bucket
+that size, one per identity however many agents it serves, and refills it
+from the run terminations it already observes. A provider that declines while
+souk believed it had room is recorded `misdeclared` and treated as full from
+then on — believe the provider, and record that souk had to find out by being
+refused. `quality()` exposes that alongside `abandoned`, `unanswered` and
+`answered_late`: things souk saw, never things it inferred.
 
-Declaring the identity first is also what makes attaching checkable: every
-`agent_id` must be one that key actually registered. Attaching used to derive
-the provider from the agent, so there was nothing to verify against — the
-answer was whatever the agent row said.
+**Reporting is authorized.** Every event names the identity that took the run
+and is checked against it. Holding a connection is not the same as holding a
+particular run.
 
-Every worker runs the same loop, in-process or across a wire:
+**`Souk.start()` is required.** The loop it begins is the only thing that
+hands a run to anybody, so a souk that was never started accepts every run
+and dispatches none. `enqueue_run` refuses rather than queueing into a loop
+that never turns, and `Health.ready` counts dispatch.
 
-```python
-while True:
-    runs = await souk.claim_work(token, agent_ids, max_claim=capacity)
-    for run in runs:
-        spawn(execute(run))      # events reported back per run
-```
-
-against three core methods and nothing else:
-
-| | |
-|---|---|
-| `claim_work(token, agent_ids, max_claim, on_cancel)` | take runs — **with their input** |
-| `report_event(run_id, event, claimed_by)` | one AG-UI event for a run you hold |
-| `finish_run(run_id, claimed_by)` | that run's stream has ended |
-
-souk ships that loop (`souk/worker.py`) so an attached provider uses it
-rather than a shortcut; `souk-agent-sdk` runs the same loop on the far side
-of a wire, where some transport carries those three calls and one
-notification back the other way (souk asking a run to stop).
-
-**Which transport is not core's business, and core says so nowhere.** That
-sentence used to read "on the far side of gRPC, where `PollForWork` carries
-`claim_work` and `AgentSession` carries the other two", and the same naming
-had spread through `broker.py`, `identity.py`, `repo.py` and `kyok.py` — core
-describing itself in the vocabulary of one deployment's wire. It is gone: the
-contract is the three methods and the cancel notification, and a transport
-implements framing around them.
-
-That matters right now, because the transport is changing. The base server
-mode is **HTTP + WebSocket**, so the gRPC service — a second listening port,
-a `.proto`, generated stubs and a build step to produce them — is being
-removed in favour of one WebSocket on the app that already exists. Core is
-untouched by that, which is the test of whether this boundary was real: the
-worker loop, the ownership checks, the long-poll wait and the cancel
-notification are all the same calls afterwards. The landing is the
-AgentSoukServer gateway's and `souk-agent-sdk`'s job, tracked separately
-from this document.
-
-Three properties follow, and each replaces something the previous port needed
-a mechanism for:
-
-**Claiming is the hand-over.** A claimed run comes back with its
-RunAgentInput, so a worker leaves the call able to start. There is no second
-step in which souk delivers the input, so there is no window where a run is
-claimed but its worker is waiting to be told what to do — the window the old
-`start()` handshake existed to close, and which a cancel arriving first could
-strand an agent in.
-
-**Claiming is also being claimed.** `RunBroker.claim` marks the run taken and
-queues its `Claim` with no `await` in between, so nothing can observe a run
-that has been handed out but belongs to nobody. The old model handed out
-run_ids and waited for the provider to come back and say what it took, which
-needed a second cancelled-check to cover the gap.
-
-**Reporting is authorized.** Every event names the identity that claimed the
-run, and core checks it. Holding an authenticated connection is not the same
-as holding a particular run; without the check, any connected provider could
-push events into any run_id it could guess.
-
-`attach_provider` is not a shortcut past any of this. It refuses an agent_id
-that key never registered, mints a session token for that identity, and
-claims through the same `claim_work` with the same ownership filtering — see
-"In-process is not trusted" below.
-
-The port this replaced is described in "The provider should be a worker"
-further down, along with what it cost. What it did get right is kept: souk's
-one genuine transport leak went with it. `broker.py` was
-already transport-agnostic, and the run handlers are pure domain logic —
-persist an event, decide a status, reduce a reply — but three of them built
-`souk_pb2.AgentEventEnvelope` protobuf messages directly. They now live in
-`souk/handlers.py`, in core, and `tests/test_core_is_network_free.py` asserts
-no core module imports grpc, fastapi, uvicorn, starlette, httpx or
-websockets — the last one listed before anything imports it, so the
-WebSocket that replaces gRPC cannot leak in either. That test
-was verified to fail when a violation is introduced, rather than assumed.
 
 ### Cancelling: a request, with the outcome decided later
 
@@ -276,7 +221,7 @@ pipeline task:
    ending is real output, persisted and relayed like any other.
 
 Asking is a plain synchronous notification — the callback a worker supplied
-when it claimed (`claim_work`'s `on_cancel`), invoked once and not awaited,
+when it took the run (`ConnectedProvider.cancel`), invoked once and not awaited,
 which is all a request can honestly be. It used to be
 `await provider.cancel(run_id)`, an await into provider code *on the run's
 own pipeline task*, so a slow or wedged provider could stall the queue its
@@ -445,7 +390,7 @@ The first version of attaching an agent put an object in a dictionary. That
 was a side door past two things souk otherwise insists on, and both had real
 consequences:
 
-- **Anything holding the Souk could claim any agent_id**, with no proof.
+- **Anything holding the Souk could serve any agent**, with no proof.
   Sharing a process is not a reason to be trusted; a provider's identity is
   its Ed25519 keypair whether or not there is a wire in between.
 - **souk had no idea it was there.** The dictionary was invisible to the
@@ -454,24 +399,21 @@ consequences:
   "agent is currently offline" while it sat right there. Observed, not
   hypothetical.
 
-Both now go through the same door as a remote provider — and since the
-worker model, it is not merely the same *kind* of door but literally the same
-call:
+Both go through the same door, and it is literally the same call:
 
 | | remote | in-process |
 |---|---|---|
 | proves identity | signed registration | the same signed registration |
-| takes work | `claim_work`, with a session token | `claim_work`, with a session token |
-| says "still here" | claiming marks it seen | claiming marks it seen |
-| souk learns it left | stops claiming, ages out | `detach_provider`, marked offline at once |
+| takes work | `deliver`, and acks | `deliver`, and acks |
+| says "still here" | souk holds it (`RunBroker.serving`) | the same |
+| souk learns it left | the gateway unregisters it | `detach_provider` |
 
 `Souk.register_agents` verifies the signature and timestamp freshness — that
 check used to live in the HTTP router even though registering is a domain
-act, identical regardless of transport. `attach_provider` refuses an agent_id
-this provider never registered, so registering is a prerequisite in-process
-exactly as it is remotely, and the token it mints is scoped to that identity
-— an attached provider cannot claim another's work any more than a remote one
-can.
+act, identical regardless of transport. `attach_provider` refuses a name this
+key never registered, so registering is a prerequisite in-process exactly as
+it is remotely, and every event a provider reports is checked against the run
+it was actually given.
 
 Row three used to be the exception: an attached provider was kept alive by a
 souk-side heartbeat, because it never asked for anything and so produced no
@@ -597,250 +539,73 @@ Deliberately a supervised set rather than an `asyncio.TaskGroup`: a TaskGroup
 cancels every sibling when one task fails, and runs must be isolated — one
 agent blowing up cannot take down every other run in flight.
 
-## The provider should be a worker, not something core calls
+## Dispatch has been inverted twice, and the reasons differ
 
-Built. The port it replaced had core *call* a provider and pull its events;
-it is inverted, so a provider is a task that claims runs and pushes back.
+Core called a provider and pulled its events; then a provider claimed work
+and pushed back; now souk delivers and the provider acks. Both inversions
+were argued from measurements, and the record of each is in the git history
+rather than here — what matters for reading the code is which problem each
+shape does *not* have.
 
-**What the pull model cost.** A single event crossed three queues and two
-routing tables:
+**What calling out cost.** A single event crossed three queues and two
+routing tables, one of them transport-side and keyed by run_id. Claiming
+removed the second table, and pushing keeps it removed: a provider is handed
+a run and reports against it directly.
 
-```
-agent event ─wire→ handle_incoming
-                     → GrpcProvider._runs[run_id]   ← routing table 1 (transport)
-                     → _pump iterates the generator
-                     → broker._runs[run_id].in_queue ← routing table 2 (core)
-                     → pipeline persists
-                     → out_queue → SSE
-```
+**What claiming cost.** souk could not tell a provider anything, because
+providers only ever asked and souk only ever answered `[]`. That is issue
+#37: "nothing queued" and "you own none of these" were the same reply, and a
+provider waited 30 minutes on the second one looking healthy. Delivering asks
+the ownership question once, at `attach_provider`, before any run exists.
 
-Before the provider port existed it was two queues and one table:
-`handle_incoming` looked the run up in the broker and pushed straight into
-its `in_queue`. The second table and the `_pump` task existed purely to turn
-a push (events arriving on a wire) into a pull (core iterating a generator).
+**What delivering costs, and this is the live one.** Connection affinity.
+"A worker is not dispatched *to*; it comes and claims, over a plain call any
+node can answer" was true and is no longer: a run created on node A for a
+provider attached to node B has to reach B. See below.
 
-So an earlier version of this document was wrong to call that table a
-property of the wire and conclude it belongs in the transport. It is a
-property of the *pull model*. Core already has the only routing table
-needed — the broker's run registry. It is two and one again:
-
-```
-agent event ─wire→ handle_incoming
-                     → souk.report_event(run_id, event, claimed_by=…)
-                     → broker._runs[run_id].in_queue  ← the only table
-                     → pipeline persists
-                     → out_queue → SSE
-```
-
-`tests/test_event_path.py` holds that shape: it checks the event reaches the
-run's queue as the same object, and that no run_id appears anywhere in the
-gRPC servicer's state while three runs are in flight over one connection.
-
-**What it also cost: backpressure.** A remote provider could say
-`max_claim=2`. An in-process one had no equivalent: attaching a provider and
-starting five runs started all five at once, measured. That asymmetry was the
-same root cause — the remote side pulled to claim, then core pushed the input
-back to it, and the in-process side only had the push half. `attach_provider`
-now takes `max_claim`, and both halves are one loop against one method, so
-there is no second implementation to keep in step.
-
-**The shape.** A provider is a worker loop, identical in-process and remote:
-
-```python
-while True:
-    runs = await souk.claim_work(token, agent_ids, max_claim=capacity)
-    for run in runs:
-        spawn(execute(run))      # events pushed back per run
-```
-
-The agent stays exactly what AG-UI says it is (`run_stream(input) -> events`).
-What changes is that a *provider* stops being conflated with an *agent*: the
-provider is the worker hosting one, which is why it is the thing that should
-own concurrency and claiming.
-
-Consequences, as predicted: `_pump`, the `Claim` command's provider payload
-and `GrpcProvider._runs` are gone; `claim_work` hands back runs with their
-input; core gained `report_event` / `finish_run`. Three more followed that
-were not predicted, and each is worth recording:
-
-- **A claim frame is no longer needed on the wire**, because the input goes
-  out with the claim. The AgentSession exchange lost two of its four steps,
-  and `PendingRun` gained a `json_payload`. `assign_provider` went with it.
-- **Reporting needed authorization.** Turning the return path into a public
-  core method made the question unavoidable: previously an event could only
-  arrive by souk iterating a stream it had itself asked for. Every event and
-  every `finish_run` now names the claiming identity and is checked against
-  `Run.claimed_by`. The old model's equivalent — any AgentSession could send
-  a claim frame for any run_id — was a real hole, and it closed here.
-- **A dropped connection stopped being an outcome.** Under the pull model
-  souk was reading *from* that connection, so losing it ended the runs it
-  carried: `close_all` synthesised a stream-ending for each. Pushed events
-  are addressed by run_id, so a worker can reconnect and report the rest,
-  including how the run ended. souk records nothing when a connection dies;
-  a worker that really is gone is caught by the stall sweep. Probed against
-  a real server going away mid-run: the SDK reconnected and the run reached
-  its true outcome 1.5s later, well inside the 120s sweep.
-
-**It also makes an acknowledgement worth having.** souk removed the old
-completion `ack` because it arrived after the agent had already produced and
-discarded its events, so the only possible response was a log line. In a push
-model the worker still holds what it sent, so a confirmation is something it
-can act on — retry, or don't advance its cursor. At-least-once delivery
-becomes expressible, where under the pull model there is no moment at which
-the worker could ask. Still not built: the SDK holds unwritten frames across
-a reconnect and flushes them before closing a stream, but a frame whose write
-fails mid-flight is dropped, because there is nothing to retry against.
-
-**Two things this got wrong first, both found by running something.**
-
-An in-process worker that slept between claims (mirroring the SDK's
-`poll_interval`) added up to that interval of latency to every run started
-while it was sleeping — the whole test suite got 3× slower, which is how it
-surfaced. The fix is that a worker never sleeps to wait: it blocks *in* the
-claim call, which already returns the moment work is enqueued. What differs
-is only how long it is willing to block — a full long poll when idle, a short
-interval when busy, because what it is waiting for then is its own capacity,
-which souk cannot observe.
-
-And the first probe of a dropped connection didn't drop one: cancelling the
-gRPC call locally raises `CancelledError`, which the SDK correctly reads as
-"we are shutting down", so it exited instead of reconnecting. Taking the
-server away produces `UNAVAILABLE`, which is the case worth testing. Reading
-the code would not have distinguished those two.
+**Liveness stopped being an inference along the way.** "Claiming marks it
+seen" was the whole model, deliberately without a heartbeat, because asking
+for work produced the fact. Nothing asks now, so nothing produces it — and
+souk does not need it to, because it holds the provider object.
+`RunBroker.serving(agent)` is a fact. This was measured before it was
+changed: with `online` still derived from `last_seen_at`, an attached
+provider that had just completed a run was reported offline sixty seconds
+after attaching.
 
 ## What this leaves open: horizontal scaling
 
-Not a goal now, but the layering should not foreclose it. This section
-records why the door was left open and what two replicas actually do; the
-plan for walking through it is `docs/broker-horizontal-scaling.md`, which
-takes the three requirements below as its starting point and adds the
-measurements behind each decision.
+Not a goal now, but the layering should not foreclose it.
+`docs/broker-horizontal-scaling.md` is the plan.
 
-Where souk's state lives today:
+Where souk's state lives:
 
 | Durable, already shared | Live, per-process |
 |---|---|
-| agent roster | `RunBroker._runs`, `_pending_by_agent` |
-| threads, thread_history | each `Run`'s `in_queue` / `out_queue` |
-| run status, `run_events` | `_wake_subscribers` (long-poll wakeups) |
+| agent roster, threads, messages | `RunBroker._runs`, `_pending_by_agent` |
+| run status, `run_events` | each `Run`'s `in_queue` / `out_queue` |
+| | `RunBroker._providers` — who is reachable |
+| | `_capacity` — what each has in flight |
 | | the KYOK bridge registry (same shape) |
-| | the `AgentSession` gRPC connection itself |
 
-That split is deliberate: the database is the durable record, explicitly *not*
-on the live event-relay hot path, so dispatch runs on plain asyncio primitives
-(see `broker.py`'s module docstring).
+The database is the durable record and is deliberately *not* on the live
+event-relay hot path, so dispatch runs on plain asyncio primitives.
 
-The obstacle to multiple replicas used to be stated as **connection
-affinity**: a provider's `AgentSession` is pinned to one process, so if node A
-holds agent X's stream and a run for X is created on node B, B cannot
-dispatch it.
+**The one seam that has to move is reachability.** Every read of the provider
+mapping goes through `RunBroker.serving` / `agents_served_by`, and the dict
+is private, so answering across processes is one implementation rather than a
+sweep through core. That answer is not extra work invented for the roster:
+multi-broker delivery needs a shared record of which node holds which
+connection anyway, and "is *any* node serving this agent" — which is what
+`online` means — falls out of it.
 
-Inverting the provider shrank that. A worker is not dispatched *to*; it comes
-and claims, over a plain call that any node can answer, and it reports back
-by run_id rather than down the connection the run arrived on. Nothing is
-bound to the connection a run arrived on any more.
+It will need an expiry, because a row saying node B serves an agent outlives
+node B being killed. `last_seen_at` becomes that expiry, written by whoever
+holds the connection rather than by a provider asking for work.
 
-**What two replicas actually do today**, measured against one database rather
-than argued about — every line here is something a load balancer will do to
-you by accident:
+**Provider-side scaling is deliberately not souk's problem.** A provider runs
+as many processes as it likes; each attaches, each declares its own capacity,
+and souk offers to whichever is serving the agent.
 
-| | |
-|---|---|
-| the roster | shared, both nodes agree |
-| a run created on A | invisible to a provider claiming on B; only A can hand it out |
-| that run's events reported to B | `report_event` returns False, nothing persisted, and the worker never learns — it pushed and moved on |
-| the SSE consumer | reads `out_queue` on whichever node owns the run |
-| a third replica booting | `fail_orphaned_runs` is DB-wide, so it marks A's *live* runs `failed` while A keeps relaying them |
-
-The last row is the one that bites first: it needs two nodes, not many, and
-it is silent. The stall and unclaimed sweeps have the same shape — every
-replica reaps every run.
-
-So the failure mode is not slowness, it is two nodes disagreeing. Three
-things would be required, in this order:
-
-1. **Ownership on the sweeps.** Either one elected sweeper, or a lease on the
-   run so a node reaps only what it owns and only what has genuinely expired.
-   Small, no API change, and the only item here that is already doing damage.
-   Note where it belongs when it happens: "which runs am I responsible for"
-   is the broker's question — in memory the answer is its registry, and
-   distributed it is the runs recorded against this instance — so it is an
-   operation on whatever the broker becomes, not a rule in `health.py`.
-2. **A shared claim queue**, so `enqueue_run` on A is claimable on B — an
-   INSERT plus a notify, and a `SELECT … FOR UPDATE SKIP LOCKED` where
-   `RunBroker.claim` is now. Runs are already rows; this is mostly a query.
-3. **Cross-node relay for a run's output**, so an SSE consumer on A receives
-   what a worker reported to B. This one is a decision before it is code:
-   notify-and-tail `run_events` (no new infrastructure, but it puts the
-   database on the read path `broker.py` deliberately keeps it off), a
-   pub/sub bus (keeps the hot path clear, adds a dependency), or routing the
-   consumer to the node that owns the run (nothing new to install, but souk
-   stops being stateless behind a plain load balancer). The same mechanism
-   carries souk's cancel request to whichever node holds that worker's
-   stream, which is the last of the affinity problem.
-
-**What is already in place, stated exactly**, because an earlier version of
-this document oversold it and the overstatement was believed:
-
-- The broker is an instance owned by a `Souk` and accepted in its
-  constructor, not a module-level singleton. That part is real.
-- Its wake mechanism is a plain `asyncio.Event`, not anything transport-
-  shaped, so a `LISTEN/NOTIFY` implementation could sit behind it. True, but
-  weaker than it reads: `subscribe_wake` *returns* that Event and
-  `core.claim_work` awaits it directly, so core names an asyncio primitive
-  rather than the operation ("wait for work for these agents, or this
-  long"). A second implementation can satisfy it; none should have to.
-- `Run` is mostly the broker's own — a caller gets a `RunSnapshot` (a copy
-  of the facts, no live references) and affects a run through operations:
-  `push`, `subscribe`, `request_cancel`. `handlers.py` receives the live
-  object, deliberately, because the handlers *are* the pipeline's inner loop
-  and the broker is what dispatches them; a different broker brings its own.
-
-  **This bullet used to say "nothing outside `broker.py` holds one", and
-  that was not true.** `Souk.enqueue_run` is annotated `-> RunSnapshot` and
-  returns the live `Run`, queues attached — found by `inspect` at runtime,
-  after reading this bullet and believing it. It has cost nothing so far
-  only because all four call sites discard the return value. Which is the
-  same lesson this section already exists to record, arriving a second time:
-  the sentence describing an encapsulation was written before the last hole
-  in it was closed.
-- There is still **no declared interface** — no Protocol, no ABC. The
-  surface is now small enough to be one, but writing it from the in-memory
-  implementation alone is how the last "swap-in seam" came to be believed:
-  it is only an interface once a second implementation has met it. Measured
-  since: four of the nine methods could not be met by a second
-  implementation as they stand — see `docs/broker-horizontal-scaling.md`,
-  "The interface, and what cannot currently be said in it".
-
-Encapsulating it made the shape visible, and the shape is better than it
-looked: a `Run` mixes three separable things. Its identity and input are
-immutable facts. Its round state (`seq`, `saw_run_finished`,
-`pause_payload`, `round_starting_seq`) belongs to whichever node runs that
-run's pipeline and never needs to travel. Only the two queues and the
-registry are genuinely distributed state — so a distributed broker has to
-move less than the old all-in-one object suggested.
-
-It also surfaced a bug that had been hiding behind the leak. Handing out the
-live `Run` meant a caller's reference kept that run's queue alive, so a
-handle taken now and read later still replayed everything. Subscribing by
-id instead is lazy, and a short run that finished — and was forgotten —
-before anyone read it returned nothing at all. Handles, the AG-UI relay and
-A2A's streaming branch now all subscribe at the moment they are created
-rather than at first iteration. The in-process test that starts five runs
-and reads them after they finish is what caught it.
-
-**Provider-side scaling is deliberately not souk's problem.** A provider
-running several processes shares one keypair, and souk cannot tell those
-processes apart: any of them may claim that provider's work, and any of them
-may report events for a run another one claimed. That is not a gap to close —
-souk's contract is with the *identity*, and how a provider divides work
-between its own processes is its own business, exactly like how it divides
-work between threads. The consequence to know is that souk will not move a
-run between instances: if the instance holding a run dies, nobody finishes
-it, and the run ends as `failed` when the stall sweep notices
-(`run_stall_timeout_seconds`, 120s by default).
-
-Building 2 and 3 now would be premature. Leaving the door shut would not.
 
 ## Protocol adapters (core)
 
@@ -1019,102 +784,6 @@ because that is what is in the tree; the swap is tracked as its own piece of
 work. What it must not touch is anything above this heading — if it does,
 the boundary this document is about was not real.
 
-## Migration status
-
-All six are done; each landed with the suite green on SQLite and Postgres.
-
-1. ✅ **Settings injection.** `CoreSettings` / `ServingSettings` passed to a
-   `Souk`; engine, sessionmaker, broker and KYOK bridge become instance
-   state. No import-time globals remain.
-2. ✅ **Provider port.** The protobuf queue on `Run` goes behind a port, and
-   the five run handlers move to `souk/handlers.py` in core. Enforced by
-   `tests/test_core_is_network_free.py`. The port itself was later replaced
-   by step 5 — what survived is the handlers' move and the invariant.
-3. ✅ **`Souk` facade.** Registration, attach/detach, `start_run` /
-   `resume_run` / `cancel_run` returning a `RunHandle`, and the state queries.
-4. ✅ **Protocols.** AG-UI and A2A translation extracted into
-   `souk/protocols/`, with every rung published. The routers dropped from
-   ~830 lines to ~300 of pure serving.
-5. ✅ **Invert the provider into a worker.** `souk/worker.py` and the
-   `claim_work` / `report_event` / `finish_run` trio replace the
-   `AgentProvider` port; the event path is back to two queues and one table,
-   in-process work is throttled by `max_claim` like remote work, and both run
-   the same loop. See the section below for what it cost to keep and what it
-   changed on the wire.
-6. ✅ **Split `souk-server`.** The HTTP surface, the gRPC servicer, the KYOK
-   endpoints, the request/response models, `ServingSettings` and the process
-   bootstrap are a sibling distribution; `souk` declares no transport at all.
-   That turns the invariant from a rule into a fact: core cannot import
-   fastapi or grpcio because they are not installed alongside it, verified by
-   importing `souk.core` in an environment where every one of them is absent.
-   `tests/test_core_is_network_free.py` stays — packaging protects against
-   the accident, not against someone adding the dependency back — and it lost
-   its allow-list, because there is no longer a module under `souk/` that is
-   exempt.
-
-Work done along the way that wasn't in the original plan, because it turned
-out to be wrong rather than merely unfinished:
-
-- The completion `ack` round trip was removed. Its only effect was a log line
-  the agent could not act on, at the cost of a round trip per run and a
-  worst-case 5s stall.
-- Cancellation was re-modelled as a request whose outcome is decided when the
-  stream ends (see above), adding the `cancelling` status.
-- In-process providers were made to register and prove identity like remote
-  ones, fixing an attached-but-reported-offline bug.
-- Actor-chain construction moved into core so provenance survives an
-  in-process hop.
-- Reported events became authorized: a worker may only speak for runs it
-  actually claimed. Under the pull model there was nothing to authorize —
-  core only ever read streams it had asked for — so inverting the direction
-  is what turned this into a question, and an unchecked claim frame into a
-  hole worth closing.
-
-## What breaks
-
-Everything below is intentional; souk is unreleased at 0.1.0, which is the
-cheapest possible moment to make these changes.
-
-- `from souk.server import app` disappears. No compatibility shim.
-- `souk.config.settings` as an import-time global disappears.
-- The `souk-server` console script moves to the new subproject.
-- `proto/souk.proto` field 5 (`ack`) is reserved rather than reused, since an
-  old SDK's frame must never be misread as something else. The SDK stops
-  waiting for it.
-- The provider-facing wire changed with the worker model, so an SDK older
-  than this must be updated (`souk-client-sdk` and `souk-directory` are
-  caller-facing and unaffected):
-  - `PendingRun` gains `json_payload`, the run's RunAgentInput. Claiming is
-    the hand-over.
-  - The AgentSession claim frame and souk's input frame are gone with it. A
-    session now carries events and `end_of_stream` up, and `cancel` down.
-  - `Souk.attach_provider(agent_id, provider)` becomes
-    `attach_provider(provider_id, provider, agent_ids, max_claim=…)`: keyed
-    by the provider identity that registered, not by one of its agents.
-    `souk/providers.py`'s port keeps `agent_id` and loses `start`/`cancel` —
-    one method, `run_stream(agent_id, run_input)`, iterated by the worker
-    (`souk/worker.py`) rather than called by core. `assign_provider` is gone.
-- **`sdk_client_id` is gone**, everywhere: out of `POST /agents/register`'s
-  body, out of `Souk.register_agents`, out of the session token (which now
-  carries the `public_key`), and out of the `agents` table. A provider's identity is its keypair — see "A
-  provider is its key" above for the two things that were measured before
-  removing it.
-- `SoukAgentClient` is now **`SoukProvider`**, and loses its `sdk_client_id`
-  parameter. The rename is not cosmetic: the class is one identity hosting
-  several agents, which is what souk means by a provider, and it now
-  satisfies the same `run_stream(agent_id, run_input)` port as an in-process
-  one. Agents are still declared as `AgentHandle(name, run_stream)` and are
-  still the plain AG-UI shape — the provider does the routing, which is where
-  it belongs when one identity serves several agents.
-- `thread_history.status` gains `cancelling`.
-- **The migration chain is one revision again.** The baseline plus the three
-  changes made within days of it were collapsed: souk has never been
-  released, and a baseline that creates a column a later revision deletes
-  costs more in confusion than the history is worth. A database created by
-  the old chain has to be recreated — its `alembic_version` names a revision
-  that no longer exists. Verified by building the schema both ways and
-  comparing every column, constraint and index on both backends.
-
 ## KYOK splits the same way, for a structural reason
 
 KYOK (`souk/kyok.py`, `api_llm_bridge.py`) lets a caller keep its own LLM
@@ -1127,11 +796,17 @@ broker that already lives in core:
 
 | KYOK | run equivalent |
 |---|---|
-| `GET /kyok/poll` | `PollForWork` — long-poll for work |
+| `GET /kyok/poll` | waiting for work to arrive |
 | `POST /kyok/v1/chat/completions` | submitting a unit of work |
-| `POST /kyok/respond/{id}` | `AgentSession` — streaming the result back |
+| `POST /kyok/respond/{id}` | streaming the result back |
 | `_DONE` sentinel | `END_OF_STREAM` |
-| its local queued timeout | `queued_timeout_seconds` |
+| its local queued timeout | `RunBroker.queued_timeout_seconds` |
+
+KYOK still *polls*, and that is a real difference now that runs do not: the
+caller's bridge reaches souk rather than souk reaching it, so souk has
+nothing to deliver to. Whether it should be inverted the same way has not
+been asked. `token_signing_secret` signs its token and nothing else, which is
+the whole of what is left of that key's job.
 
 So it splits exactly like runs do, and gets its own port:
 

@@ -1,5 +1,11 @@
 # AI Town as souk's frontend
 
+
+> The `/a2a/id/{...}` route shapes below belong to the gateway, not to
+> core: core stopped naming URLs, and an Agent Card's
+> `supported_interfaces` is an input to it. Read them as one deployment's
+> choice.
+
 Status: **evaluation, nothing implemented.** Recorded so the reasoning —
 and the measurements behind it — survive the session that produced it.
 
@@ -33,7 +39,7 @@ evaluation existed.
 | `providers.display_name` | the sign | nullable; unsigned stalls show the number |
 | `agents.name` | a person in the stall | one Player on one tile |
 | `agents.last_seen_at` | open / shut | whole stall at once — see below |
-| `max_claim` | how many customers at once | per *stall*, not per person |
+| `max_concurrent_runs` | how many customers at once | per *stall*, not per person |
 | `threads.parent_thread_id` | going to ask another stall | the person walks over |
 
 ## What AI Town actually is (read)
@@ -62,7 +68,7 @@ identity, attached a provider, and called `A2AAdapter.send_task`:
   text in `artifacts[].parts[].text`. Well inside the 120s budget.
 - `contextId` carried back continues the same thread; `Task.id` is new each
   turn — which is what "one conversation, many turns" needs.
-- One provider hosting two agents received the correct `agent_id` for each,
+- One provider hosting two agents received the correct agent name for each,
   on its own thread.
 
 A Convex action reaches this with a single `fetch()` to

@@ -1,6 +1,7 @@
 """Can a running provider survive its database being replaced?
 
-The acceptance check for retiring `agent_id` (docs/retiring-agent-id.md).
+The acceptance check for retiring `agent_id`: an agent is (provider_key,
+name), both halves of which the provider already holds.
 
 souk used to mint an id per agent and require a provider to hold it and echo
 it back on every claim. That made a provider's whole vocabulary belong to one

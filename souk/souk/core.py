@@ -63,7 +63,7 @@ class Registration:
     already knew, since
     it chose the names and holds the key. souk used to hand back ids it had
     minted, and a provider that held those could be cut off from its own work
-    by a database it never saw replaced (see docs/retiring-agent-id.md).
+    by a database it never saw replaced.
     """
 
     agents: dict[str, AgentRef]

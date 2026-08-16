@@ -189,7 +189,7 @@ async def register_agents(
     Returns this batch's `AgentRef`s indexed by name — the pairs, which the
     caller already knew, rather than ids souk minted for it to hold. Handing
     ids back is what made a provider's vocabulary depend on which database
-    answered (see docs/retiring-agent-id.md).
+    answered: an agent is the pair, not an id souk minted.
     """
     await ensure_provider(session, public_key)
     if provider_name is not None:

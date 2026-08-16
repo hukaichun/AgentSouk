@@ -72,7 +72,7 @@ provider                    souk                      caller's KYOK bridge
 `/kyok/poll` is the only thing a caller's bridge does while there's no
 completion to serve, and it's a bounded long-poll (`CLAIM_TIMEOUT_SECONDS`-
 scale wait, empty response on timeout, immediately re-polled) — exactly
-`PollForWork`'s shape, not a held-open connection. `/kyok/respond` is the
+a long-poll's shape, not a held-open connection. `/kyok/respond` is the
 one connection either side ever holds open, and only for as long as that
 one completion is actually being relayed.
 
@@ -85,7 +85,7 @@ discussion:
   live streaming response back into the middle of an in-progress run
   anyway (a paused run ends its stream; this needs the opposite — an
   open channel *during* the run).
-- **Not the gRPC `AgentSession`/`PollForWork` gateway.** That's souk
+- **Not the run-dispatch path.** That's souk
   dispatching work *to providers*. The caller here is not a provider and
   never registers an agent — it's whoever is talking to souk over the
   public AG-UI HTTP surface (`souk-client-sdk`).
@@ -103,13 +103,13 @@ collide on the same credential). Instead:
    (`KyokBridge.open()` — just `secrets.token_hex(16)`; souk never hands
    one out, it accepts whichever session_id shows up) and starts
    long-polling `GET /kyok/poll?sessionId=...` — cheap and idle, same
-   shape as `PollForWork` (see "Shape of the solution" above).
+   shape as the run path once had (see "Shape of the solution" above).
 2. The caller starts the run as usual
    (`POST /agui/{name}` via `souk-client-sdk`), passing
    `metadata: {"kyok": {"sessionId": "<session_id>"}}`.
 3. `api_agui.py::_build_forwarded_props`, seeing `metadata.kyok.
    sessionId`, mints a token via `souk.kyok.issue_kyok_token(run_id,
-   session_id, agent_id)` — souk already knows `agent_id` at this point,
+   session_id, agent)` — souk already knows which agent this is,
    the run's own — and places it in the AG-UI `forwardedProps` delivered
    to the provider: `forwardedProps.kyok = {"token": "..."}`.
    `forwardedProps` is the existing AG-UI passthrough field for exactly

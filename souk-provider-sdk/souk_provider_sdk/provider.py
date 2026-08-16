@@ -8,7 +8,7 @@ which one a run is for.
 
 The name rather than an id: within one provider a name is unique, and the
 provider already knows its own key. souk mints no identifier for anyone to
-hold (see docs/retiring-agent-id.md).
+hold — souk mints no id for a provider to keep.
 """
 
 from __future__ import annotations

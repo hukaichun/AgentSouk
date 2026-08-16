@@ -32,6 +32,6 @@ from __future__ import annotations
 CLAIMED_RUN_FIELDS = frozenset({"run_id", "agent", "thread_id", "run_input"})
 
 # What identifies the agent on a delivered run. The pair is the identity (see
-# docs/retiring-agent-id.md); the loop routes on the name because within one
+# `library-architecture.md`); the loop routes on the name because within one
 # provider a name is unique and the provider already knows its own key.
 AGENT_FIELDS = frozenset({"provider_key", "name"})
