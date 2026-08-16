@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, insert, inspect, or_, select, text, update
+from sqlalchemy import delete, func, insert, inspect, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -35,6 +35,14 @@ from souk.identity import provider_fingerprint
 from souk.ids import new_id
 from souk.models import AgentRecord, AgentRef, AgentSummary, RunRecord
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
+
+
+# The statuses that mean a run is not finished with. Defined once because
+# three questions ask it — whether a thread already has a run in flight,
+# whether an agent can be deleted, and what a sweep may reap — and they must
+# not drift apart. `input-required` is in here and is the one a plausible
+# shorter list omits: that run is paused on a human who is coming back.
+ACTIVE_RUN_STATUSES = ["queued", "running", "cancelling", "input-required"]
 
 
 def _utcnow() -> datetime:
@@ -156,18 +164,28 @@ async def register_agents(
     public_key: str,
     agents_batch: list[dict[str, Any]],
     provider_name: str | None = None,
-) -> dict[str, str]:
-    """Upserts this batch under `public_key`, then de-lists (soft-delete)
-    anything previously owned by this same `public_key` that's absent from
-    it — the batch is treated as the declarative full statement of "what
-    this identity currently offers" (see the module-level design notes in
-    the project plan: this is what makes a plain re-registration call the
-    entire de-listing UX, no separate endpoint needed).
+    online_window_seconds: int = 60,
+) -> dict[str, AgentRef]:
+    """Upserts this batch under `public_key`, and marks anything previously
+    registered by that key but absent from it **offline** — not gone.
+
+    Absence used to de-list, on the reasoning that a batch is the declarative
+    full statement of what an identity offers, which made re-registration the
+    whole de-listing UX with no separate endpoint needed. That is a
+    convenience argument, and it bought the convenience with a failure of
+    exactly issue #37's shape: silent and indistinguishable from healthy. A
+    provider that starts with a partial list — a config error, a flag off,
+    half a deploy, a loop over the wrong collection — de-listed everything it
+    failed to mention, logged nothing, and went on claiming for those agents
+    successfully, because ownership never consulted `delisted_at` either.
+
+    Removing an agent is `delete_agent`, which cannot be reached by accident.
+    That is the whole argument.
 
     `name` is not exclusive — a different public_key may freely reuse the
     same name (see the UNIQUE(public_key, name) constraint in souk/schema.py).
-    A name reappearing after being de-listed clears delisted_at again
-    (self-heal).
+    A name that went quiet and comes back in a later batch is simply seen
+    again.
 
     Returns this batch's `AgentRef`s indexed by name — the pairs, which the
     caller already knew, rather than ids souk minted for it to hold. Handing
@@ -196,27 +214,28 @@ async def register_agents(
             last_seen_at=now,
         )
         # joined_at is deliberately left out of the update set — an existing
-        # row keeps its original join time; only a re-list clears delisted_at.
+        # row keeps its original join time.
         stmt = stmt.on_conflict_do_update(
             index_elements=[agents.c.provider_key, agents.c.name],
             set_={
                 "agent_card": stmt.excluded.agent_card,
                 "metadata": stmt.excluded.metadata,
                 "last_seen_at": now,
-                "delisted_at": None,
             },
         )
         await session.execute(stmt)
         registered[name] = AgentRef(provider_key=public_key, name=name)
 
+    # Backdated rather than left to age out: this provider just told souk
+    # what it currently offers, so an omission is a departure souk witnessed,
+    # the same as detach_provider's.
     await session.execute(
         update(agents)
         .where(
             agents.c.provider_key == public_key,
-            agents.c.delisted_at.is_(None),
             agents.c.name.notin_(list(registered)),
         )
-        .values(delisted_at=now)
+        .values(last_seen_at=now - timedelta(seconds=online_window_seconds + 1))
     )
     await session.commit()
     return registered
@@ -270,8 +289,10 @@ async def mark_agent_offline(session: AsyncSession, agent: AgentRef, online_wind
 
 
 async def get_agent(session: AsyncSession, agent: AgentRef) -> AgentRecord | None:
-    """Direct, always-unambiguous lookup by the identity itself — a delisted
-    agent is treated as not found, same as one that never existed."""
+    """Direct, always-unambiguous lookup by the identity itself. An agent
+    exists or it does not — there is no third state, since absence from a
+    registration batch marks it offline rather than hiding it (see
+    register_agents) and removing one is `delete_agent`."""
     row = (
         await session.execute(
             select(
@@ -284,7 +305,6 @@ async def get_agent(session: AsyncSession, agent: AgentRef) -> AgentRecord | Non
             ).where(
                 agents.c.provider_key == agent.provider_key,
                 agents.c.name == agent.name,
-                agents.c.delisted_at.is_(None),
             )
         )
     ).mappings().first()
@@ -304,7 +324,6 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
     ambiguous — the pair is either registered or it is not — and callers
     have nothing to disambiguate and no 409 to surface.
 
-    A delisted agent is not found, same as get_agent_by_id.
     """
     row = (
         await session.execute(
@@ -322,7 +341,6 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
             .where(
                 or_(agents.c.provider_key == provider, providers.c.fingerprint == provider),
                 agents.c.name == name,
-                agents.c.delisted_at.is_(None),
             )
         )
     ).mappings().first()
@@ -347,7 +365,7 @@ async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[
                 agents.c.joined_at,
                 agents.c.last_seen_at,
             )
-            .where(agents.c.name == name, agents.c.delisted_at.is_(None))
+            .where(agents.c.name == name)
             .order_by(agents.c.joined_at)
         )
     ).mappings().all()
@@ -379,7 +397,7 @@ async def list_agents(
             .select_from(
                 agents.outerjoin(providers, providers.c.public_key == agents.c.provider_key)
             )
-            .where(agents.c.delisted_at.is_(None), agents.c.last_seen_at >= stale_cutoff)
+            .where(agents.c.last_seen_at >= stale_cutoff)
             .order_by(agents.c.name)
         )
     ).mappings().all()
@@ -396,6 +414,55 @@ async def list_agents(
         )
         for row in rows
     ]
+
+
+async def count_threads_for_agent(session: AsyncSession, agent: AgentRef) -> int:
+    """How many conversations this agent has. Zero is what makes it
+    deletable (see Souk.delete_agent).
+
+    Threads are sufficient on their own: a run always lives in a thread owned
+    by the same agent (`ensure_thread` raises otherwise) and a message lives
+    in a run's thread, so no history of any kind can exist for an agent with
+    no threads. `delete_agent` checks the runs too — the sentence above is an
+    invariant, and invariants are what quietly stop being true.
+    """
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(threads)
+            .where(
+                threads.c.provider_key == agent.provider_key,
+                threads.c.agent_name == agent.name,
+            )
+        )
+    ).scalar_one()
+
+
+async def count_runs_for_agent(session: AsyncSession, agent: AgentRef, statuses: list[str] | None = None) -> int:
+    """Runs for this agent, optionally only those in `statuses`."""
+    where = [runs.c.provider_key == agent.provider_key, runs.c.agent_name == agent.name]
+    if statuses is not None:
+        where.append(runs.c.status.in_(statuses))
+    return (
+        await session.execute(select(func.count()).select_from(runs).where(*where))
+    ).scalar_one()
+
+
+async def delete_agent(session: AsyncSession, agent: AgentRef) -> bool:
+    """Removes the row. One statement, no cascade — everything that would
+    need cascading is what `Souk.delete_agent` refuses to delete over.
+
+    False if there was nothing to remove, which the caller has already
+    checked for; it is returned rather than raised because a second delete of
+    the same agent is not an error, it is a no-op someone repeated.
+    """
+    result = await session.execute(
+        delete(agents).where(
+            agents.c.provider_key == agent.provider_key, agents.c.name == agent.name
+        )
+    )
+    await session.commit()
+    return result.rowcount > 0
 
 
 async def get_agent_name_for_public_key(session: AsyncSession, public_key: str) -> str | None:
@@ -724,7 +791,7 @@ async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> di
             select(runs)
             .where(
                 runs.c.thread_id == thread_id,
-                runs.c.status.in_(["queued", "running", "cancelling", "input-required"]),
+                runs.c.status.in_(ACTIVE_RUN_STATUSES),
             )
             .order_by(runs.c.created_at.desc())
             .limit(1)

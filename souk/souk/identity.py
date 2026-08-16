@@ -93,15 +93,42 @@ def is_timestamp_fresh(timestamp: int) -> bool:
     return abs(time.time() - timestamp) <= SIGNATURE_FRESHNESS_WINDOW_SECONDS
 
 
+# What a signed request is *for*. Every signing payload starts with one of
+# these, so a signature captured for one operation cannot be presented as
+# another.
+#
+# This is not defensive habit; it closes a hole that was measured. Before it,
+# a registration signed `"translator:1755300000"` — and the obvious payload
+# for deleting one agent is the same name and the same timestamp, byte for
+# byte. Anyone who merely observed a provider register a single agent held a
+# valid order to delete it, for as long as the freshness window allows.
+#
+# The hole predates deletion: with only one signed operation there was nothing
+# to be confused with. Adding a second is what made it reachable, which is why
+# the prefixes arrive with it rather than after.
+_REGISTER = "souk-register"
+_DELETE_AGENT = "souk-delete-agent"
+
+
 def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
     """What a registration signs: which names are being claimed, and when.
 
     The identity itself is not in here and does not need to be — the
     signature is verified against the public_key presented alongside, so a
     captured payload cannot be re-presented under a different key. What must
-    be covered is what the request *claims* (the names) and its freshness.
+    be covered is what the request *claims* (the names), which operation it
+    is asking for, and its freshness.
     """
-    return f"{','.join(sorted(agent_names))}:{timestamp}".encode()
+    return f"{_REGISTER}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+
+
+def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:
+    """What deleting one agent signs.
+
+    One name, never a batch: deleting is not something to do by accident to a
+    list. Registration is declarative and idempotent; this is neither.
+    """
+    return f"{_DELETE_AGENT}:{agent_name}:{timestamp}".encode()
 
 
 # How long one freshly-signed hop stays usable. Only the last hop's expiry

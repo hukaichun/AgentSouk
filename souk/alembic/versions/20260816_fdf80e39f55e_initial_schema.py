@@ -1,8 +1,8 @@
 """initial schema
 
-Revision ID: 9b22d55e32fc
+Revision ID: fdf80e39f55e
 Revises: 
-Create Date: 2026-08-16 15:33:51.375612
+Create Date: 2026-08-16 16:42:25.806501
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = '9b22d55e32fc'
+revision: str = 'fdf80e39f55e'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -39,7 +39,6 @@ def upgrade() -> None:
     sa.Column('metadata', _JSON, nullable=False),
     sa.Column('joined_at', sa.DateTime(timezone=True), nullable=False),
     sa.Column('last_seen_at', sa.DateTime(timezone=True), nullable=False),
-    sa.Column('delisted_at', sa.DateTime(timezone=True), nullable=True),
     sa.ForeignKeyConstraint(['provider_key'], ['providers.public_key'], ),
     sa.PrimaryKeyConstraint('provider_key', 'name')
     )

@@ -80,43 +80,40 @@ async def test_the_same_name_under_two_identities_is_two_agents(session, new_ide
     } == {result_a["greeter"], result_b["greeter"]}
 
 
-async def test_omitting_an_agent_soft_delists_it_and_reappearing_undoes_it(session, souk, new_identity):
+async def test_omitting_an_agent_takes_it_offline_rather_than_removing_it(
+    session, souk, new_identity
+):
+    """The change this rule exists for.
+
+    Absence from a batch used to de-list, which made a plain re-registration
+    the whole removal UX — and made a provider that started with a partial
+    list (a config error, a flag off, half a deploy) silently remove
+    everything it failed to mention, with clean logs. It goes offline now:
+    still registered, still addressable, off the roster because nobody is
+    serving it. Removing is `Souk.delete_agent`, which cannot be reached by
+    accident.
+    """
     identity = new_identity()
     both = [{"name": "greeter"}, {"name": "translator"}]
 
     registered = await repo.register_agents(session, identity.public_key, both)
     translator = registered["translator"]
 
-    # Re-register with translator omitted — the batch is the declarative
-    # full statement of what this identity offers now.
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
 
-    row = (
-        await session.execute(
-            select(agents.c.delisted_at).where(
-                agents.c.provider_key == translator.provider_key,
-                agents.c.name == translator.name,
-            )
-        )
-    ).mappings().first()
-    assert row["delisted_at"] is not None
+    # Offline immediately — a departure souk witnessed, not one it has to
+    # wait out — but still on the roster, because it is still registered.
+    # Dropping off that list is what `stale_hidden_window_seconds` does much
+    # later, and it is a read-time filter, not a removal.
+    listed = {a.name: a.online for a in await _listed(session, souk)}
+    assert listed == {"greeter": True, "translator": False}
+    # Still there, and still addressable by whoever knows its name.
+    assert await repo.resolve_agent(session, identity.public_key, "translator") is not None
+    assert await repo.get_agent(session, translator) is not None
 
-    names_after_delist = [a.name for a in await _listed(session, souk)]
-    assert names_after_delist == ["greeter"]
-
-    # Reappearing in a later batch clears delisted_at again (self-heal).
+    # And offering it again is all it takes to be available once more.
     await repo.register_agents(session, identity.public_key, both)
-    row = (
-        await session.execute(
-            select(agents.c.delisted_at).where(
-                agents.c.provider_key == translator.provider_key,
-                agents.c.name == translator.name,
-            )
-        )
-    ).mappings().first()
-    assert row["delisted_at"] is None
-    names_after_return = sorted(a.name for a in await _listed(session, souk))
-    assert names_after_return == ["greeter", "translator"]
+    assert all(a.online for a in await _listed(session, souk))
 
 
 async def test_list_agents_excludes_stale_and_reports_online(session, souk, new_identity):
@@ -198,14 +195,20 @@ async def test_resolving_an_agent_a_provider_never_registered_is_a_miss(session,
     assert await repo.resolve_agent(session, new_identity().public_key, "translator") is None
 
 
-async def test_a_delisted_agent_is_not_addressable(session, new_identity):
-    """Same rule as every other lookup: de-listed is not found, and the
-    audit trail survives regardless."""
+async def test_an_agent_that_went_quiet_is_still_addressable(session, new_identity):
+    """The inverse of the old rule, and the point of it.
+
+    This used to assert that an omitted agent became unfindable. It stays
+    findable: it is registered, souk simply has no reason to believe anyone is
+    serving it. Anything holding its name — a delegation config, a bookmarked
+    address — keeps resolving, and starts working again the moment its
+    provider comes back.
+    """
     identity = new_identity()
     await repo.register_agents(session, identity.public_key, [{"name": "translator"}])
     await repo.register_agents(session, identity.public_key, [{"name": "summarizer"}])
 
-    assert await repo.resolve_agent(session, identity.public_key, "translator") is None
+    assert await repo.resolve_agent(session, identity.public_key, "translator") is not None
     assert await repo.resolve_agent(session, identity.public_key, "summarizer") is not None
 
 

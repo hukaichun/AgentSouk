@@ -133,12 +133,6 @@ agents = Table(
     Column("metadata", _JSON, nullable=False, default=dict),
     Column("joined_at", _TS, nullable=False, default=_utcnow),
     Column("last_seen_at", _TS, nullable=False, default=_utcnow),
-    # Soft-delist marker, NULL = listed. Set when a registration batch from
-    # this provider omits a previously-registered name (see
-    # repo.register_agents), or cleared again if it reappears in a later
-    # batch. Never hard-deleted — threads and runs still reference the agent,
-    # and the audit trail should survive de-listing.
-    Column("delisted_at", _TS, nullable=True),
 )
 
 

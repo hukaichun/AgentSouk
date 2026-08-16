@@ -35,10 +35,11 @@ from souk.broker import FinishStream, RelayEvent, RunBroker, RunSnapshot
 from souk.changes import ChangeEvent, RosterChanged, RunStatusChanged
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, EXPECTED_SCHEMA_REVISION, quoted_schema
-from souk.errors import AgentNotFound, InvalidRegistration
+from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration
 from souk.handlers import make_handlers
 from souk.health import run_health_sweeps_forever
 from souk.identity import (
+    agent_deletion_signing_payload,
     is_timestamp_fresh,
     issue_session_token,
     registration_signing_payload,
@@ -362,7 +363,11 @@ class Souk:
 
         async with self.session() as session:
             registered = await repo.register_agents(
-                session, public_key, agents, provider_name=provider_name
+                session,
+                public_key,
+                agents,
+                provider_name=provider_name,
+                online_window_seconds=self.settings.online_window_seconds,
             )
         # Covers more than "an agent appeared": re-registering without a
         # name delists it, so this is also how a removal is announced.
@@ -371,6 +376,80 @@ class Souk:
             agents=registered,
             session_token=issue_session_token(public_key, self.settings.token_signing_secret),
         )
+
+    async def delete_agent(
+        self, public_key: str, name: str, signature: str, timestamp: int
+    ) -> None:
+        """Remove an agent this key registered and nothing has ever used.
+
+        Signed, like registering, and for the same reason: an agent belongs to
+        a keypair, and sharing souk's process is not evidence of holding it.
+        The payload is domain-separated from a registration's — before that,
+        the two were byte-identical for a single agent, so observing a
+        provider register one was enough to hold a valid order to delete it
+        (measured, not imagined; see souk/identity.py).
+
+        Refused unless all four hold. The first three are "nothing is using it
+        right now"; the fourth is "nothing ever did":
+
+        - not online — a provider still checking in is still serving it;
+        - no attached in-process worker — a wedged worker can be offline *and*
+          attached, and both are evidence;
+        - no active run, `input-required` included: that one is paused on a
+          human who is coming back, and it is what a narrower liveness check
+          would miss;
+        - **no threads at all.** A thread must name an agent, so an agent with
+          threads cannot be removed — the foreign key and the rule are the
+          same statement rather than an obstacle to work around. It also means
+          this can never reach a caller's messages, which souk stores
+          deliberately so it is a source of truth for the whole conversation
+          rather than half of it.
+
+        So what is left is a single-row delete with no cascade. `AgentInUse`
+        carries which check refused.
+        """
+        if not is_timestamp_fresh(timestamp):
+            raise InvalidRegistration("deletion timestamp too far from souk's clock")
+        if not verify_signature(
+            public_key, signature, agent_deletion_signing_payload(name, timestamp)
+        ):
+            raise InvalidRegistration("invalid deletion signature")
+
+        agent = AgentRef(provider_key=public_key, name=name)
+        async with self.session() as session:
+            record = await repo.get_agent(session, agent)
+            if record is None:
+                raise AgentNotFound(f"agent '{agent}' is not registered")
+            if repo.is_agent_online(record.last_seen_at, self.settings.online_window_seconds):
+                raise AgentInUse(f"agent '{agent}' is online", reason="online")
+
+            worker = self._workers.get(public_key)
+            if worker is not None and name in worker.agent_names:
+                raise AgentInUse(
+                    f"agent '{agent}' is attached in this process", reason="attached"
+                )
+
+            active = await repo.count_runs_for_agent(
+                session, agent, repo.ACTIVE_RUN_STATUSES
+            )
+            if active:
+                raise AgentInUse(
+                    f"agent '{agent}' has {active} active run(s)", reason="active_run"
+                )
+            # Checked alongside threads rather than trusting that one implies
+            # the other — see repo.count_threads_for_agent.
+            if await repo.count_threads_for_agent(session, agent) or await repo.count_runs_for_agent(
+                session, agent
+            ):
+                raise AgentInUse(
+                    f"agent '{agent}' has a conversation behind it and cannot be removed — "
+                    "stop offering it instead, and it goes offline and off the roster with "
+                    "its record intact",
+                    reason="has_history",
+                )
+
+            await repo.delete_agent(session, agent)
+        self._notify_change(RosterChanged())
 
     async def claim_work(
         self,
