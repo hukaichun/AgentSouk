@@ -14,7 +14,7 @@ hold — souk mints no id for a provider to keep.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -22,6 +22,32 @@ class Provider(Protocol):
     """One identity offering one or more agents."""
 
     def run_stream(self, agent_name: str, run_input: dict[str, Any]) -> AsyncIterator[Any]: ...
+
+
+@dataclass(frozen=True)
+class DeliveredRun:
+    """One run handed to this provider — this package's own type, on purpose.
+
+    The loop used to read `run.run_id`, `run.agent.name` and `run.run_input`
+    straight off whatever souk delivered, which made souk's `ClaimedRun` part
+    of this package's interface without either side saying so. It broke once
+    exactly that way: souk handed over its dispatch object, whose input field
+    is `input_json`, and the first real provider died with an AttributeError
+    on its first run.
+
+    So the loop reads this instead, and building one from whatever the other
+    side actually sends is the integrator's job — the one place that is
+    entitled to know both shapes. See `contract.py`.
+
+    `agent_name` rather than the pair: within one provider a name is unique,
+    and the provider already knows its own key.
+    """
+
+    run_id: str
+    agent_name: str
+    run_input: dict[str, Any]
+    thread_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

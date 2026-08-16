@@ -33,9 +33,10 @@ from sqlalchemy import delete
 from souk.broker import RunBroker
 from souk.config import CoreSettings
 from souk.core import Souk
+
 from souk.models import AgentRef
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
-from souk_provider_sdk import ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessProvider, ProviderIdentity, ProviderRuntime
 
 DB = Path(tempfile.gettempdir()) / "souk_probe_silence.db"
 URL = f"sqlite+aiosqlite:///{DB}"
@@ -109,10 +110,10 @@ async def main() -> int:
     print("\n[1] a provider attaches for a name it never registered")
     identity = ProviderIdentity(Ed25519PrivateKey.generate())
     await register(souk, identity, "translator")
-    runtime = ProviderRuntime(identity, Agent(), souk)
+    runtime = ProviderRuntime(identity, Agent())
     runtime.start()
     try:
-        await souk.attach_provider(runtime, ["translatr"])
+        await souk.attach_provider(InProcessProvider(souk, runtime), ["translatr"])
         outcome = "attached, and will now be offered nothing, forever"
         silent = True
     except Exception as exc:
@@ -153,9 +154,9 @@ async def main() -> int:
     print("[3] souk's database is replaced while a provider stays attached")
     identity = ProviderIdentity(Ed25519PrivateKey.generate())
     await register(souk, identity, "steady")
-    runtime = ProviderRuntime(identity, Agent(), souk)
+    runtime = ProviderRuntime(identity, Agent())
     runtime.start()
-    await souk.attach_provider(runtime, ["steady"])
+    await souk.attach_provider(InProcessProvider(souk, runtime), ["steady"])
     async with souk.session() as session:
         for table in (run_events, thread_messages, runs, threads, agents, providers):
             await session.execute(delete(table))

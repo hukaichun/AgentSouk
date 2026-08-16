@@ -21,7 +21,6 @@ __all__ = [
     "AgentNotFound",
     "InvalidRegistration",
     "KyokRejected",
-    "AmbiguousAgentName",
     "InvalidRunInput",
     "ProviderFingerprintTaken",
     "RunNotFound",
@@ -38,19 +37,6 @@ class SoukError(Exception):
 class AgentNotFound(SoukError):
     """No agent under this id or name — or it has been de-listed, which
     callers see as the same thing."""
-
-
-class AmbiguousAgentName(SoukError):
-    """A display name resolved to more than one agent. Names are not
-    exclusive across identities (see repo.register_agents), so this is a
-    normal outcome the caller has to disambiguate, not a failure.
-    `candidates` carries what it needs to choose.
-    """
-
-    def __init__(self, name: str, candidates: list[dict]) -> None:
-        super().__init__(f"agent name '{name}' matches {len(candidates)} agents")
-        self.name = name
-        self.candidates = candidates
 
 
 class AgentInUse(SoukError):

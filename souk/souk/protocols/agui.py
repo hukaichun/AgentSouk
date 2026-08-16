@@ -62,23 +62,16 @@ class ThreadSnapshot:
 
 class AGUIAdapter:
     """AG-UI semantics over a Souk. Construct one per souk; it holds no
-    per-request state."""
+    per-request state.
+
+    Takes an `AgentRef` and never a bare display name: names are not
+    exclusive across identities, so a name is not an address. AG-UI's own
+    request body has no agent field at all — which agent this is comes from
+    wherever the gateway put it, and the gateway is what knows the pair.
+    """
 
     def __init__(self, souk: "Souk") -> None:
         self._souk = souk
-
-    async def resolve_agent_id(self, name: str) -> str:
-        """A display name to an agent. Raises AgentNotFound for none and
-        AmbiguousAgentName for several — a name is not exclusive across
-        identities, so both are ordinary outcomes."""
-        from souk.errors import AmbiguousAgentName
-
-        candidates = await self._souk.resolve_agents_by_name(name)
-        if not candidates:
-            raise AgentNotFound(f"agent '{name}' is not registered")
-        if len(candidates) > 1:
-            raise AmbiguousAgentName(name, candidates)
-        return candidates[0]["agent"]
 
     async def run(self, agent: AgentRef, body: RunAgentInput) -> EventStream | ThreadSnapshot:
         """Start a run for `agent` from a real `ag_ui.core.RunAgentInput`.
@@ -89,8 +82,11 @@ class AGUIAdapter:
         """
         souk = self._souk
         async with souk.session() as session:
-            agent = await repo.get_agent_by_id(session, agent)
-            if agent is None:
+            # An existence check and nothing more — deliberately not rebound
+            # to the record it returns. Everything below takes the `AgentRef`
+            # this was called with; an `AgentRecord` is a different type that
+            # merely happens to carry the same two fields.
+            if await repo.get_agent(session, agent) is None:
                 raise AgentNotFound(f"agent '{agent}' is not registered")
 
             # Not a declared field on ag_ui.core.RunAgentInput (extra="allow"
@@ -151,7 +147,7 @@ class AGUIAdapter:
             # already knows the target is offline, don't queue at all — emit
             # a terminal event and close, instead of opening a stream that
             # would sit idle until the broker gave up on it.
-            if not souk.is_serving(AgentRef(provider_key=agent.provider_key, name=agent.name)):
+            if not souk.is_serving(agent):
                 await souk.mark_run_status(
                     session, run_id, "failed", metadata={"failureReason": "agent_offline"}
                 )

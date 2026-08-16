@@ -87,10 +87,6 @@ async def test_roster_and_agent_lookup(souk, new_identity, attach):
     assert (await souk.list_agents())[0].online is True
 
     assert (await souk.get_agent(agent_id)).name == "echo"
-    assert [
-        AgentRef(provider_key=a["provider_key"], name=a["name"])
-        for a in await souk.resolve_agents_by_name("echo")
-    ] == [agent_id]
     assert await souk.get_agent(AgentRef(provider_key=agent_id.provider_key, name="nope")) is None
 
 

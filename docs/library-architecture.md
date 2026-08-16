@@ -384,6 +384,124 @@ run ignores it. Which is the same answer souk gives everywhere else: it
 carries data to a provider and checks it arrived, and how that provider
 arranges itself is its own business.
 
+### A display name is not an address, so core stopped resolving one
+
+Both protocol adapters used to carry a `resolve_agent(name)` — a bare display
+name in, one agent out, `AgentNotFound` for none and `AmbiguousAgentName` for
+several. It existed to serve `POST /agui/{name}` and `/a2a/{name}/...`, and
+it is gone, along with `Souk.resolve_agents_by_name`, its repo query and the
+error.
+
+The AG-UI half had never worked. It returned `candidates[0]["agent"]`, and
+the row it indexes has no `agent` key — `provider_key, name, agent_card,
+metadata, joined_at, last_seen_at` — so it raised `KeyError('agent')` on
+every name including the one-match happy path (#41). Its A2A sibling was
+carried across correctly in the same change.
+
+Pulling on that found the larger fact: **`AGUIAdapter` had no test at all**,
+and its other method was dead too. `run` opened with
+`repo.get_agent_by_id(session, agent)`, a function that does not exist in
+`repo` — `AttributeError` on line one, every call. Worse than the name was
+the shape: it rebound `agent` to the record it expected back, while
+`ensure_thread`, `create_run` and `enqueue_run` all take an `AgentRef`. That
+would have passed the wrong type to three call sites, and only escaped
+notice at the fourth because `AgentRecord` happens to carry the same two
+field names. The lookup is an existence check, so it no longer rebinds
+anything, and `is_serving(agent)` stopped rebuilding a ref it was already
+holding.
+
+`A2AAdapter` is used in thirteen places across two test modules and was
+fine. `AGUIAdapter` was imported by nothing, and both of its methods were
+broken — which is the whole lesson, and why `tests/test_agui_adapter.py`
+now exists. A green suite says nothing about code no test imports.
+
+The reason to delete rather than fix is that no protocol asks for it.
+AG-UI's `RunAgentInput` has no agent field at all — `thread_id, run_id,
+parent_run_id, state, messages, tools, context, forwarded_props, resume` —
+so which agent a request means always comes from outside the body, and since
+`ServedInterface` moved route layout out of core (see its note), what the
+path segment *is* became the gateway's choice. A gateway that puts the pair
+in the URL needs no resolution, and a standard client neither knows nor
+cares: it uses the URL it was handed.
+
+That leaves resolution as a convenience for humans typing URLs, bought at the
+price of a second way to address an agent — one that can return the wrong
+agent's answer the moment two providers pick the same name, which
+`register_agents` explicitly permits. A gateway that wants friendly URLs can
+still keep its own name table; what it must not do is push the guess down
+into core, where the pair is the identity and there is no other.
+
+Browsing for who offers a name is `list_agents`, which answers with all of
+them and asks the caller to choose.
+
+### The provider SDK names nothing of souk's, and one adapter joins them
+
+`souk_provider_sdk` could not import souk — that was the boundary — but it
+reached the other way freely, and nothing recorded that it did. The loop read
+`run.run_id`, `run.agent.name` and `run.run_input` off whatever souk
+delivered, and called `souk.report_event` / `souk.finish_run` by name. Souk's
+model fields, method names and argument order were all part of that package's
+interface with neither side declaring it, and it broke exactly there: souk
+handed over its own dispatch object, whose input field is `input_json`, and
+the first real provider died with an `AttributeError` on its first run.
+
+An import graph is not a boundary. What made the coupling invisible is that
+it never showed up as a dependency — the package's own `pyproject.toml`
+proved it did not depend on souk, and it was still wired into souk's API
+shape at four call sites.
+
+There are three kinds of agreement here and only two of them are removable:
+
+- **API** — calling souk's methods. Removed. Results now leave through
+  `on_event(run_id, event)` and `on_finish(run_id)`, two synchronous
+  callables the caller supplies.
+- **Type** — reading souk's objects. Removed. Runs arrive as `DeliveredRun`,
+  the SDK's own frozen dataclass.
+- **Protocol** — the registration signing payload in `identity.py`. *Not*
+  removable, and not coupling: those bytes must match souk's verifier exactly
+  or nothing can register at all. It is a wire format both sides implement,
+  stated independently on each side rather than shared, because something
+  derived from souk agrees with souk by construction and checks nothing.
+
+What is left is one class, `souk_provider_sdk.SoukConnection`, and the
+translation happens there once for every transport that will ever exist:
+
+    souk's ClaimedRun ──▶ DeliveredRun ──▶ however this transport carries it
+
+`deliver` is concrete and holds every souk field name this package depends
+on. Subclasses implement `offer(DeliveredRun) -> bool` and `cancel(run_id)`,
+and declare `public_key` and `max_concurrent_runs` — nothing else differs
+between a function call and a socket. `InProcessProvider` is one
+implementation; a gateway's `SocketProvider`, which answers `offer` with a
+frame and an ack, is another. In-process is a transport, not a special case.
+
+Only the souk-facing half is in the base. Reporting events back is not, and
+cannot be: in-process the runtime is right there and its callbacks go
+straight to souk, but over a wire the connection souk talks to lives in the
+gateway while the runtime is on the far side of the socket. A base covering
+both directions would fit exactly one of them.
+
+It ships from **the SDK**, and the reason is a dependency asymmetry rather
+than a preference. Nothing in it imports souk — every souk name is reached by
+attribute — so putting it here costs nothing and the SDK's `pyproject.toml`
+stays `cryptography` + `pyjwt`, which is the evidence that the boundary is
+real. Putting it in souk was tried first and does not have that property:
+building a `DeliveredRun` needs the class, so souk would take a real
+dependency on the SDK to ship it. Zero against one is not a trade.
+
+An abstraction with one implementation is a class with extra steps, so the
+SDK's suite writes a second one — a queue with an ack, holding no runtime,
+which is the shape a gateway-side connection has — and drives the base
+through it (`souk-provider-sdk/tests/test_connection.py`).
+
+`souk_provider_sdk/contract.py` states the shapes the adapter must satisfy —
+`DELIVERED_RUN_FIELDS`, `REPORT_CALLBACKS`, `CONNECTED_PROVIDER_ATTRS` — and
+souk's suite asserts they still hold, so a change on either side fails at
+merge time rather than at a customer. That check earned itself immediately:
+`ConnectedProvider` is *four* things, not the three its own docstring claims,
+and the first adapter omitted `max_concurrent_runs` — which constructs and
+attaches cleanly, then fails inside the broker at registration.
+
 ### In-process is not trusted
 
 The first version of attaching an agent put an object in a dictionary. That
