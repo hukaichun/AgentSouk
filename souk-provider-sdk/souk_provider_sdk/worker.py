@@ -39,6 +39,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
+from souk_provider_sdk.contract import RECOGNISED_SOUK_ERRORS
 from souk_provider_sdk.identity import ProviderIdentity
 from souk_provider_sdk.provider import Provider
 
@@ -174,6 +175,10 @@ class ProviderWorker:
         souk's exception classes — the same reason the signing payloads are
         this package's own."""
         name = type(exc).__name__
+        if name not in RECOGNISED_SOUK_ERRORS:
+            logger.exception("claim loop failed; retrying", exc_info=exc)
+            await asyncio.sleep(self.poll_interval_seconds)
+            return
         if name == "NothingOwned":
             # Nothing to claim, ever, until someone registers these names
             # again. Stay alive and be loud: the names do not change, so this
@@ -187,15 +192,15 @@ class ProviderWorker:
                 )
                 self._unowned = True
             await asyncio.sleep(self.long_poll_seconds)
-        elif name == "InvalidRegistration" and self.renew_token is not None:
+        elif self.renew_token is not None:
             try:
                 self.session_token = await self.renew_token()
             except Exception:
                 logger.exception("could not renew the session token")
                 await asyncio.sleep(self.poll_interval_seconds)
         else:
-            logger.exception("claim loop failed; retrying", exc_info=exc)
-            await asyncio.sleep(self.poll_interval_seconds)
+            logger.error("session token is invalid and this worker cannot renew it")
+            await asyncio.sleep(self.long_poll_seconds)
 
     def _capacity(self) -> int | None:
         if self.max_claim is None:

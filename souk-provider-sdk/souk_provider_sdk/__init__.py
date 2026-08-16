@@ -10,6 +10,11 @@ An in-process provider needs nothing else — a `Souk` object satisfies
 `SoukConnection` structurally, so pass one straight to `ProviderWorker`.
 """
 
+from souk_provider_sdk.contract import (
+    AGENT_FIELDS,
+    CLAIMED_RUN_FIELDS,
+    RECOGNISED_SOUK_ERRORS,
+)
 from souk_provider_sdk.identity import (
     ProviderIdentity,
     deletion_payload,
@@ -19,7 +24,10 @@ from souk_provider_sdk.provider import AgentHandle, HandleProvider, Provider
 from souk_provider_sdk.worker import ProviderWorker, SoukConnection
 
 __all__ = [
+    "AGENT_FIELDS",
     "AgentHandle",
+    "CLAIMED_RUN_FIELDS",
+    "RECOGNISED_SOUK_ERRORS",
     "HandleProvider",
     "Provider",
     "ProviderIdentity",
