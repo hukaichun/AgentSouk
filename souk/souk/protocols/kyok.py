@@ -35,7 +35,7 @@ logger = logging.getLogger("souk.protocols.kyok")
 
 # How long a provider's completion waits, queued, for the caller's bridge to
 # notice it before souk gives up — the KYOK counterpart of a run's
-# queued_timeout_seconds, kept separate because a completion is expected to be
+# the broker's queued timeout, kept separate because a completion is expected to be
 # claimed far faster: the bridge is meant to be polling continuously for the
 # run's whole duration, not discovering work cold.
 CLAIM_TIMEOUT_SECONDS = 30.0

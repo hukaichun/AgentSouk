@@ -1,0 +1,27 @@
+[project]
+name = "souk-provider-sdk"
+version = "0.1.0"
+description = "What a provider and souk agree on, from the provider's side: identity, the port, and the provider's own worker loop"
+requires-python = ">=3.12"
+# One dependency, and the list is the point. This package defines an
+# interaction, not a transport: no httpx, no websockets, no grpcio, and no
+# souk either. A network binding is downstream's to build, and if this list
+# ever grows one of those, the boundary was not real.
+#
+# Not depending on souk is what makes the signing payloads in identity.py a
+# second opinion rather than an echo — see that module.
+dependencies = [
+    "cryptography>=42.0",
+    # Actor-chain hops are JWTs. Signing, not transport.
+    "pyjwt[crypto]>=2.9",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

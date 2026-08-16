@@ -1,11 +1,3 @@
-"""souk used as a library: attach an agent, start a run, ask what happened.
-
-Everything here goes through `Souk`'s own methods — no repo calls, no broker
-access, no HTTP client, no ports bound. That is the point of the facade: an
-embedding caller shouldn't need to know souk's internals exist, and if these
-tests ever need to reach past `souk.` to do something ordinary, the facade is
-missing a method.
-"""
 
 from __future__ import annotations
 
@@ -19,8 +11,6 @@ from souk.models import AgentRef
 
 
 class EchoProvider:
-    """An in-process provider, in the shape souk's port asks for: told which
-    agent each run is for, streaming AG-UI events back."""
 
     async def run_stream(self, agent_id: str, run_input: dict):
         text = run_input["messages"][-1]["content"] if run_input.get("messages") else ""
@@ -32,9 +22,6 @@ class EchoProvider:
 
 
 class NeverFinishesProvider:
-    """Starts, then waits forever. Ends without RUN_FINISHED when its worker
-    stops it — the only way AG-UI can express "stopped without finishing"
-    (see handlers._handle_finish)."""
 
     async def run_stream(self, agent_id: str, run_input: dict):
         yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
@@ -48,8 +35,6 @@ async def _register(souk, name: str, identity) -> str:
 
 
 async def _register_with_token(souk, name: str, identity):
-    """Registration through souk's own door, which is the only one that
-    hands back a session token — what a worker needs to claim with."""
     body = identity.register_body([{"name": name}])
     return await souk.register_agents(
         body["public_key"], body["signature"], body["timestamp"], body["agents"]
@@ -62,15 +47,13 @@ async def _until(predicate, timeout: float = 1.0) -> None:
             await asyncio.sleep(0)
 
 
-async def test_attach_start_and_read_back(souk, new_identity):
+async def test_attach_start_and_read_back(souk, new_identity, attach):
     identity = new_identity()
     agent_id = await _register(souk, "echo", identity)
-    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id.name])
+    await attach(identity, EchoProvider(), [agent_id.name])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "hi"}]})
 
-    # The ids are available immediately, without consuming the stream —
-    # what A2A's tasks/send and tasks/get need.
     assert handle.run_id.startswith("run_")
     assert handle.thread_id.startswith("thread_")
     assert handle.is_live
@@ -84,20 +67,24 @@ async def test_attach_start_and_read_back(souk, new_identity):
     run = await souk.get_run(handle.run_id)
     assert run.status == "completed"
 
-    # The reply was persisted as real thread history, not just relayed.
     messages = await souk.get_thread_messages(handle.thread_id)
     assert messages[-1]["content"] == "echo: hi"
 
-    # And the run's own event log is queryable after the fact.
     assert len(await souk.get_run_events(handle.run_id)) == len(events)
 
 
-async def test_roster_and_agent_lookup(souk, new_identity):
-    agent_id = await _register(souk, "echo", new_identity())
+async def test_roster_and_agent_lookup(souk, new_identity, attach):
+    identity = new_identity()
+    agent_id = await _register(souk, "echo", identity)
 
     roster = await souk.list_agents()
     assert [a.name for a in roster] == ["echo"]
-    assert roster[0].online is True
+    # Registered is not reachable. `online` is whether somebody is serving it,
+    # not whether souk has heard from it lately.
+    assert roster[0].online is False
+
+    await attach(identity, EchoProvider(), ["echo"])
+    assert (await souk.list_agents())[0].online is True
 
     assert (await souk.get_agent(agent_id)).name == "echo"
     assert [
@@ -107,52 +94,63 @@ async def test_roster_and_agent_lookup(souk, new_identity):
     assert await souk.get_agent(AgentRef(provider_key=agent_id.provider_key, name="nope")) is None
 
 
-async def test_cancel_a_running_agent(souk, new_identity):
+async def test_cancel_a_running_agent(souk, new_identity, attach):
     identity = new_identity()
     agent_id = await _register(souk, "slow", identity)
-    await souk.attach_provider(identity.public_key, NeverFinishesProvider(), [agent_id.name])
+    await attach(identity, NeverFinishesProvider(), [agent_id.name])
 
     handle = await souk.start_run(agent_id, {"messages": []})
-    # Read the agent's first event before cancelling, so a worker
-    # demonstrably has the run — otherwise this races the claim and would
-    # silently exercise the never-handed-over path instead (which
-    # test_a_cancel_before_any_provider_takes_the_run covers on purpose).
     stream = handle.events()
     assert (await anext(stream))["type"] == "RUN_STARTED"
 
     assert souk.cancel_run(handle.run_id) is True
-    assert [e async for e in stream] == []  # honoured it, stopped producing
+    assert [e async for e in stream] == []
     await _until(lambda: handle.run_id not in souk.active_runs())
 
     run = await souk.get_run(handle.run_id)
     assert run.status == "cancelled"
 
-    # Cancelling something souk isn't dispatching is reported, not raised.
     assert souk.cancel_run(handle.run_id) is False
 
 
-async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identity):
-    """souk asks; it does not compel. If the agent finishes anyway, the run
-    completed — recording `cancelled` there would be souk claiming something
-    it never verified, and the run's own output would contradict it.
+class StubbornProvider:
+    """Takes runs, is asked to stop, and finishes anyway.
 
-    Driven through the claim/report methods rather than through souk's own
-    worker, because complying is a *worker's* decision (souk's in-process
-    one cancels the agent's task, as the reference SDK does remotely) and
-    this is about what core does with a worker that decides otherwise.
+    souk can ask; it cannot compel. Complying is the provider's choice, so
+    this one is written not to — the point is that souk records what the
+    stream actually did rather than what it requested.
     """
+
+    def __init__(self, public_key: str) -> None:
+        self.public_key = public_key
+        self.max_concurrent_runs = None
+        self.taken: list[str] = []
+        self.asked_to_stop: list[str] = []
+
+    async def deliver(self, run) -> bool:
+        self.taken.append(run.run_id)
+        return True
+
+    def cancel(self, run_id: str) -> None:
+        self.asked_to_stop.append(run_id)
+
+
+async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identity):
     identity = new_identity()
     registration = await _register_with_token(souk, "stubborn", identity)
     agent_id = registration.agents["stubborn"]
-    # This "worker" is the identity that claimed — its key, nothing else.
+    provider = StubbornProvider(identity.public_key)
+    await souk.attach_provider(provider, ["stubborn"])
 
     handle = await souk.start_run(agent_id, {"messages": []})
-    claimed = await souk.claim_work(registration.session_token, [agent_id.name])
-    assert [c.run_id for c in claimed] == [handle.run_id]
+    await _until(lambda: provider.taken == [handle.run_id])
 
     souk.cancel_run(handle.run_id)
-    # Cancel requested, and this worker carries on regardless — souk keeps
-    # persisting and relaying what it produces, because that is real output.
+    # The flag flips synchronously so nothing hands the run out meanwhile;
+    # telling the provider happens on the run's own task, in order behind
+    # everything else about it.
+    assert souk.broker.get(handle.run_id).cancel_requested is True
+    await _until(lambda: provider.asked_to_stop == [handle.run_id])
     souk.report_event(
         handle.run_id,
         {"type": "RUN_FINISHED", "threadId": handle.thread_id, "runId": handle.run_id},
@@ -168,11 +166,7 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
 
 
 async def test_a_cancel_before_any_provider_takes_the_run(souk, new_identity):
-    """Nothing was ever handed over, so souk is the only party involved and
-    can record the outcome outright — no provider to ask, nothing to wait
-    for."""
     agent_id = await _register(souk, "never-claimed", new_identity())
-    # Deliberately no attach_provider: nobody will ever claim this run.
     handle = await souk.start_run(agent_id, {"messages": []})
 
     assert souk.cancel_run(handle.run_id) is True
@@ -200,10 +194,10 @@ async def test_thread_lineage(souk, new_identity):
     assert await souk.get_thread_tree("thread_nope") is None
 
 
-async def test_start_run_reuses_an_existing_thread(souk, new_identity):
+async def test_start_run_reuses_an_existing_thread(souk, new_identity, attach):
     identity = new_identity()
     agent_id = await _register(souk, "echo", identity)
-    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id.name])
+    await attach(identity, EchoProvider(), [agent_id.name])
 
     thread_id = await souk.create_thread(agent_id)
     first = await souk.start_run(agent_id, {"messages": []}, thread_id=thread_id)
@@ -214,13 +208,10 @@ async def test_start_run_reuses_an_existing_thread(souk, new_identity):
     assert AgentRef(provider_key=thread["provider_key"], name=thread["agent_name"]) == agent_id
 
 
-async def test_resume_keeps_the_same_run_id(souk, new_identity):
-    """A run's identity is stable across pause/resume rounds — that is what
-    lets a caller's task id keep pointing at the same task for its whole
-    life instead of chasing a chain of new ids."""
+async def test_resume_keeps_the_same_run_id(souk, new_identity, attach):
     identity = new_identity()
     agent_id = await _register(souk, "echo", identity)
-    await souk.attach_provider(identity.public_key, EchoProvider(), [agent_id.name])
+    await attach(identity, EchoProvider(), [agent_id.name])
 
     handle = await souk.start_run(agent_id, {"messages": [{"role": "user", "content": "one"}]})
     first_round = [e async for e in handle.events()]
@@ -233,8 +224,6 @@ async def test_resume_keeps_the_same_run_id(souk, new_identity):
     second_round = [e async for e in resumed.events()]
     await _until(lambda: handle.run_id not in souk.active_runs())
 
-    # The second round's events continue the same log rather than colliding
-    # with the first round's sequence numbers.
     assert len(await souk.get_run_events(handle.run_id)) == len(first_round) + len(second_round)
 
 
@@ -245,8 +234,6 @@ async def test_resume_an_unknown_run_is_an_error(souk):
 
 @pytest.fixture
 async def own_souk(settings):
-    """A souk this test owns and closes. The shared fixture is session-scoped,
-    and these tests start and stop background work."""
     instance = Souk(settings)
     try:
         yield instance
@@ -255,9 +242,6 @@ async def own_souk(settings):
 
 
 async def test_start_reconciles_what_the_last_process_left_behind(own_souk, new_identity):
-    """Live dispatch state is in memory, so a run still queued or running in
-    the database when a process starts will never be picked up by anyone.
-    Saying so is the only honest thing to do with it."""
     agent_id = await _register(own_souk, "echo", new_identity())
     async with own_souk.session() as session:
         thread_id = await repo.create_thread(session, agent_id)
@@ -271,9 +255,6 @@ async def test_start_reconciles_what_the_last_process_left_behind(own_souk, new_
 
 
 async def test_start_runs_once_so_a_second_call_cannot_reap_live_work(own_souk, new_identity):
-    """Reconciliation is idempotent over rows from before the process, not
-    over a run created since. The serving layer used to call startup twice
-    on purpose; a run made in between would have been marked failed."""
     agent_id = await _register(own_souk, "echo", new_identity())
     await own_souk.start()
 
@@ -299,7 +280,4 @@ async def test_start_keeps_exactly_one_sweeper_and_aclose_stops_it(own_souk):
 
 
 async def test_aclose_without_start_is_fine(own_souk):
-    """Nothing to stop is not an error — an embedder may never start the
-    background half at all. The fixture closes it; this asserts that doing
-    so without a start neither raises nor leaves anything running."""
     assert not [t for t in own_souk._tasks if not t.done()]

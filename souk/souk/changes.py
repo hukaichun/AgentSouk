@@ -16,7 +16,7 @@ is a signal, not state souk hands out. Nothing serialises a `ChangeEvent` —
 downstream reacts to it and then queries the models, which is where the
 wire-facing shapes live.
 
-Delivery has the same honesty as `claim_work`'s `on_cancel`: a plain
+Delivery has the same honesty as `ConnectedProvider.cancel`: a plain
 synchronous call, not awaited, no queue, no retry, no ordering guarantee
 across subscribers. Souk tells you and carries on; if you were not
 subscribed at the time, you missed it, and the database remains the thing
@@ -30,15 +30,15 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class RosterChanged:
-    """Which agents exist, or who is serving them, is different: a
-    registration, a re-registration that delisted a name by omitting it, or a
-    provider attaching or detaching.
+    """Which agents exist, or who is serving them: a registration, a
+    re-registration that withdrew a name by omitting it, or a provider
+    attaching or detaching.
 
-    Not fired for an agent crossing the online/offline line by going quiet.
-    That is a derived fact — `last_seen_at` compared against
-    `online_window_seconds` at the moment you ask — so there is no instant at
-    which anything happens to fire on. A watcher that needs it polls; see
-    `AgentSummary.online`.
+    That list is now exhaustive for `AgentSummary.online` too, which it was
+    not before. Online used to mean "seen within a window", so an agent could
+    cross the line by going quiet — at no particular instant, with nothing to
+    fire on, leaving a watcher to poll. It now means a provider is serving it,
+    and the only things that start or stop that are the events above.
     """
 
 

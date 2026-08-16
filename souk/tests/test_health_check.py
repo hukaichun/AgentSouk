@@ -1,13 +1,3 @@
-"""What `Souk.health` is willing to claim.
-
-Two questions get conflated by anything that answers with a bool: whether
-the process is alive, and whether it can serve. Only the caller knows which
-one it is asking, so this reports facts — reachable, at which migration,
-background work running — and leaves the verdict to a probe.
-
-The interesting cases are the failures, since a health check that lies about
-them is worse than not having one.
-"""
 
 from __future__ import annotations
 
@@ -26,11 +16,6 @@ ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 
 def test_the_expected_revision_matches_the_migrations_actual_head() -> None:
-    """`EXPECTED_SCHEMA_REVISION` is a literal, because souk/alembic/ is not
-    shipped inside the package and an installed souk has no migration
-    directory to read a head from. This is what stops the literal drifting:
-    it fails the moment a migration is added without updating it.
-    """
     head = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
 
     assert EXPECTED_SCHEMA_REVISION == head, (
@@ -50,9 +35,6 @@ async def test_a_migrated_database_is_ready(souk: Souk) -> None:
 
 
 async def test_an_unmigrated_database_is_reachable_but_not_ready(settings: CoreSettings) -> None:
-    """The case a readiness probe exists for: the process is fine, the
-    database answers, and it has no schema — which would otherwise be
-    discovered as a missing column halfway through someone's request."""
     souk = Souk(settings.model_copy(update={"database_url": "sqlite+aiosqlite:///:memory:"}))
     try:
         health = await souk.health()
@@ -65,15 +47,6 @@ async def test_an_unmigrated_database_is_reachable_but_not_ready(settings: CoreS
 
 
 async def test_an_unreachable_database_says_so_and_leaks_nothing(settings: CoreSettings) -> None:
-    """It reported `database=True` when this was first written: reading the
-    revision caught DBAPIError to mean "no alembic_version table", and a
-    connection failure is an OperationalError, which is one. An unreachable
-    database looked merely unmigrated.
-
-    The second assertion matters because a readiness endpoint is normally
-    unauthenticated, and a driver's connection error routinely names the
-    host and user it tried.
-    """
     souk = Souk(
         settings.model_copy(
             update={"database_url": "postgresql+psycopg://nobody:hunter2@127.0.0.1:1/none"}
@@ -92,8 +65,6 @@ async def test_an_unreachable_database_says_so_and_leaks_nothing(settings: CoreS
 
 
 async def test_a_database_at_the_wrong_revision_is_not_ready(settings: CoreSettings, tmp_path) -> None:
-    """A deployment that started the new code against a database still on
-    the previous migration — reachable, has a schema, wrong one."""
     souk = Souk(settings.model_copy(update={"database_url": f"sqlite+aiosqlite:///{tmp_path}/x.db"}))
     try:
         async with souk.engine.begin() as conn:
@@ -111,9 +82,6 @@ async def test_a_database_at_the_wrong_revision_is_not_ready(settings: CoreSetti
 
 
 async def test_background_running_reflects_start(settings: CoreSettings) -> None:
-    """Reported, not enforced: an embedding caller may deliberately never
-    start the sweeps, and that is degraded rather than unservable — so it is
-    a fact in the payload and not part of `ready`."""
     souk = Souk(settings)
     try:
         assert not (await souk.health()).background_running
@@ -127,18 +95,6 @@ async def test_background_running_reflects_start(settings: CoreSettings) -> None
 
 
 def test_running_migrations_does_not_disable_souks_own_loggers() -> None:
-    """`alembic/env.py` calls `fileConfig`, whose default is
-    `disable_existing_loggers=True` — it turns off every logger that already
-    exists. Migrations are not only run from a command line: this suite runs
-    one at session start, after importing souk, and it silently killed
-    `souk.core`, `souk.broker`, `souk.health` and the rest for the whole
-    process. An embedding application would lose its own the same way, having
-    done nothing but migrate its database.
-
-    No setup here on purpose: conftest has already run the migration by the
-    time this executes, so this is the real path rather than a reconstruction
-    of it.
-    """
     silenced = [
         name
         for name in ("souk.core", "souk.broker", "souk.handlers", "souk.health", "souk.worker")

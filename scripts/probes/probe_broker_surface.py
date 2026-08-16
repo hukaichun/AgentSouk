@@ -13,7 +13,7 @@ from alembic import command
 from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from souk.broker import Run, RunBroker, RunSnapshot
+from souk.broker import ConnectedProvider, Run, RunBroker, RunSnapshot
 from souk.config import CoreSettings
 from souk.core import Souk
 from souk.identity import registration_signing_payload
@@ -38,6 +38,7 @@ def migrate() -> None:
 async def main() -> None:
     migrate()
     souk = Souk(CoreSettings(database_url=URL, token_signing_secret="probe"))
+    await souk.start()
 
     key = Ed25519PrivateKey.generate()
     pub = key.public_key().public_bytes_raw().hex()
@@ -58,19 +59,20 @@ async def main() -> None:
               f"out_queue={type(returned.out_queue).__name__}")
         print(f"  and can mutate fields directly, e.g. claimed_by = {returned.claimed_by!r}")
 
-    print("\n--- claim ---")
-    claimed = souk.broker.claim([agent], claimed_by=pub, max_claim=1)
-    print(f"RunBroker.claim -> list[{type(claimed[0]).__name__ if claimed else '?'}]")
+    print("\n--- what crosses to a provider ---")
+    print(f"ConnectedProvider.deliver takes -> "
+          f"{inspect.signature(ConnectedProvider.deliver).parameters['run'].annotation}")
+    print(f"  is that broker.Run?  {ConnectedProvider.deliver.__annotations__.get('run') is Run}")
+    print("  (it must not be: a provider holding a Run holds souk's own queues,")
+    print("   and a Run cannot be handed across a wire at all)")
 
-    print("\n--- the wake seam ---")
-    event = souk.broker.subscribe_wake([agent])
-    print(f"RunBroker.subscribe_wake -> {type(event).__name__} "
-          f"({type(event).__module__}) — core awaits .wait() on this directly")
-    souk.broker.unsubscribe_wake([agent], event)
+    print("\n--- reachability ---")
+    print(f"RunBroker.serving -> {inspect.signature(RunBroker.serving).return_annotation}")
+    print(f"  provider mapping is private: {not hasattr(souk.broker, 'providers')}")
 
     print("\n--- sync vs async on the surface ---")
-    for name in ("enqueue_run", "claim", "get", "push", "subscribe", "request_cancel",
-                 "active_run_ids", "subscribe_wake", "forget"):
+    for name in ("enqueue_run", "get", "push", "subscribe", "request_cancel",
+                 "serving", "agents_served_by", "active_run_ids", "quality", "forget"):
         method = getattr(RunBroker, name)
         kind = "async" if inspect.iscoroutinefunction(method) else "sync "
         print(f"  {kind} {name}")

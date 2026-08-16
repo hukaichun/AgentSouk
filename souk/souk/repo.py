@@ -164,7 +164,6 @@ async def register_agents(
     public_key: str,
     agents_batch: list[dict[str, Any]],
     provider_name: str | None = None,
-    online_window_seconds: int = 60,
 ) -> dict[str, AgentRef]:
     """Upserts this batch under `public_key`, and marks anything previously
     registered by that key but absent from it **offline** — not gone.
@@ -190,7 +189,7 @@ async def register_agents(
     Returns this batch's `AgentRef`s indexed by name — the pairs, which the
     caller already knew, rather than ids souk minted for it to hold. Handing
     ids back is what made a provider's vocabulary depend on which database
-    answered (see docs/retiring-agent-id.md).
+    answered: an agent is the pair, not an id souk minted.
     """
     await ensure_provider(session, public_key)
     if provider_name is not None:
@@ -226,28 +225,17 @@ async def register_agents(
         await session.execute(stmt)
         registered[name] = AgentRef(provider_key=public_key, name=name)
 
-    # Backdated rather than left to age out: this provider just told souk
-    # what it currently offers, so an omission is a departure souk witnessed,
-    # the same as detach_provider's.
-    await session.execute(
-        update(agents)
-        .where(
-            agents.c.provider_key == public_key,
-            agents.c.name.notin_(list(registered)),
-        )
-        .values(last_seen_at=now - timedelta(seconds=online_window_seconds + 1))
-    )
     await session.commit()
     return registered
 
 
 async def get_agent_names_for_provider(session: AsyncSession, provider_key: str) -> set[str]:
-    """Which names this key has registered — what stops a valid token for one
-    provider being used to claim another's work (see Souk.claim_work).
+    """Which names this key has registered — what stops one provider being
+    attached for another's agents (see Souk.attach_provider).
 
     Names, because within one provider a name *is* unique
     (`PRIMARY KEY (provider_key, name)`), and the key is already known: it
-    comes from the verified session token. souk-agent-sdk built a routing
+    comes from the provider itself, which holds the private half. souk-agent-sdk built a routing
     table on the belief that "name is no longer a unique routing key", which
     was the right observation at the wrong scope — names are not unique across
     providers, and inside one they always were.
@@ -269,21 +257,6 @@ async def touch_agents(session: AsyncSession, provider_key: str, names: list[str
         update(agents)
         .where(agents.c.provider_key == provider_key, agents.c.name.in_(names))
         .values(last_seen_at=_utcnow())
-    )
-    await session.commit()
-
-
-async def mark_agent_offline(session: AsyncSession, agent: AgentRef, online_window_seconds: int) -> None:
-    """Backdate last_seen_at past the online window, so an agent whose
-    provider has genuinely gone shows as offline immediately instead of
-    lingering until the window expires. Used when a provider detaches — a
-    departure souk actually witnessed, unlike a remote provider that simply
-    stops polling and has to be inferred.
-    """
-    await session.execute(
-        update(agents)
-        .where(agents.c.provider_key == agent.provider_key, agents.c.name == agent.name)
-        .values(last_seen_at=_utcnow() - timedelta(seconds=online_window_seconds + 1))
     )
     await session.commit()
 
@@ -372,17 +345,20 @@ async def resolve_agents_by_name(session: AsyncSession, name: str) -> list[dict[
     return [dict(row) for row in rows]
 
 
-def is_agent_online(last_seen_at: datetime, online_window_seconds: int) -> bool:
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=online_window_seconds)
-    return last_seen_at.replace(tzinfo=timezone.utc) >= cutoff
-
-
 async def list_agents(
     session: AsyncSession,
     *,
-    online_window_seconds: int,
     stale_hidden_window_seconds: int,
 ) -> list[AgentSummary]:
+    """The stored half of the roster. `online` is left False here and filled
+    in by `Souk.list_agents`, because whether an agent is reachable is not a
+    fact this table holds — see `RunBroker.serving`.
+
+    `last_seen_at` still decides what is *hidden*: an agent nothing has heard
+    from in a week drops off the roster entirely rather than sitting there
+    offline forever. That is a different question from reachability and it is
+    one the database can answer.
+    """
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_hidden_window_seconds)
     rows = (
         await session.execute(
@@ -409,7 +385,6 @@ async def list_agents(
             skills=row["agent_card"].get("skills", []),
             joined_at=row["joined_at"],
             last_seen_at=row["last_seen_at"],
-            online=is_agent_online(row["last_seen_at"], online_window_seconds),
             provider_name=row["provider_name"],
         )
         for row in rows
@@ -879,12 +854,12 @@ async def fail_orphaned_runs(session: AsyncSession) -> list[str]:
 
 async def fail_stalled_runs(session: AsyncSession, stall_timeout_seconds: int) -> list[str]:
     """Called periodically (see souk.health) while souk is live. A run
-    only ever reaches 'running' once a provider has explicitly claimed
-    it — if it then goes this long without any activity (no further
-    event, see touch_run_activity), the provider claimed it and went
-    silent: a real anomaly, distinct from a run merely sitting 'queued'
-    waiting to be claimed (see PollRequest.max_claim — a provider
-    throttling itself is expected, not a failure).
+    only ever reaches 'running' once a provider has acked it — if it then
+    goes this long without any activity (no further event, see
+    touch_run_activity), the provider took it and went silent: a real
+    anomaly, distinct from a run still sitting 'queued', which nobody has
+    taken and which the broker gives up on itself (see
+    RunBroker.expire_queued).
 
     Same narrowness guarantee as fail_orphaned_runs: only rows still
     'running' past the timeout are touched; everything else (including
@@ -918,60 +893,6 @@ async def fail_stale_paused_runs(session: AsyncSession, timeout_seconds: int) ->
         (runs.c.status == "input-required") & (runs.c.last_activity_at < cutoff),
         "paused_no_resume",
     )
-
-
-async def fail_unclaimed_runs(
-    session: AsyncSession, timeout_seconds: int, *, online_window_seconds: int
-) -> list[str]:
-    """Distinct from fail_stalled_runs: catches a run that's sat 'queued'
-    (never claimed at all) past `timeout_seconds' *and* whose target agent
-    is no longer online — the race case where a provider was online (or
-    ambiguously so) when the call was made, got queued, then went dark
-    before ever polling for it. The common "target already known offline
-    at call time" case is handled synchronously instead (see
-    protocols.a2a's _start_run/protocols.agui's AGUIAdapter.run's fast-fail path) — this sweep is
-    only the fallback for the race, not the primary mechanism, so it's
-    deliberately not firing on every provider that's simply throttling
-    itself via PollRequest.max_claim (see fail_stalled_runs's docstring on
-    why 'queued' alone isn't a health signal).
-    """
-    created_cutoff = _utcnow() - timedelta(seconds=timeout_seconds)
-    online_cutoff = _utcnow() - timedelta(seconds=online_window_seconds)
-    # The old raw SQL used Postgres's UPDATE ... FROM agents; the portable
-    # form is to find the matching run_status rows via a join, then fail
-    # them (see _fail_runs) — so the join lives in this SELECT instead.
-    rows = (
-        await session.execute(
-            select(runs.c.run_id, runs.c.metadata)
-            .select_from(
-                runs.join(
-                    agents,
-                    (agents.c.provider_key == runs.c.provider_key)
-                    & (agents.c.name == runs.c.agent_name),
-                )
-            )
-            .where(
-                runs.c.status == "queued",
-                runs.c.created_at < created_cutoff,
-                agents.c.last_seen_at < online_cutoff,
-            )
-        )
-    ).all()
-    now = _utcnow()
-    run_ids: list[str] = []
-    for row in rows:
-        await session.execute(
-            update(runs)
-            .where(runs.c.run_id == row.run_id)
-            .values(
-                status="failed",
-                completed_at=now,
-                metadata={**(row.metadata or {}), "failureReason": "no_provider_online"},
-            )
-        )
-        run_ids.append(row.run_id)
-    await session.commit()
-    return run_ids
 
 
 async def get_run(session: AsyncSession, run_id: str) -> RunRecord | None:

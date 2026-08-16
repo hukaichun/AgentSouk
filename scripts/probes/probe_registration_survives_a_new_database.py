@@ -1,6 +1,7 @@
 """Can a running provider survive its database being replaced?
 
-The acceptance check for retiring `agent_id` (docs/retiring-agent-id.md).
+The acceptance check for retiring `agent_id`: an agent is (provider_key,
+name), both halves of which the provider already holds.
 
 souk used to mint an id per agent and require a provider to hold it and echo
 it back on every claim. That made a provider's whole vocabulary belong to one
@@ -41,6 +42,7 @@ from souk.config import CoreSettings
 from souk.core import Souk
 from souk.identity import registration_signing_payload
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
+from souk_provider_sdk import ProviderIdentity, ProviderRuntime
 
 DB = Path(tempfile.gettempdir()) / "souk_probe_new_database.db"
 URL = f"sqlite+aiosqlite:///{DB}"
@@ -70,16 +72,10 @@ class Provider:
 
 async def main() -> int:
     migrate()
-    souk = Souk(
-        CoreSettings(
-            database_url=URL,
-            token_signing_secret="probe",
-            worker_poll_interval_seconds=0.05,
-            worker_long_poll_seconds=0.5,
-        )
-    )
-    key = Ed25519PrivateKey.generate()
-    public_key = key.public_key().public_bytes_raw().hex()
+    souk = Souk(CoreSettings(database_url=URL, token_signing_secret="probe"))
+    await souk.start()
+    identity = ProviderIdentity(Ed25519PrivateKey.generate())
+    key, public_key = identity._private_key, identity.public_key
 
     async def register():
         timestamp = int(time.time())
@@ -92,7 +88,10 @@ async def main() -> int:
 
     first = await register()
     # Attached once, with the names from this provider's own configuration.
-    await souk.attach_provider(public_key, Provider(), ["translator"])
+    # Through the SDK's runtime, because that is what souk can hand a run to.
+    runtime = ProviderRuntime(identity, Provider(), souk)
+    runtime.start()
+    await souk.attach_provider(runtime, ["translator"])
 
     handle = await souk.start_run(first.agents["translator"], {"messages": []})
     before = [event async for event in handle.events()]
@@ -126,6 +125,7 @@ async def main() -> int:
         if ok
         else f"\nBROKEN: same_identity={same_identity} status={status} events={len(after)}"
     )
+    await runtime.aclose(cancel_in_flight=True)
     await souk.aclose()
     return 0 if ok else 1
 

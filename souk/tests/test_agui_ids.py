@@ -1,9 +1,3 @@
-"""souk.agui id-assignment helpers — no DB needed, pure functions.
-
-Inbound message ids (fill_message_ids' old job) are now a database
-concern instead — see repo.append_thread_messages and its coverage in
-tests/test_repo_ids.py.
-"""
 
 from __future__ import annotations
 

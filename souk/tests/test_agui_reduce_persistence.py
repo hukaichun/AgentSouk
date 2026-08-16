@@ -1,11 +1,3 @@
-"""handlers._handle_finish persists a completed/paused run's own
-reply into thread_history (see souk/agui_reduce.py) — this is what makes
-GET /threads/{thread_id} an actual source of truth for the full
-conversation, not just the caller's half of it. End-to-end verified
-against a real LLM (souk-guide's list_souk_agents tool call) manually;
-this pins the same behavior against the real handlers with a synthetic
-event stream.
-"""
 
 from __future__ import annotations
 
@@ -57,8 +49,6 @@ async def test_a_tool_call_reply_is_persisted_as_real_thread_history_messages(se
     assert stored[1]["toolCallId"] == "call_1"
     assert stored[1]["content"] == "- b (online)"
     assert stored[2]["content"] == "Here you go."
-    # Every id is database-generated — none of the reducer's synthetic
-    # ids (m1/m2/tool_1) survive into the stored rows.
     assert all(m["id"].startswith("msg_") for m in stored)
     souk.broker.forget(run_id)
 
@@ -91,11 +81,6 @@ async def test_a_plain_text_only_reply_is_still_persisted(session, souk, new_ide
 
 
 async def test_a_failed_run_persists_nothing_to_thread_history(session, souk, new_identity):
-    """failed/cancelled replies are incomplete — kept in run_events
-    (nothing deletes them) but deliberately never promoted into
-    thread_history's conversational record — see the design discussion
-    this pins: not every terminal status should produce a message.
-    """
     from souk.broker import Fail
     from souk.handlers import _handle_fail
 

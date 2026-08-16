@@ -1,5 +1,11 @@
 # Design Notes: Cross-Souk Discovery & Anti-Abuse
 
+
+> The `/a2a/id/{...}` route shapes below belong to the gateway, not to
+> core: core stopped naming URLs, and an Agent Card's
+> `supported_interfaces` is an input to it. Read them as one deployment's
+> choice.
+
 > *These are architectural design proposals, not commitments. They exist to capture thinking before implementation begins, so that assumptions can be challenged early rather than baked silently into code.*
 
 ---

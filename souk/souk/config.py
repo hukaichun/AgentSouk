@@ -52,56 +52,38 @@ class CoreSettings(BaseSettings):
     # ---- Timing policy: how souk judges an agent's or a run's state. None
     # of these describe a network; they are domain rules.
 
-    online_window_seconds: int = 60
-    # A much longer cutoff than online_window_seconds: an agent whose
-    # last_seen_at is older than this is excluded from the roster
-    # entirely (not just marked offline) — read-time filter only, no job,
-    # no mutation; reappears automatically the moment it registers again.
+    # An agent whose last_seen_at is older than this is excluded from the
+    # roster entirely — read-time filter only, no job, no mutation; it
+    # reappears the moment it registers again.
+    #
+    # There was an `online_window_seconds` beside this one, and `online` was
+    # derived from it. It is gone: a provider used to prove it was there by
+    # asking for work, and it does not ask any more, so the timestamp stopped
+    # producing that fact. Reachability comes from the broker now (see
+    # `RunBroker.serving`). This window survives because it answers a
+    # different question — not "is it there" but "has it been away so long
+    # that listing it is noise".
     stale_hidden_window_seconds: int = 60 * 60 * 24 * 7
 
-    # How long a run may sit 'queued' (never claimed) before souk gives up
-    # on it — only applies once the target agent is also no longer online,
-    # see repo.fail_unclaimed_runs. Shorter than run_stall_timeout_seconds:
-    # waiting to be claimed should time out faster than "claimed and
-    # stalled".
-    queued_timeout_seconds: int = 45
 
-    # A run past this many seconds without any activity (claimed, or an
-    # event relayed) while still 'running' is presumed stalled — the
-    # provider claimed it and went silent, a real anomaly (as opposed to
-    # a run merely sitting 'queued', which just means the provider hasn't
-    # claimed it yet and isn't itself a health signal — see PollRequest.
-    # max_claim). Set well above realistic single-run latency (LLM calls
-    # can legitimately take a while).
+    # A run past this many seconds without any activity while still
+    # 'running' is presumed stalled: a provider acked it and went silent,
+    # which is a real anomaly. A run merely sitting 'queued' is not — it
+    # means nobody has taken it yet, and the broker gives up on those itself
+    # (see RunBroker.queued_timeout_seconds). Set well above realistic
+    # single-run latency; LLM calls can legitimately take a while.
     run_stall_timeout_seconds: int = 120
     health_sweep_interval_seconds: int = 15
 
     # How long a run may sit 'input-required' (paused, waiting on a human
     # to resolve an interrupt — see souk.pause) before souk gives up on it.
-    # Unlike run_stall_timeout_seconds/queued_timeout_seconds, a pause is
+    # Unlike run_stall_timeout_seconds, a pause is
     # waiting on a person, not a provider, so there's no generally-correct
     # default duration — None (the default) means no timeout at all,
     # matching souk's original behavior before this setting existed. Set
     # this only if your deployment wants paused runs to eventually give up.
     paused_timeout_seconds: int | None = None
 
-    # How an in-process worker (souk/worker.py) paces its claim loop. Both
-    # are domain timing, not network settings: a worker hosted in this
-    # process claims over the same `claim_work` a remote one calls, so it
-    # needs the same two numbers the remote SDK configures for itself.
-    #
-    # The long poll is how long an *idle* worker's claim call blocks waiting
-    # for work before coming round again — it returns the moment work is
-    # enqueued (see RunBroker.subscribe_wake), so this is only the ceiling on
-    # an idle cycle, not on latency. Kept comfortably under
-    # online_window_seconds: claiming is also what marks these agents seen,
-    # so a worker that went a whole online window without claiming would look
-    # offline while sitting right there.
-    worker_long_poll_seconds: float = 25.0
-    # How often a *busy* worker checks for more work. It can't long-poll then
-    # — what changes while it's busy is its own capacity, which souk can't
-    # observe — so this is a plain interval between top-up claims.
-    worker_poll_interval_seconds: float = 2.0
 
     # ---- Identity
 

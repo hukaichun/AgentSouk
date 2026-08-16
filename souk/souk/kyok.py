@@ -6,11 +6,11 @@ A KYOK token binds one run_id to the caller's bridge session_id (souk.
 souk.kyok's KyokBridge) — the only thing /kyok/v1/chat/completions
 needs from the "api_key" a provider sends it is "which session should
 this be relayed to". Same signing mechanism as souk.identity.
-issue_session_token/verify_session_token (HMAC over a base64 JSON body,
-same token_signing_secret) — deliberately not reusing that pair directly
-since the payload shape (and what a forged one could be used for —
-routing a completion, not authenticating a worker call) is different enough
-to be worth keeping separate.
+the session token souk used to issue (HMAC over a base64 JSON body, same
+token_signing_secret) — deliberately not that pair, since the payload shape
+and what a forged one could do were different enough to be worth keeping
+apart. That one is gone with the call it guarded; this is now the only thing
+`token_signing_secret` signs.
 
 Also carries the agent — souk already knows, at the moment it mints this
 token (souk.api_agui._build_forwarded_props, called with the run's own

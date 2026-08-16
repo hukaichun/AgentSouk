@@ -1,10 +1,3 @@
-"""Covers KYOK (Keep Your Own Key) — souk/kyok.py's token issue/verify,
-and the souk/api_llm_bridge.py HTTP surface (`/kyok/poll`,
-`/kyok/v1/chat/completions`, `/kyok/respond/{request_id}`) plus its pure
-`_collapse_stream` helper. See docs/keep-your-own-key.md for the full
-design; this was previously entirely untested (see that doc's own
-"Status: experimental" header before this file existed).
-"""
 
 from __future__ import annotations
 
@@ -22,12 +15,6 @@ from souk.kyok import KyokBridge, issue_kyok_token, verify_kyok_token
 
 
 def _kyok_headers(bearer: str, private_key, body: bytes) -> dict:
-    """Mirrors souk_agent_sdk.KyokSigningAuth.auth_flow exactly (see
-    docs/keep-your-own-key.md's "Binding a token to the specific run and
-    provider that hold it" section) — reimplemented here for the same
-    reason conftest.py's Identity.register_body reimplements registration
-    signing: this test suite doesn't depend on souk_agent_sdk as a package.
-    """
     timestamp = str(int(time.time()))
     body_hash = hashlib.sha256(body).hexdigest()
     payload = f"{bearer}:{timestamp}:{body_hash}".encode()
@@ -46,9 +33,6 @@ async def _register_agent(session, new_identity, name: str = "greeter"):
 
 
 _AGENT = AgentRef(provider_key="ab" * 32, name="translator")
-
-
-# --- souk/kyok.py: token issue/verify -----------------------------------
 
 
 def test_kyok_token_roundtrip():
@@ -81,9 +65,6 @@ def test_tampered_kyok_token_signature_rejected():
 )
 def test_malformed_kyok_token_rejected(malformed):
     assert verify_kyok_token(malformed, "test-signing-secret") is None
-
-
-# --- api_llm_bridge.py: auth/validation chain ----------------------------
 
 
 def _chunk(content: str = "", role: str | None = None, finish_reason: str | None = None) -> dict:
@@ -162,18 +143,6 @@ def test_collapse_stream_multi_index_reassembles_per_choice():
     }
 
 
-# ---- KyokBridge registry lifetimes
-#
-# `GET /kyok/poll` takes an unauthenticated, caller-chosen `sessionId`, so the
-# number of distinct keys this registry can be asked about is under a
-# stranger's control. Both maps were `defaultdict`s, which means a *lookup*
-# inserted, and nothing ever reclaimed: 100k polls of unknown sessions
-# retained 81 MiB, and an ordinary finished session leaked a key too. A session
-# is now one object with one lifetime rule (`_Session.is_idle`). These
-# pin the lifetime rule — an entry exists exactly while there is something to
-# find — rather than pinning the fix's shape.
-
-
 async def test_polling_an_unknown_session_records_nothing() -> None:
     bridge = KyokBridge()
 
@@ -184,8 +153,6 @@ async def test_polling_an_unknown_session_records_nothing() -> None:
 
 
 async def test_a_poll_that_waits_and_times_out_records_nothing() -> None:
-    """The other half of the same hole: the waiting path added a subscriber
-    set, and discarding the event emptied it without removing it."""
     bridge = KyokBridge()
 
     assert await bridge.poll_one("nobody", 0.01) is None
@@ -194,9 +161,6 @@ async def test_a_poll_that_waits_and_times_out_records_nothing() -> None:
 
 
 async def test_a_finished_session_leaves_nothing_behind() -> None:
-    """Not only an adversarial matter — `popleft()` empties a deque without
-    removing it, so every legitimate session leaked one entry for the life of
-    the process."""
     bridge = KyokBridge()
     request_id, _queue = bridge.submit("legit", {"messages": []})
 
@@ -208,8 +172,6 @@ async def test_a_finished_session_leaves_nothing_behind() -> None:
 
 
 async def test_a_waiting_poll_is_still_woken_by_a_submit() -> None:
-    """The regression the cleanup could plausibly cause: the wake path runs
-    through a set that is now removed when it empties."""
     bridge = KyokBridge()
 
     async def submit_shortly() -> str:
@@ -224,9 +186,6 @@ async def test_a_waiting_poll_is_still_woken_by_a_submit() -> None:
 
 
 async def test_an_abandoned_request_does_not_hide_the_work_behind_it() -> None:
-    """A request forgotten before anyone polled it leaves a dead id at the
-    head of its session's queue. Returning None there would tell a bridge
-    with work waiting that it has nothing to do."""
     bridge = KyokBridge()
     abandoned, _ = bridge.submit("mixed", {"messages": ["first"]})
     live, _ = bridge.submit("mixed", {"messages": ["second"]})

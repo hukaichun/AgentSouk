@@ -67,7 +67,7 @@ async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
         )
         return {
             # The pairs, indexed by name. Not ids: souk mints none, which is
-            # the point of docs/retiring-agent-id.md.
+            # the point of retiring the surrogate id.
             "agents": {
                 name: {"provider_key": ref.provider_key, "agent_name": ref.name}
                 for name, ref in registration.agents.items()

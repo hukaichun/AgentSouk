@@ -150,8 +150,8 @@ class AGUIAdapter:
             # where the target goes offline *after* this check): if souk
             # already knows the target is offline, don't queue at all — emit
             # a terminal event and close, instead of opening a stream that
-            # would sit idle until queued_timeout_seconds.
-            if not repo.is_agent_online(agent.last_seen_at, souk.settings.online_window_seconds):
+            # would sit idle until the broker gave up on it.
+            if not souk.is_serving(AgentRef(provider_key=agent.provider_key, name=agent.name)):
                 await souk.mark_run_status(
                     session, run_id, "failed", metadata={"failureReason": "agent_offline"}
                 )

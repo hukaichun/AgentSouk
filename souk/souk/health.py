@@ -1,13 +1,12 @@
-"""Detects providers that claimed a run and then went silent, plus
+"""Detects providers that took a run and then went silent, plus
 (optionally) runs paused on a human who never came back.
 
-Deliberately narrow scope for the provider-facing sweeps: a run sitting
-'queued' isn't a health signal by itself — a provider is expected to
-throttle how much it claims via PollRequest.max_claim, so backlog is
-normal, self-imposed pacing, not an anomaly. Only a run a provider
-explicitly claimed (status='running') and then produced no further
-activity for too long counts as a real problem — see
-repo.fail_stalled_runs. A separate, opt-in sweep (repo.fail_stale_paused_runs,
+Deliberately narrow scope for the provider-facing sweep: a run sitting
+'queued' isn't a health signal here — nobody has taken it yet, and the
+broker gives up on those itself, from memory, without a database read
+(RunBroker.expire_queued). Only a run a provider acked (status='running')
+and then produced no further activity for too long counts as a problem
+this sweep can see — see repo.fail_stalled_runs. A separate, opt-in sweep (repo.fail_stale_paused_runs,
 gated on settings.paused_timeout_seconds) covers 'input-required' runs —
 waiting on a human has no generally-correct timeout, so unlike the other
 two sweeps it's disabled (None) by default.
@@ -55,11 +54,6 @@ async def sweep_once(souk: "Souk") -> None:
     settings = souk.settings
     async with souk.session() as session:
         stalled = await repo.fail_stalled_runs(session, settings.run_stall_timeout_seconds)
-        unclaimed = await repo.fail_unclaimed_runs(
-            session,
-            settings.queued_timeout_seconds,
-            online_window_seconds=settings.online_window_seconds,
-        )
         stale_paused: list[str] = []
         if settings.paused_timeout_seconds is not None:
             stale_paused = await repo.fail_stale_paused_runs(session, settings.paused_timeout_seconds)
@@ -71,15 +65,6 @@ async def sweep_once(souk: "Souk") -> None:
             len(stalled),
             settings.run_stall_timeout_seconds,
             stalled,
-        )
-    for run_id in unclaimed:
-        await _close_with_terminal_event(souk, run_id, "no_provider_online")
-    if unclaimed:
-        logger.warning(
-            "health sweep: %d run(s) queued past %ds with target agent offline, marked failed: %s",
-            len(unclaimed),
-            settings.queued_timeout_seconds,
-            unclaimed,
         )
     for run_id in stale_paused:
         await _close_with_terminal_event(souk, run_id, "paused_no_resume")

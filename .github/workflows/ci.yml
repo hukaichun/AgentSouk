@@ -41,10 +41,11 @@ jobs:
           SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
 
       # The probes, which are the acceptance checks the design documents name
-      # — a green suite is not the bar (see docs/work-objectives.md's opening
-      # table for five things that were true while 210 tests passed). Each of
-      # these reproduces a specific failure and asserts the verdict changed,
-      # and each exits non-zero when it has not.
+      # — a green suite is not the bar. Four separate breakages of delivery
+      # once left the pass count unchanged, because every test that drove a
+      # run was already failing for an unrelated reason. Each probe below
+      # reproduces a specific failure and exits non-zero if the verdict has
+      # not changed.
       #
       # Two of the five probes are deliberately *not* here.
       # `probe_multiprocess.py` is the target for the horizontal-scaling work
@@ -60,15 +61,30 @@ jobs:
           SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
       # The rest stand up their own throwaway SQLite file, so they must not
       # inherit the Postgres DSN above.
-      - name: probes (schema agrees, run row vanishes, registration survives — SQLite)
+      - name: probes (schema, run row vanishes, registration survives, silence — SQLite)
         run: |
           uv run python ../scripts/probes/probe_schema_agrees.py
           uv run python ../scripts/probes/probe_run_row_vanishes.py
           uv run python ../scripts/probes/probe_registration_survives_a_new_database.py
-          uv run python ../scripts/probes/probe_claim_says_nothing.py
+          uv run python ../scripts/probes/probe_nobody_says_anything.py
         working-directory: souk
         env:
           SOUK_TOKEN_SIGNING_SECRET: ci-test-secret
+
+  souk-provider-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk-provider-sdk
+      # No transport here, and nothing to generate one with: this package
+      # defines an interaction. If a network dependency ever appears in its
+      # lockfile, the boundary was not real.
+      - run: uv run pytest -v
+        working-directory: souk-provider-sdk
 
   # Everything else — the gateway, both SDKs, the reference providers and
   # the directory UI — lives in AgentSoukServer, which carries its own CI,

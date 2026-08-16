@@ -11,33 +11,24 @@ the private key for. A `name` on its own is deliberately *not* an identity —
 it is not exclusive, and two providers may both offer `translator`. What is
 owned is the pair: `PRIMARY KEY (provider_key, name)` in souk/schema.py.
 
-Two independent checks, at two different points:
-  1. Registration (register_agents / verify_registration_signature):
-     the request must be signed with the private key matching the
-     public_key it presents (see repo.register_agents). Expensive-ish
-     (Ed25519 verify), so it only happens at registration, not on every
-     poll.
-  2. Every worker call (claiming runs, reporting their events, ending
-     them): must present a bearer token issued by step 1 (see
-     issue_session_token/verify_session_token).
-     Cheap (HMAC verify), stateless (no session store — the token itself
-     carries the public_key + an expiry, signed so it can't be forged
-     without token_signing_secret).
+One check, at one point: registration must be signed with the private key
+matching the public_key it presents (see repo.register_agents).
 
-The token carries the *public key* because that is the only identity a
-provider has. It used to carry a self-declared `sdk_client_id` instead, and
-that was a real hole rather than a naming quibble: two unrelated keypairs
-could register under the same string and each claim the other's work
-(measured). Whatever a provider calls itself is not something souk verified;
-the key is.
+There used to be a second — a bearer token issued at registration and
+required on every worker call. It existed for `claim_work`, which a provider
+called to ask for work. souk hands work over now (see souk/broker.py), so
+nothing asks souk for anything and there is no call left to present a token
+to. It was removed rather than left as something for a transport to find a
+use for: a credential nobody verifies is one downstream will assume means
+more than it does.
+
+Authenticating a *connection* is a different question, with a different
+answer, and it belongs to whatever holds connections.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
-import hmac
-import json
 import time
 from dataclasses import dataclass
 
@@ -309,35 +300,3 @@ def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) ->
         return False
 
 
-def issue_session_token(public_key: str, signing_secret: str) -> str:
-    body = base64.urlsafe_b64encode(
-        json.dumps({"public_key": public_key, "exp": int(time.time()) + SESSION_TOKEN_TTL_SECONDS}).encode()
-    ).decode()
-    signature = hmac.new(signing_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
-    return f"{body}.{signature}"
-
-
-def verify_session_token(token: str, signing_secret: str) -> str | None:
-    """Returns the public_key this token was issued to if it is valid
-    (correct signature, not expired), else None. Called by every worker
-    before it claims (see souk.worker), and by whatever serving layer carries
-    a remote one's calls.
-
-    That returned key *is* the provider: what it may claim, and which runs it
-    may report events for, are both decided from it.
-    """
-    try:
-        body, signature = token.split(".", 1)
-    except ValueError:
-        return None
-    expected = hmac.new(signing_secret.encode(), body.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, signature):
-        return None
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(body.encode()))
-    except (ValueError, UnicodeDecodeError):
-        return None
-    if payload.get("exp", 0) < time.time():
-        return None
-    public_key = payload.get("public_key")
-    return public_key if isinstance(public_key, str) else None

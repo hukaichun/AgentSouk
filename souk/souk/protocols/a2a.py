@@ -516,7 +516,7 @@ class A2AAdapter:
 
             messages = await repo.append_thread_messages(session, thread_id, run_id, messages)
 
-            if not repo.is_agent_online(record.last_seen_at, souk.settings.online_window_seconds):
+            if not souk.is_serving(AgentRef(provider_key=record.provider_key, name=record.name)):
                 await souk.mark_run_status(
                     session, run_id, "failed", metadata={"failureReason": "agent_offline"}
                 )

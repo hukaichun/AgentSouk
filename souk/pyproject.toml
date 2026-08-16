@@ -58,6 +58,13 @@ postgres = ["psycopg[binary,pool]>=3.2"]
 # were installed alongside anyway.
 [dependency-groups]
 dev = [
+    # souk's own suite registers through the provider SDK rather than through
+    # souk's signing helpers, so the payload a provider actually sends is
+    # checked against the one souk expects on every test run. Signing with
+    # souk's own builder meant both sides moved together: an operation prefix
+    # was added, 219 tests passed, and no provider in the world could register
+    # any more. See souk_provider_sdk.identity.
+    "souk-provider-sdk",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "psycopg[binary,pool]>=3.2",
@@ -72,3 +79,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["souk"]
+
+[tool.uv.sources]
+# Editable, and that matters: a non-editable path install copies the SDK
+# into the venv, so its signing payloads freeze at sync time and a change to
+# them would not fail a local test run — only a fresh CI install. The copy is
+# only a second opinion if it is the live one.
+souk-provider-sdk = { path = "../souk-provider-sdk", editable = true }

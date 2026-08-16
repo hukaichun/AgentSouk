@@ -1,8 +1,3 @@
-"""Covers souk.identity.verify_actor_chain — the tamper-evident,
-multi-hop identity chain A2A (and now AG-UI, see test_api_agui.py)
-accept via metadata.actorChain. See that function's own docstring for
-the wire format and trust model.
-"""
 
 from __future__ import annotations
 
@@ -72,11 +67,6 @@ def test_subject_change_partway_through_rejected(new_identity):
 
 
 def test_historical_hop_expiry_is_ignored(new_identity):
-    """The core fix: a chain built long ago (e.g. before a run sat paused
-    on input-required past a hop's TTL — see souk.pause) must still
-    verify as long as the *newest* hop is fresh, since older hops are
-    provenance, not standing authorization.
-    """
     a, b = new_identity(), new_identity()
     subject = {"type": "agent", "id": "a1"}
     expired_hop0 = a.sign_chain_hop(subject, exp_offset=-3600)
@@ -98,9 +88,6 @@ def test_last_hop_expiry_is_enforced(new_identity):
 
 
 def test_single_expired_hop_chain_rejected(new_identity):
-    """A single-hop chain's only hop is also the last hop — must stay
-    fresh, unlike a middle hop in a longer chain.
-    """
     identity = new_identity()
     chain = [identity.sign_chain_hop({"type": "agent", "id": "a1"}, exp_offset=-60)]
 
