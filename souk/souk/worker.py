@@ -33,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from souk.errors import InvalidRegistration
+from souk.errors import InvalidRegistration, NothingOwned
 from souk.identity import verify_session_token
 from souk.models import AgentRef
 from souk.providers import Provider
@@ -108,6 +108,11 @@ class Worker:
         self.max_claim = max_claim
         self._in_flight: dict[str, asyncio.Task] = {}
         self._loop_task: asyncio.Task | None = None
+        # Whether souk currently knows none of this worker's names (see
+        # run_forever's NothingOwned branch). State, not a counter, so the
+        # condition is reported when it starts and when it ends rather than
+        # once per claim cycle.
+        self._unowned = False
         self.public_key = self._identify()
 
     def _identify(self) -> str:
@@ -178,12 +183,47 @@ class Worker:
                     ),
                     on_cancel=self.notify_cancel,
                 )
+                if self._unowned:
+                    logger.info(
+                        "worker %s: souk knows its agents again — resuming normal claiming",
+                        self.public_key,
+                    )
+                    self._unowned = False
                 for run in claimed:
                     self._dispatch(run)
                 if full:
                     await asyncio.sleep(settings.worker_poll_interval_seconds)
             except asyncio.CancelledError:
                 raise
+            except NothingOwned:
+                # souk has no rows for any of these names — the database was
+                # replaced, or they were never registered, or they were
+                # deleted while this provider was offline. Nothing to claim,
+                # ever, until that changes.
+                #
+                # Stay alive and be loud. Staying alive is not optimism: the
+                # repair is someone registering these names again, and *the
+                # names do not change*, so this worker picks straight back up
+                # with no re-attach and nothing to reconfigure. That is new —
+                # while souk minted an id per agent, re-registering produced
+                # fresh ids and an in-process worker was stranded holding the
+                # old ones, so the honest advice used to include "attach it
+                # again with the new ones" (see docs/retiring-agent-id.md).
+                #
+                # Logged on entry and on recovery only. This is the state the
+                # whole change exists to make visible, and a line every
+                # interval would bury it in its own repetition.
+                if not self._unowned:
+                    logger.error(
+                        "worker %s: souk has registered none of this provider's agent "
+                        "names %s — it is claiming nothing, and these agents are not on "
+                        "the roster. Register them again; this worker resumes on its "
+                        "own, because what it serves has not changed.",
+                        self.public_key,
+                        self.agent_names,
+                    )
+                    self._unowned = True
+                await asyncio.sleep(settings.worker_long_poll_seconds)
             except InvalidRegistration:
                 # Almost always an expired token — get a new one and try
                 # again rather than leaving these agents silently unserved.
