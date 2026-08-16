@@ -129,6 +129,53 @@ identifier anywhere** — the case that is impossible today. Plus the ownership
 test still passing with the smallest possible edit; if it needs rewriting, the
 ownership model changed too and that was not this item.
 
+**Done in core; the rest is downstream and blocked on it.** `souk-directory`
+and `providers/pydantic-ai-agent` read `agent_id` out of the *gateway's* HTTP
+responses, not out of core, so migrating them now would mean writing against
+an API nothing serves yet. `souk-agent-sdk` is blocked on a structural
+decision instead — see below.
+
+### The SDK defines the interaction; transport belongs downstream
+
+Stated as a position, because it decides what `souk-agent-sdk` is for and it
+is currently being decided by accident.
+
+`souk-agent-sdk` defines how a provider and souk interact: the provider port,
+identity and registration signing, and **the provider's own worker loop**.
+What it should not contain is a transport. At most it packages an in-process
+(and local multi-process) binding; wrapping the three calls in a network is a
+downstream job.
+
+That is checkable the same way core's invariant is: the SDK's dependencies
+today are `grpcio`, `protobuf`, `httpx`, `httpx-sse`, `cryptography`, `pyjwt`
+— and only the last two are needed to define behaviour. If the first four are
+not installed, the package cannot be doing transport, and no discipline is
+required to keep it that way.
+
+Two unmerged branches point in opposite directions on this:
+`origin/chore/retire-grpc-wire` removes a transport from the SDK;
+`origin/feat/sdk-ws-transports` replaces it with a WebSocket one, which keeps
+transport here.
+
+**The provider owns its loop, and that is not duplication to be removed.**
+Core ships `souk/worker.py` and the SDK runs a loop of its own; that is two
+implementations of one *contract*, not one piece of knowledge written twice.
+Everything the loop decides is a provider-side policy — how much capacity to
+declare, how often to ask, whether to comply with a cancel, whether to
+reconnect — and `library-architecture.md` says so directly ("Whether a worker
+complies is the worker's business... Both are provider-side decisions").
+
+This matters for the WebSocket branch, whose SDK docstring says "the *server*
+drives the claim loop on this worker's behalf". That is not one loop instead
+of two; it is the provider handing its loop to the gateway, which brings back
+the pull model with a new puller — capacity becomes a `hello["maxClaim"]`
+field the server interprets, pacing becomes the server's, and the evidence
+that a provider is alive stops being "it claimed" and becomes "its socket is
+open". A transport fact standing in for a domain one is the thing this
+repository keeps having to undo.
+
+Worth asking before that branch merges, not after.
+
 ### W3 · Lifecycle
 
 Document: `agent-lifecycle.md`. Invariant 2.
