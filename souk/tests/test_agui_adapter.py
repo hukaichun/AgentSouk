@@ -132,3 +132,55 @@ async def test_events_encode_as_sse_payloads(souk, serve):
     payloads = [p async for p in result.encode()]
     assert all(isinstance(p, str) for p in payloads)
     assert payloads[0].startswith("{") and '"RUN_STARTED"' in payloads[0]
+
+
+# ---- What a provider can find out about its thread
+
+
+async def test_a_provider_can_read_the_history_its_run_input_does_not_carry(souk, serve):
+    """The gap `SoukLink.thread_messages` exists for.
+
+    `run_input` carries exactly what the caller sent for this run. A caller
+    that sends only its new line — which is what A2A's `message/send` always
+    is — leaves the agent unable to tell a tenth turn from a first. souk has
+    the thread the whole time.
+    """
+    served = await serve(None, "solo")
+    agent = served.agents["solo"]
+    adapter = AGUIAdapter(souk)
+
+    first = await adapter.run(agent, _body("t-1", "one"))
+    [_ async for _ in first.events]
+    second = await adapter.run(agent, _body(first.thread_id, "two"))
+    [_ async for _ in second.events]
+
+    history = await served.runtime.link.thread_messages(first.thread_id)
+
+    # Both turns and both replies — none of which the second run_input held.
+    assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
+    assert [m["content"] for m in history if m["role"] == "user"] == ["one", "two"]
+
+
+async def test_limit_keeps_the_most_recent(souk, serve):
+    """Context is wanted from the recent end, and over a wire this is one
+    response frame — a months-old thread is an unbounded one."""
+    served = await serve(None, "solo")
+    agent = served.agents["solo"]
+    adapter = AGUIAdapter(souk)
+
+    thread_id = None
+    for text in ("one", "two", "three"):
+        result = await adapter.run(agent, _body(thread_id or "t-1", text))
+        thread_id = result.thread_id
+        [_ async for _ in result.events]
+
+    assert len(await served.runtime.link.thread_messages(thread_id)) == 6
+    assert [m["content"] for m in await served.runtime.link.thread_messages(thread_id, limit=2)] == ["three", "done"]
+
+
+async def test_an_unknown_thread_is_empty_rather_than_an_error(souk, serve):
+    """A provider asking about a thread souk has never seen is a provider
+    asking a reasonable question about nothing, not a failure to report."""
+    served = await serve(None, "solo")
+
+    assert await served.runtime.link.thread_messages("no-such-thread") == []

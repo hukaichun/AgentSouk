@@ -139,3 +139,34 @@ class SoukLink(ABC):
         souk decides the outcome from what it saw, so this asserts nothing
         about success — only that there is nothing more coming.
         """
+
+    @abstractmethod
+    async def thread_messages(
+        self, thread_id: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """This thread's accumulated messages, oldest first.
+
+        The one thing a provider cannot work out for itself. What arrives in
+        `run_input` is exactly what the *caller* sent for this run and nothing
+        more, so an agent reached over AG-UI may see ten turns while the same
+        agent reached over A2A sees one message — `message/send` carries one.
+        The provider cannot tell those apart, and receiving a single message
+        is indistinguishable from a fresh conversation.
+
+        Deliberately a query rather than something added to `run_input`:
+        which context an agent wants is the agent's business. Windows differ,
+        costs differ, some agents summarise instead. souk holds the history
+        and does not decide how much of it anyone needs.
+
+        **Overlaps `run_input["messages"]` on purpose.** This returns the
+        thread, including the messages this run was started with, rather than
+        "everything before this run" — that second definition has no clean
+        meaning across a pause and resume, where a run is reopened and
+        appended to. Every message carries souk's own id, so a caller that
+        wants the difference can take it.
+
+        `limit` keeps the most recent N, because context is wanted from the
+        recent end. It is here from the first version rather than added
+        later: over a wire this is one response frame, a thread months old is
+        an unbounded one, and bounding it afterwards is a wire change.
+        """

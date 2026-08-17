@@ -17,10 +17,13 @@ from __future__ import annotations
 import inspect
 import re
 
+import pytest
+
 from souk_provider_sdk import (
     CONNECTED_PROVIDER_ATTRS,
     DELIVERED_RUN_FIELDS,
     REGISTRATION_FIELDS,
+    LINK_QUERY_METHODS,
     LINK_REPORT_METHODS,
     InProcessLink,
     AgentHandle,
@@ -102,6 +105,50 @@ def test_the_reporting_half_the_sdk_declares_is_what_the_link_supplies():
         assert inspect.iscoroutinefunction(method)
         bound = list(inspect.signature(method).parameters)
         assert len(bound) == len(params), f"{name}{params} vs {bound}"
+
+
+def test_the_query_half_the_sdk_declares_is_what_the_link_supplies():
+    """The direction the merge made room for: what a provider may ask souk
+    about the work it was given.
+
+    Kept short on purpose — `contract.LINK_QUERY_METHODS` carries the rule.
+    Every method here is one every transport must implement and one more
+    frame type every wire must carry, so the bar is "a provider needs it
+    about this work and has no other way to know".
+    """
+    link = InProcessLink(souk=None, runtime=ProviderRuntime(ProviderIdentity.generate(), HandleProvider([])))
+
+    for name, params in LINK_QUERY_METHODS.items():
+        method = getattr(link, name, None)
+        assert method is not None, f"the link has no {name}"
+        assert inspect.iscoroutinefunction(method), f"{name} has to be awaitable — it crosses a wire"
+        assert set(inspect.signature(method).parameters) == set(params)
+
+
+def test_a_link_that_only_reports_is_not_constructible():
+    """Query methods are abstract, not optional with a default. A transport
+    that skips one should fail where it is written, not when an agent first
+    asks."""
+    from souk_provider_sdk import SoukLink
+
+    class ReportsOnly(SoukLink):
+        public_key = "k"
+        max_concurrent_runs = None
+
+        async def offer(self, run):
+            return True
+
+        def cancel(self, run_id):
+            pass
+
+        async def report_event(self, run_id, event):
+            pass
+
+        async def finish_run(self, run_id):
+            pass
+
+    with pytest.raises(TypeError, match="thread_messages"):
+        ReportsOnly()
 
 
 def test_the_runtime_reports_through_the_link_and_holds_no_callbacks():

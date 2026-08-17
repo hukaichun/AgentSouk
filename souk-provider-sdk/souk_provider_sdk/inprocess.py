@@ -78,3 +78,17 @@ class InProcessLink(SoukLink):
 
     async def finish_run(self, run_id: str) -> None:
         self._souk.finish_run(run_id, claimed_by=self.public_key)
+
+    async def thread_messages(
+        self, thread_id: str, *, limit: int | None = None
+    ) -> list[dict[str, Any]]:
+        """souk's own read, sliced here.
+
+        `limit` is applied in this process because souk's query has no bound
+        of its own. Over a wire the slicing has to happen on souk's side —
+        the whole point of the parameter is to keep it out of the response
+        frame — so a socket link sends `limit` rather than trimming what it
+        receives.
+        """
+        messages = await self._souk.get_thread_messages(thread_id)
+        return messages[-limit:] if limit is not None else messages
