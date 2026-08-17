@@ -29,6 +29,7 @@ from souk_provider_sdk.identity import (
     ProviderIdentity,
     deletion_payload,
     registration_payload,
+    verify_signature,
 )
 from souk_provider_sdk.provider import AgentHandle, DeliveredRun, HandleProvider, Provider
 from souk_provider_sdk.runtime import ProviderRuntime
@@ -49,4 +50,5 @@ __all__ = [
     "ProviderRuntime",
     "deletion_payload",
     "registration_payload",
+    "verify_signature",
 ]

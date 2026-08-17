@@ -31,7 +31,8 @@ import time
 from pathlib import Path
 
 import jwt
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 # How long one freshly-signed delegation hop stays usable. Only the last hop's
 # expiry is enforced by souk, so this bounds "who is using this chain right
@@ -43,6 +44,38 @@ ACTOR_CHAIN_TTL_SECONDS = 300
 # hands you the second — measured against souk before the prefixes existed.
 _REGISTER = "souk-register"
 _DELETE_AGENT = "souk-delete-agent"
+
+
+def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
+    """Did the holder of this public key sign these bytes?
+
+    The half this package was missing. It could sign anything and check
+    nothing, which is exactly the asymmetry souk had in reverse before
+    `ProviderIdentity.sign` existed: souk published a general verifier while
+    withholding a general signer.
+
+    A provider needs this to check the *other* side. souk has an identity of
+    its own now, and a handshake where only the provider proves itself is a
+    handshake a provider cannot use to tell one souk from another. Verifying
+    that is the point of souk having a key at all.
+
+    Deliberately a second implementation rather than souk's, imported. This
+    package does not depend on souk — that is the boundary — and something
+    derived from souk agrees with souk by construction and therefore checks
+    nothing. Same device as the signing payloads below: souk's own suite
+    drives this pair against `souk.identity.verify_signature`, so an
+    implementation that drifts fails at merge instead of at a handshake.
+
+    False rather than raising, for every way this can fail — a bad signature,
+    a malformed key, non-hex input. A caller is asking a yes/no question
+    about data that arrived over a wire, and every no is the same answer.
+    """
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
+        public_key.verify(bytes.fromhex(signature_hex), payload)
+        return True
+    except (InvalidSignature, ValueError):
+        return False
 
 
 def registration_payload(agent_names: list[str], timestamp: int) -> bytes:
