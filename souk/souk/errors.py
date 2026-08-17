@@ -39,6 +39,13 @@ class AgentNotFound(SoukError):
     callers see as the same thing."""
 
 
+class LlmProviderNotFound(SoukError):
+    """No LLM offering under this (provider_key, name) pair — the KYOK
+    mirror of AgentNotFound, raised for the same acts: attaching for an
+    offering the key never registered, or binding a run to one that does
+    not exist."""
+
+
 class AgentInUse(SoukError):
     """Refused a deletion because something is still using the agent.
 

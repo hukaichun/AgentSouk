@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from openai.types.chat import ChatCompletionChunk
 
 from souk import repo
-from souk.errors import InvalidRegistration, InvalidRunInput, KyokRejected
+from souk.errors import KyokRejected, LlmProviderNotFound
 from souk.identity import new_actor_chain
 from souk.kyok import read_kyok_forwarded_props
 from souk.models import LlmRef
@@ -370,7 +370,7 @@ async def test_an_unknown_llm_offering_fails_the_run_at_start(souk, serve, llm):
     agent = KyokTokenAgent()
     served = await serve(agent, "kyok-agent")
     wrong = LlmRef(provider_key=identity.public_key, name="no-such-model")
-    with pytest.raises(InvalidRunInput, match="no-such-model"):
+    with pytest.raises(LlmProviderNotFound, match="no-such-model"):
         await AGUIAdapter(souk).run(served.agents["kyok-agent"], _body(wrong))
 
 
@@ -411,9 +411,42 @@ async def test_two_providers_may_both_offer_gpt4(souk, serve, llm):
         souk.detach_llm_provider(other.public_key)
 
 
+async def test_attach_touches_and_announces_like_attach_provider(souk):
+    """The attach mirror, checked member by member: attaching marks the
+    offerings seen (online from attach, not from first work) and announces
+    the change; detaching announces too, and a no-op detach stays silent."""
+    from souk.changes import LlmRosterChanged
+
+    events: list = []
+    unsubscribe = souk.on_change(events.append)
+    try:
+        identity = ProviderIdentity.generate()
+        signature, timestamp = sign_llm_registration(identity, ["m"])
+        await souk.register_llm_providers(identity.public_key, signature, timestamp, ["m"])
+        async with souk.session() as session:
+            before = (await repo.get_llm_provider(
+                session, LlmRef(provider_key=identity.public_key, name="m")
+            ))["last_seen_at"]
+
+        await souk.attach_llm_provider(InProcessLLMProvider(identity, StubLLM()), ["m"])
+        async with souk.session() as session:
+            after = (await repo.get_llm_provider(
+                session, LlmRef(provider_key=identity.public_key, name="m")
+            ))["last_seen_at"]
+        assert after >= before
+
+        souk.detach_llm_provider(identity.public_key)
+        souk.detach_llm_provider(identity.public_key)  # no-op: nothing attached
+        assert [type(e) for e in events].count(LlmRosterChanged) == 3  # register, attach, one detach
+    finally:
+        unsubscribe()
+
+
 async def test_an_unregistered_llm_provider_cannot_attach(souk):
     """In-process is not trusted: sharing the process is not a reason to
-    skip registration, for this roster exactly as for the other."""
+    skip registration, for this roster exactly as for the other — and the
+    error is the mirror of attach_provider's AgentNotFound, not a
+    registration-signature complaint."""
     lurker = InProcessLLMProvider(ProviderIdentity.generate(), StubLLM())
-    with pytest.raises(InvalidRegistration):
+    with pytest.raises(LlmProviderNotFound):
         await souk.attach_llm_provider(lurker, ["gpt4"])

@@ -17,7 +17,7 @@ from ag_ui.core import RunAgentInput, RunErrorEvent, RunStartedEvent
 from souk import repo
 from souk.models import AgentRef, LlmRef
 from souk.agui import build_run_agent_input, rewrite_message_ids
-from souk.errors import AgentNotFound, InvalidRunInput
+from souk.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound
 from souk.identity import verify_actor_chain
 from souk.kyok import (
     KyokBinding,
@@ -126,7 +126,7 @@ class AGUIAdapter:
             metadata = strip_kyok_context(metadata)
             if kyok_ref is not None:
                 if await repo.get_llm_provider(session, kyok_ref) is None:
-                    raise InvalidRunInput(f"unknown KYOK LLM provider '{kyok_ref}'")
+                    raise LlmProviderNotFound(f"unknown KYOK LLM provider '{kyok_ref}'")
 
             # AG-UI's `threadId` is minted by the *caller* (the schema
             # requires it) and AG-UI has no separate "create thread" concept,
