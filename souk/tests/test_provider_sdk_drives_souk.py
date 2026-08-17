@@ -22,7 +22,7 @@ import asyncio
 
 import pytest
 
-from souk_provider_sdk import InProcessProvider, AgentHandle, HandleProvider, ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessLink, AgentHandle, HandleProvider, ProviderIdentity, ProviderRuntime
 
 from souk import repo
 from souk.models import AgentRef
@@ -62,7 +62,7 @@ async def _attach(souk, runtimes, agents: dict, **kwargs) -> ProviderIdentity:
     )
     runtimes.append(runtime)
     runtime.start()
-    await souk.attach_provider(InProcessProvider(souk, runtime), list(agents))
+    await souk.attach_provider(InProcessLink(souk, runtime), list(agents))
     return identity
 
 

@@ -32,23 +32,24 @@ DELIVERED_RUN_FIELDS = frozenset(
     {"run_id", "agent_name", "run_input", "thread_id", "metadata"}
 )
 
-# What the runtime reports back through, and with what. Stated as data so the
+# The reporting half of `SoukLink`, and with what. Stated as data so the
 # other side can assert its own methods still line up with these arities
 # rather than discovering it at the first event.
 #
-# Both synchronous: an agent must never wait on whatever is downstream, and
-# `on_finish` is called while unwinding a cancellation, where an await would
-# be interrupted before it arrived.
-REPORT_CALLBACKS = {
-    "on_event": ("run_id", "event"),
-    "on_finish": ("run_id",),
+# Both async. They were synchronous on a rule that described a different
+# line — the agent's own decoupling is `ProviderRuntime`'s output queue, not
+# the arity of these — and awaiting is what lets a socket transport write
+# without building a second queue to return from.
+LINK_REPORT_METHODS = {
+    "report_event": ("run_id", "event"),
+    "finish_run": ("run_id",),
 }
 
 # What souk's broker needs from a provider: who it is, how much it will take
 # at once, how to give it a run, how to ask it to stop one. Souk's
 # `ConnectedProvider` protocol is the same four.
 #
-# `SoukConnection` is the base class that supplies them, so a transport that
+# `SoukLink` is the base class that supplies them, so a transport that
 # forgets one now fails at construction. This list stays as data anyway,
 # because it is the *cross-repo* check: souk's suite asserts its own protocol
 # still asks for exactly these, and a fourth thing appearing there would

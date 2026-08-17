@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from souk_provider_sdk import InProcessProvider, ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
 
 import pytest
 
@@ -50,7 +50,7 @@ async def brisk(settings: CoreSettings):
         runtime = ProviderRuntime(identity, provider)
         runtimes.append(runtime)
         runtime.start()
-        await souk.attach_provider(InProcessProvider(souk, runtime), list(names))
+        await souk.attach_provider(InProcessLink(souk, runtime), list(names))
         return runtime
 
     souk.attach = _attach

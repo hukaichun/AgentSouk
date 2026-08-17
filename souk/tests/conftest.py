@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import CoreSettings
 from souk.core import Souk
-from souk_provider_sdk import InProcessProvider, ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -124,7 +124,7 @@ async def attach(souk: Souk):
         runtime = ProviderRuntime(identity, provider, **kwargs)
         started.append(runtime)
         runtime.start()
-        await souk.attach_provider(InProcessProvider(souk, runtime), list(names))
+        await souk.attach_provider(InProcessLink(souk, runtime), list(names))
         return runtime
 
     yield _attach

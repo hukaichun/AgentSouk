@@ -453,8 +453,8 @@ shape at four call sites.
 There are three kinds of agreement here and only two of them are removable:
 
 - **API** — calling souk's methods. Removed. Results now leave through
-  `on_event(run_id, event)` and `on_finish(run_id)`, two synchronous
-  callables the caller supplies.
+  `report_event` / `finish_run` on a `SoukLink`, whose implementation is
+  where souk's names are allowed to appear.
 - **Type** — reading souk's objects. Removed. Runs arrive as `DeliveredRun`,
   the SDK's own frozen dataclass.
 - **Protocol** — the registration signing payload in `identity.py`. *Not*
@@ -463,23 +463,43 @@ There are three kinds of agreement here and only two of them are removable:
   stated independently on each side rather than shared, because something
   derived from souk agrees with souk by construction and checks nothing.
 
-What is left is one class, `souk_provider_sdk.SoukConnection`, and the
-translation happens there once for every transport that will ever exist:
+What is left is one class, `souk_provider_sdk.SoukLink`, and the translation
+happens there once for every transport that will ever exist:
 
     souk's ClaimedRun ──▶ DeliveredRun ──▶ however this transport carries it
 
 `deliver` is concrete and holds every souk field name this package depends
 on. Subclasses implement `offer(DeliveredRun) -> bool` and `cancel(run_id)`,
-and declare `public_key` and `max_concurrent_runs` — nothing else differs
-between a function call and a socket. `InProcessProvider` is one
-implementation; a gateway's `SocketProvider`, which answers `offer` with a
-frame and an ack, is another. In-process is a transport, not a special case.
+declare `public_key` and `max_concurrent_runs`, and report back through
+`report_event` / `finish_run` — nothing else differs between a function call
+and a socket. In-process is a transport, not a special case.
 
-Only the souk-facing half is in the base. Reporting events back is not, and
-cannot be: in-process the runtime is right there and its callbacks go
-straight to souk, but over a wire the connection souk talks to lives in the
-gateway while the runtime is on the far side of the socket. A base covering
-both directions would fit exactly one of them.
+The reporting pair is `async`, and was briefly not. The rule it was written
+under — "an agent must never wait on what is downstream" — is true, and is
+provided by `ProviderRuntime`'s output *queue*: the agent does `put_nowait`
+and is gone, whatever the drain does afterwards. Its companion, "the end
+marker is sent while unwinding a cancellation, where an await would be
+interrupted", is also true and also about that queue put, in `_execute`'s
+`finally`; `finish_run` is called later, from the drain's own task, which is
+not being cancelled. Both sentences described a different line than the one
+they were attached to. Awaiting is what lets a socket link await its write
+and put the backpressure on one queue instead of a second one inside every
+transport. souk's own `report_event` stays synchronous for its own reason —
+the run's pipeline persists on its own task — and the two are not in tension.
+
+**Both directions, one object.** It covered only the downward half at first,
+with the upward half two loose callables on `ProviderRuntime`, and that split
+was accidental rather than designed: the in-process implementation always did
+both — it held the souk *and* the runtime and wired the callbacks itself. Over
+a wire the two directions are one socket. Naming one and not the other left
+the object half-described and left nowhere to put a third thing.
+
+A gateway's `SocketProvider` is **not** one of these, though an earlier
+version of this section said so. It lives on souk's side, holds an outbound
+queue and no runtime, and satisfies `broker.ConnectedProvider` because that
+is souk's own protocol — not by inheriting from this package, which it could
+not do and should not. The provider-side object opposite it is the socket
+*client*, which does carry both directions and is what would subclass this.
 
 It ships from **the SDK**, and the reason is a dependency asymmetry rather
 than a preference. Nothing in it imports souk — every souk name is reached by
@@ -492,10 +512,10 @@ dependency on the SDK to ship it. Zero against one is not a trade.
 An abstraction with one implementation is a class with extra steps, so the
 SDK's suite writes a second one — a queue with an ack, holding no runtime,
 which is the shape a gateway-side connection has — and drives the base
-through it (`souk-provider-sdk/tests/test_connection.py`).
+through it (`souk-provider-sdk/tests/test_link.py`).
 
 `souk_provider_sdk/contract.py` states the shapes the adapter must satisfy —
-`DELIVERED_RUN_FIELDS`, `REPORT_CALLBACKS`, `CONNECTED_PROVIDER_ATTRS` — and
+`DELIVERED_RUN_FIELDS`, `LINK_REPORT_METHODS`, `CONNECTED_PROVIDER_ATTRS` — and
 souk's suite asserts they still hold, so a change on either side fails at
 merge time rather than at a customer. That check earned itself immediately:
 `ConnectedProvider` is *four* things, not the three its own docstring claims,

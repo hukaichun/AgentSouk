@@ -67,7 +67,7 @@ checks nothing.
 ## The souk-facing side is a class you subclass
 
 souk's broker knows a provider by four things and nothing about what carries
-them. `SoukConnection` is that, from the provider's side, with the one step
+them. `SoukLink` is that, from the provider's side, with the one step
 every transport would otherwise repeat done once:
 
 ```
@@ -78,11 +78,11 @@ souk's ClaimedRun ──▶ DeliveredRun ──▶ however this transport carrie
 on**. A transport implements only what is actually different:
 
 ```python
-class InProcessProvider(SoukConnection):     # ships here — a function call
+class InProcessLink(SoukLink):     # ships here — a function call
     async def offer(self, run: DeliveredRun) -> bool:
         return await self._runtime.deliver(run)
 
-class SocketProvider(SoukConnection):        # a gateway — a frame, and an ack
+class SocketClient(SoukLink):          # a provider's own socket end
     async def offer(self, run: DeliveredRun) -> bool:
         self._outbound.put_nowait(encode(run))
         return await self._ack(run.run_id)
@@ -105,11 +105,11 @@ lives in the gateway and the runtime is across the socket.
 ## Using the in-process one
 
 ```python
-from souk_provider_sdk import InProcessProvider
+from souk_provider_sdk import InProcessLink
 
 runtime = ProviderRuntime(identity, provider)
 runtime.start()
-await souk.attach_provider(InProcessProvider(souk, runtime), ["greeter"])
+await souk.attach_provider(InProcessLink(souk, runtime), ["greeter"])
 ```
 
 It adds no dependency: souk is never imported, only duck-typed, so this
@@ -123,7 +123,7 @@ mean souk importing this package to build a `DeliveredRun`.
 from souk.config import CoreSettings
 from souk.core import Souk
 from souk_provider_sdk import (
-    InProcessProvider, ProviderIdentity, ProviderRuntime,
+    InProcessLink, ProviderIdentity, ProviderRuntime,
 )
 
 souk = Souk(CoreSettings(database_url=..., token_signing_secret=...))
@@ -143,7 +143,7 @@ agent = registered.agents["greeter"]            # an AgentRef
 # 3. The loop is yours. Start it, then put a connection in front of it.
 runtime = ProviderRuntime(identity, Greeter(), max_queued_runs=4)
 runtime.start()
-await souk.attach_provider(InProcessProvider(souk, runtime), ["greeter"])
+await souk.attach_provider(InProcessLink(souk, runtime), ["greeter"])
 
 assert souk.is_serving(agent)
 
@@ -236,15 +236,15 @@ a stop. Neither is a lie — they are different shutdowns.
 
 ## What souk has to be
 
-`ProviderRuntime` takes no souk at all. Results leave through `on_event` and
-`on_finish`, two synchronous callables — synchronous because an agent must
-never wait on whatever is downstream, and because `on_finish` is called while
-unwinding a cancellation, where an await would be interrupted before it
-arrived.
+`ProviderRuntime` takes no souk at all. Results leave through `report_event`
+and `finish_run` on the same `SoukLink` souk hands runs to — a provider and a
+souk are one relationship, so they are one object. Both are `async`, so a
+transport with a wire under it can await its write; the agent is decoupled by
+the runtime's output queue, not by their arity.
 
-Inbound, a caller needs four things from the runtime: `public_key`,
+Inbound, souk needs four things from the link: `public_key`,
 `max_concurrent_runs`, `deliver`, `cancel`. Souk's `ConnectedProvider` is the
-same four — which is why the adapter above is thin — and `contract.py` states
+same four — which is why `InProcessLink` is thin — and `contract.py` states
 them as data so the other side can check rather than assume.
 
 Ordering stays here. `_report_output` is a single consumer, so a run's events
