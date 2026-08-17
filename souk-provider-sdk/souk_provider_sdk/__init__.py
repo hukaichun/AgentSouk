@@ -28,6 +28,7 @@ from souk_provider_sdk.link import SoukLink
 from souk_provider_sdk.identity import (
     ProviderIdentity,
     deletion_payload,
+    kyok_call_payload,
     registration_payload,
     verify_signature,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "ProviderIdentity",
     "ProviderRuntime",
     "deletion_payload",
+    "kyok_call_payload",
     "registration_payload",
     "verify_signature",
 ]

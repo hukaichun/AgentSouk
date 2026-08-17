@@ -18,20 +18,26 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from souk import repo
 from souk.errors import KyokRejected
-from souk.identity import is_timestamp_fresh, verify_signature
-from souk.kyok import COMPLETION_DONE, KyokToken, verify_kyok_token
+from souk.identity import (
+    is_timestamp_fresh,
+    kyok_call_signing_payload,
+    verify_signature,
+)
+from souk.kyok import (
+    COMPLETION_DONE,
+    KyokToken,
+    session_routing_key,
+    verify_kyok_token,
+)
 
 if TYPE_CHECKING:
     from souk.core import Souk
-
-logger = logging.getLogger("souk.protocols.kyok")
 
 # How long a provider's completion waits, queued, for the caller's bridge to
 # notice it before souk gives up — the KYOK counterpart of a run's
@@ -70,8 +76,18 @@ class KyokAdapter:
         self._souk = souk
 
     async def poll(self, session_id: str, wait_seconds: float) -> dict[str, Any] | None:
-        """A caller's bridge asking whether any completion is waiting for it."""
-        return await self._souk.kyok_bridge.poll_one(session_id, wait_seconds)
+        """A caller's bridge asking whether any completion is waiting for it.
+
+        Takes the session id itself and derives the routing key here, so the
+        secret stops at this boundary: a transport hands over whatever the
+        bridge presented and never needs to know how sessions are keyed. The
+        provider's token carries only the derived key (see
+        kyok.session_routing_key), which is why the two sides meet at a hash
+        rather than at the id.
+        """
+        return await self._souk.kyok_bridge.poll_one(
+            session_routing_key(session_id), wait_seconds
+        )
 
     async def complete(
         self,
@@ -104,38 +120,41 @@ class KyokAdapter:
 
         await self._verify_caller(token, bearer, body, timestamp, signature)
 
-        payload = json.loads(body)
-        request_id, queue = self._souk.kyok_bridge.submit(token.session_id, payload)
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as e:
+            # After the authorization checks, not before: what a caller may
+            # learn about its own malformed request is a different question
+            # from whether it was allowed to ask at all.
+            raise KyokRejected("KYOK completion body is not valid JSON", status=400) from e
+        request_id, queue = self._souk.kyok_bridge.submit(token.session_key, payload)
         return CompletionRelay(
             request_id=request_id,
             stream_requested=bool(payload.get("stream")),
             chunks=self._drain(request_id, queue),
         )
 
-    async def respond(self, request_id: str, lines: AsyncIterator[bytes]) -> None:
-        """The caller's bridge streaming the real LLM's answer back, as
-        newline-delimited JSON. Consumed incrementally so a long completion
-        never sits whole in memory on either side."""
+    async def respond(self, request_id: str, chunks: AsyncIterator[dict[str, Any]]) -> None:
+        """The caller's bridge streaming the real LLM's answer back, one
+        already-decoded chunk at a time. Consumed incrementally so a long
+        completion never sits whole in memory on either side.
+
+        Chunks, not newline-delimited bytes. It took the wire form until an
+        in-process caller made the cost visible: the only transport left
+        (a socket, whose frames arrive as objects) was serialising each chunk
+        to NDJSON purely so this function could parse it straight back, with
+        no network anywhere between the two. Framing belongs to whatever is
+        doing the framing; a caller that is a function call does none.
+        """
         pending = self._souk.kyok_bridge.get(request_id)
         if pending is None:
             raise KyokRejected(f"no pending KYOK completion '{request_id}'", status=404)
 
-        buffer = b""
-        async for piece in lines:
-            buffer += piece
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                if not line.strip():
-                    continue
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    logger.warning("kyok respond %s: dropping malformed line", request_id)
-                    continue
-                if isinstance(message, dict) and message.get("error"):
-                    pending.response_queue.put_nowait({"error": message["error"]})
-                    break
-                pending.response_queue.put_nowait(message)
+        async for chunk in chunks:
+            if chunk.get("error"):
+                pending.response_queue.put_nowait({"error": chunk["error"]})
+                break
+            pending.response_queue.put_nowait(chunk)
         pending.response_queue.put_nowait(COMPLETION_DONE)
 
     async def _verify_caller(
@@ -168,7 +187,9 @@ class KyokAdapter:
         if registered is None:
             raise KyokRejected(f"agent '{token.agent}' is not registered", status=403)
 
-        payload = f"{bearer}:{timestamp}:{hashlib.sha256(body).hexdigest()}".encode()
+        payload = kyok_call_signing_payload(
+            bearer, int(timestamp), hashlib.sha256(body).hexdigest()
+        )
         if not verify_signature(token.agent.provider_key, signature, payload):
             raise KyokRejected("KYOK call-time signature verification failed", status=401)
 

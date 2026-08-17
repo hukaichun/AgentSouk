@@ -44,6 +44,7 @@ ACTOR_CHAIN_TTL_SECONDS = 300
 # hands you the second — measured against souk before the prefixes existed.
 _REGISTER = "souk-register"
 _DELETE_AGENT = "souk-delete-agent"
+_KYOK_CALL = "souk-kyok-call"
 
 
 def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
@@ -90,6 +91,20 @@ def deletion_payload(agent_name: str, timestamp: int) -> bytes:
     """One name, never a batch: registering is declarative and idempotent,
     deleting is neither."""
     return f"{_DELETE_AGENT}:{agent_name}:{timestamp}".encode()
+
+
+def kyok_call_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
+    """What one Keep Your Own Key completion call signs: the run-scoped token
+    being presented, when, and a hash of the exact body.
+
+    A provider's model client sends the same static `api_key` on every
+    request, so the token alone says only "whoever is calling holds a copy of
+    what souk minted". This is the per-call half. The body hash is what stops
+    a captured signature being replayed against a *different* request, and the
+    timestamp is what stops it being replayed at all after the freshness
+    window.
+    """
+    return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
 
 
 class ProviderIdentity:
