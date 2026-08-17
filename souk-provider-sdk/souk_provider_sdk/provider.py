@@ -17,11 +17,13 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from ag_ui.core import RunAgentInput
+
 
 class Provider(Protocol):
     """One identity offering one or more agents."""
 
-    def run_stream(self, agent_name: str, run_input: dict[str, Any]) -> AsyncIterator[Any]: ...
+    def run_stream(self, agent_name: str, run_input: RunAgentInput) -> AsyncIterator[Any]: ...
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,7 @@ class DeliveredRun:
 
     run_id: str
     agent_name: str
-    run_input: dict[str, Any]
+    run_input: RunAgentInput
     thread_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -71,7 +73,7 @@ class AgentHandle:
     """
 
     name: str
-    run_stream: Callable[[dict[str, Any]], AsyncIterator[Any]]
+    run_stream: Callable[[RunAgentInput], AsyncIterator[Any]]
     description: str = ""
     # Merged into the agent's public card. `skills` goes here.
     agent_card_extra: dict[str, Any] = field(default_factory=dict)
@@ -107,5 +109,5 @@ class HandleProvider:
     def __init__(self, agents: list[AgentHandle]) -> None:
         self.agents = {agent.name: agent for agent in agents}
 
-    def run_stream(self, agent_name: str, run_input: dict[str, Any]) -> AsyncIterator[Any]:
+    def run_stream(self, agent_name: str, run_input: RunAgentInput) -> AsyncIterator[Any]:
         return self.agents[agent_name].run_stream(run_input)

@@ -20,6 +20,9 @@ import logging
 from functools import partial
 from typing import TYPE_CHECKING
 
+from ag_ui.core import Event
+from pydantic import TypeAdapter, ValidationError
+
 from souk import repo
 from souk.agui_reduce import reduce_events_to_messages
 from souk.broker import (
@@ -37,6 +40,15 @@ if TYPE_CHECKING:
     from souk.core import Souk
 
 logger = logging.getLogger("souk.handlers")
+
+# Every event a provider reports goes through this before it is trusted as
+# AG-UI. souk already treats ag-ui-protocol as ground truth on the way in
+# (RunAgentInput) and on the way out of storage (thread_messages,
+# souk-provider-sdk); this closes the one gap where a provider's raw event
+# reached callers, storage and `reduce_events_to_messages` unchecked. A
+# CUSTOM event (ag_ui.core.CustomEvent) is still just `{type, name, value}`
+# and validates fine — this rejects garbage, not a provider's own vocabulary.
+_EVENT = TypeAdapter(Event)
 
 
 async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
@@ -62,6 +74,37 @@ async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
     # live caller must not end up having seen an event that was never
     # durably recorded.
     event = cmd.event
+    try:
+        _EVENT.validate_python(event)
+    except ValidationError as e:
+        # Not relayed, not persisted as a run event: reduce_events_to_messages
+        # and every real AG-UI client downstream assume this table holds
+        # actual AG-UI events, and a provider producing garbage is not
+        # evidence worth feeding them. The malformed event is only in this
+        # log line. Ending the run reuses the same path the health sweep
+        # uses for a provider that stalls — this is the same complaint
+        # (a provider that took a run and did not produce a valid stream
+        # for it), just caught immediately instead of after a timeout.
+        logger.warning(
+            "run %s: provider sent an event that is not valid AG-UI, ending the run: %s",
+            run.run_id,
+            e,
+        )
+        # A single malformed event does not arrive alone: the runtime's
+        # output loop reports a burst of events (and the FinishStream behind
+        # them) before this task is ever scheduled to look at the first one,
+        # so RUN_FINISHED and/or FinishStream are typically already queued
+        # behind this one. Left alone, _handle_finish would process one of
+        # those first, decide "completed" from a stream that in fact never
+        # produced a coherent one, and the Fail pushed below would arrive too
+        # late — queued behind a break that already happened and forgot this
+        # run. Once a run's provider has sent one thing that is not AG-UI,
+        # nothing else it queued for this run is trustworthy either, so all
+        # of it is discarded and Fail is the only thing left to process.
+        while not run.in_queue.empty():
+            run.in_queue.get_nowait()
+        souk.broker.push(run.run_id, Fail("provider sent a malformed AG-UI event"))
+        return
     if event.get("type") == "RUN_FINISHED":
         # The agent finished on its own terms. Remembered rather than acted
         # on: RUN_FINISHED is not itself a stream terminator (see

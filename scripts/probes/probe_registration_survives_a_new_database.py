@@ -63,12 +63,12 @@ def migrate() -> None:
 class Provider:
     """Holds only what its own configuration says: the names it serves."""
 
-    async def run_stream(self, agent_name: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_name: str, run_input):
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": f"served by {agent_name}"}
         yield {"type": "TEXT_MESSAGE_END", "messageId": "m1"}
-        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
 
 async def main() -> int:

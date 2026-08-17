@@ -25,7 +25,7 @@ SKILLS = [
 
 
 async def _run_stream(run_input: dict):
-    yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+    yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
 
 async def _register(souk, identity, *handles: AgentHandle):

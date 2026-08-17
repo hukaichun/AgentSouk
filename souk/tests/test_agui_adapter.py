@@ -39,8 +39,8 @@ class _NeverFinishes:
     async def run_stream(self, agent_name: str, run_input: dict):
         yield {
             "type": "RUN_STARTED",
-            "threadId": run_input["threadId"],
-            "runId": run_input["runId"],
+            "threadId": run_input.thread_id,
+            "runId": run_input.run_id,
         }
         await asyncio.Event().wait()
 
@@ -157,8 +157,8 @@ async def test_a_provider_can_read_the_history_its_run_input_does_not_carry(souk
     history = await served.runtime.link.thread_messages(first.thread_id)
 
     # Both turns and both replies — none of which the second run_input held.
-    assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
-    assert [m["content"] for m in history if m["role"] == "user"] == ["one", "two"]
+    assert [m.role for m in history] == ["user", "assistant", "user", "assistant"]
+    assert [m.content for m in history if m.role == "user"] == ["one", "two"]
 
 
 async def test_limit_keeps_the_most_recent(souk, serve):
@@ -175,7 +175,7 @@ async def test_limit_keeps_the_most_recent(souk, serve):
         [_ async for _ in result.events]
 
     assert len(await served.runtime.link.thread_messages(thread_id)) == 6
-    assert [m["content"] for m in await served.runtime.link.thread_messages(thread_id, limit=2)] == ["three", "done"]
+    assert [m.content for m in await served.runtime.link.thread_messages(thread_id, limit=2)] == ["three", "done"]
 
 
 async def test_an_unknown_thread_is_empty_rather_than_an_error(souk, serve):

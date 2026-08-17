@@ -26,13 +26,17 @@ what would subclass this.
 
 Nothing here imports souk. Every souk name is reached by attribute or by
 call, which is what keeps this package's dependency list `cryptography` +
-`pyjwt` — see `contract.py`.
+`pyjwt` + `ag-ui-protocol` — see `contract.py`. That last one is not souk:
+it is the schema `thread_messages` hands back, the same package souk itself
+validates every message against before it is ever stored.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any
+
+from ag_ui.core import Message, RunAgentInput
 
 from souk_provider_sdk.provider import DeliveredRun
 
@@ -89,7 +93,7 @@ class SoukLink(ABC):
             DeliveredRun(
                 run_id=run.run_id,
                 agent_name=run.agent.name,
-                run_input=run.run_input,
+                run_input=RunAgentInput.model_validate(run.run_input),
                 thread_id=run.thread_id,
             )
         )
@@ -143,7 +147,7 @@ class SoukLink(ABC):
     @abstractmethod
     async def thread_messages(
         self, thread_id: str, *, limit: int | None = None
-    ) -> list[dict[str, Any]]:
+    ) -> list[Message]:
         """This thread's accumulated messages, oldest first.
 
         The one thing a provider cannot work out for itself. What arrives in
@@ -169,4 +173,13 @@ class SoukLink(ABC):
         recent end. It is here from the first version rather than added
         later: over a wire this is one response frame, a thread months old is
         an unbounded one, and bounding it afterwards is a wire change.
+
+        Typed as `ag_ui.core.Message`, not a bare dict. Every message here was
+        built from that same type on souk's side — its own AG-UI turns
+        dumped straight from `RunAgentInput`, and A2A turns translated into
+        the same shape before storage (see `a2a_translate.py`) — so a dict
+        would only be throwing that array away and asking every provider to
+        reassert it by hand. `InProcessLink` validates against it too, so a
+        row that ever drifted from the shape fails loudly here instead of at
+        whatever field access a provider happened to try first.
         """

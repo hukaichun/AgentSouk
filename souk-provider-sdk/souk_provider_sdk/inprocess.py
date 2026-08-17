@@ -16,11 +16,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from ag_ui.core import Message
+from pydantic import TypeAdapter
+
 from souk_provider_sdk.link import SoukLink
 
 if TYPE_CHECKING:
     from souk_provider_sdk.provider import DeliveredRun
     from souk_provider_sdk.runtime import ProviderRuntime
+
+# Built once: a TypeAdapter compiles its validator at construction, and every
+# call to `InProcessLink.thread_messages` would otherwise pay that cost again
+# for the same type.
+_MESSAGES = TypeAdapter(list[Message])
 
 
 class InProcessLink(SoukLink):
@@ -81,14 +89,21 @@ class InProcessLink(SoukLink):
 
     async def thread_messages(
         self, thread_id: str, *, limit: int | None = None
-    ) -> list[dict[str, Any]]:
-        """souk's own read, sliced here.
+    ) -> list[Message]:
+        """souk's own read, validated and sliced here.
 
         `limit` is applied in this process because souk's query has no bound
         of its own. Over a wire the slicing has to happen on souk's side —
         the whole point of the parameter is to keep it out of the response
         frame — so a socket link sends `limit` rather than trimming what it
         receives.
+
+        `souk.get_thread_messages` is a bare read of stored JSON with no
+        shape guarantee of its own (see `repo.get_thread_messages`) — this is
+        the one place that JSON is asked to actually be an AG-UI message
+        before a provider ever sees it, the same check a socket link would
+        get for free by decoding onto this type off the wire.
         """
-        messages = await self._souk.get_thread_messages(thread_id)
+        raw = await self._souk.get_thread_messages(thread_id)
+        messages = _MESSAGES.validate_python(raw)
         return messages[-limit:] if limit is not None else messages

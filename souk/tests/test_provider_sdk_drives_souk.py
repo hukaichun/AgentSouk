@@ -71,7 +71,7 @@ async def test_a_run_goes_all_the_way_out_and_all_the_way_back(souk, runtimes):
 
     async def agent(run_input):
         seen["input"] = run_input
-        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "bonjour"}
@@ -95,7 +95,7 @@ async def test_a_run_goes_all_the_way_out_and_all_the_way_back(souk, runtimes):
     ]
     # Delivery *is* the hand-over: the provider left `deliver` able to start,
     # with no second call to fetch the input.
-    assert seen["input"]["runId"] == handle.run_id
+    assert seen["input"].run_id == handle.run_id
 
     await _until(lambda: handle.run_id not in souk.active_runs())
     async with souk.session() as session:
@@ -110,7 +110,7 @@ async def test_souk_asks_the_provider_that_took_the_run_to_stop(souk, runtimes):
     started = asyncio.Event()
 
     async def agent(run_input):
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
         started.set()
         await asyncio.sleep(30)
 
@@ -145,7 +145,7 @@ async def test_one_provider_serves_several_agents_on_one_budget(souk, runtimes):
             nonlocal in_flight, high_water
             in_flight += 1
             high_water = max(high_water, in_flight)
-            ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+            ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
             yield {"type": "RUN_STARTED", **ids}
             await release.wait()
             yield {"type": "TEXT_MESSAGE_START", "messageId": "m", "role": "assistant"}
@@ -192,7 +192,7 @@ async def test_a_provider_that_declares_no_limit_starts_everything_it_is_given(s
         nonlocal running
         running += 1
         try:
-            yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+            yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
             await release.wait()
         finally:
             running -= 1

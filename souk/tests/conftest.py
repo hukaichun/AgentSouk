@@ -140,9 +140,9 @@ class EchoAgent:
     def __init__(self) -> None:
         self.seen_caller: dict | None = None
 
-    async def run_stream(self, agent_name: str, run_input: dict):
-        self.seen_caller = (run_input.get("forwardedProps") or {}).get("caller")
-        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_name: str, run_input):
+        self.seen_caller = (run_input.forwarded_props or {}).get("caller")
+        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "done"}

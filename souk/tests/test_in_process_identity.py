@@ -13,8 +13,8 @@ from souk_provider_sdk import ProviderIdentity
 
 class LocalProvider:
     async def run_stream(self, agent_id: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
-        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
 
 def _signed(identity: ProviderIdentity, names: list[str]) -> tuple[str, str, int]:
