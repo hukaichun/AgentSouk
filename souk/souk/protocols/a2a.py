@@ -33,6 +33,7 @@ from souk import repo
 from souk.agui import build_run_agent_input
 from souk.errors import AgentNotFound, InvalidRunInput, RunNotFound
 from souk.identity import verify_actor_chain
+from souk.kyok import issue_kyok_token
 from souk.models import AgentRef
 from souk.pause import is_resuming
 from souk.protocols.a2a_translate import (
@@ -450,6 +451,17 @@ class A2AAdapter:
                 raise AgentNotFound(f"agent '{agent}' is not registered")
 
             metadata = params.get("metadata", {})
+            # A KYOK caller context arriving here — whether misdirected or
+            # from some future A2A opt-in — must not reach the database:
+            # run metadata comes back verbatim through the unauthenticated
+            # thread endpoints (see protocols.agui's _split_kyok for the
+            # full argument). Stripped unconditionally, acted on never —
+            # KYOK binding on the A2A path is inheritance-only today.
+            if isinstance(metadata.get("kyok"), dict) and "context" in metadata["kyok"]:
+                metadata = {
+                    **metadata,
+                    "kyok": {k: v for k, v in metadata["kyok"].items() if k != "context"},
+                }
             parent_thread_id = await _lineage_parent(session, params)
             context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
 
@@ -514,11 +526,38 @@ class A2AAdapter:
             # The raw chain travels too, not just the resolved summary: a
             # provider that delegates further needs the actual prior JWTs to
             # extend it.
-            forwarded_props = (
+            forwarded_props: dict[str, Any] | None = (
                 {"caller": {"subject": verified_subject, "actors": verified_actors, "chain": actor_chain}}
                 if verified_subject is not None
                 else None
             )
+
+            # KYOK inheritance: a delegating run's binding — same offering,
+            # same caller context — carries to the run it spawns, copied by
+            # souk itself so the context never transits the delegating
+            # agent's hands (an agent forwarding `metadata.kyok` would be
+            # an agent holding the caller's credential: the session-id
+            # disclosure with a new face). The child's binding gets the
+            # chain that reached *this* run, verified above, which is what
+            # lets the LLM provider check the delegation path before
+            # spending the caller's budget on a sub-agent it never heard
+            # of. "One-time context" thereby means one authorized run
+            # tree; policing the tree's shape is the LLM provider's job,
+            # from the chain.
+            reference_task_ids = params.get("message", {}).get("referenceTaskIds") or []
+            inherited = bool(reference_task_ids) and souk.kyok_relay.inherit(
+                reference_task_ids[0], run_id, actor_chain
+            )
+            if inherited:
+                forwarded_props = {
+                    **(forwarded_props or {}),
+                    "kyok": {
+                        "token": issue_kyok_token(
+                            run_id, agent, souk.settings.token_signing_secret
+                        )
+                    },
+                }
+
             try:
                 agui_input = build_run_agent_input(
                     thread_id, run_id, messages, forwarded_props=forwarded_props

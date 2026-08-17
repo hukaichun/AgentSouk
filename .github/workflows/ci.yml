@@ -86,6 +86,20 @@ jobs:
       - run: uv run pytest -v
         working-directory: souk-provider-sdk
 
+  souk-llm-provider-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk-llm-provider-sdk
+      # openai is types-only here (the wire shapes), and souk-provider-sdk
+      # supplies the keypair — still no transport this package uses itself.
+      - run: uv run pytest -v
+        working-directory: souk-llm-provider-sdk
+
   # Everything else — the gateway, both SDKs, the reference providers and
   # the directory UI — lives in AgentSoukServer, which carries its own CI,
   # including the app-builds probe only it can run.

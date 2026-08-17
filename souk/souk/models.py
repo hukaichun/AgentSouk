@@ -61,6 +61,24 @@ class AgentRef(BaseModel):
         return f"{self.provider_key[:16]}…/{self.name}"
 
 
+class LlmRef(BaseModel):
+    """Which LLM provider offering — the whole of it, exactly as AgentRef
+    is for agents: the identity's key plus the name that identity gave the
+    offering. Names are not exclusive across identities — two providers
+    both offering `gpt4` is normal, not a collision — which is why a bare
+    name was rejected as an address: the pair is the address, and there is
+    no first-come-first-served ownership of a word.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    provider_key: str
+    name: str
+
+    def __str__(self) -> str:
+        return f"{self.provider_key[:16]}…/{self.name}"
+
+
 class ClaimedRun(BaseModel):
     """A run handed to a provider, with everything needed to run it.
 

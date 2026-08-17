@@ -98,6 +98,7 @@ def is_timestamp_fresh(timestamp: int) -> bool:
 # to be confused with. Adding a second is what made it reachable, which is why
 # the prefixes arrive with it rather than after.
 _REGISTER = "souk-register"
+_REGISTER_LLM = "souk-register-llm"
 _DELETE_AGENT = "souk-delete-agent"
 _KYOK_CALL = "souk-kyok-call"
 
@@ -112,6 +113,18 @@ def registration_signing_payload(agent_names: list[str], timestamp: int) -> byte
     is asking for, and its freshness.
     """
     return f"{_REGISTER}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+
+
+def llm_registration_signing_payload(names: list[str], timestamp: int) -> bytes:
+    """What an LLM provider's registration signs: which offering names are
+    being declared, and when. Same shape and reasoning as agent
+    registration above — an offering is `(provider_key, name)`, so a batch
+    of names under one key is the natural unit — with a different
+    operation prefix because it is a different act: a signature captured
+    for one roster must not be presentable to the other, however unlikely
+    the collision.
+    """
+    return f"{_REGISTER_LLM}:{','.join(sorted(names))}:{timestamp}".encode()
 
 
 def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:

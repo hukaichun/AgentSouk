@@ -15,8 +15,8 @@ which consumes `souk` through a submodule and owns both ends of every
 wire it defines — anything network-facing belongs there (see issue #27
 for the boundary).
 
-There is deliberately no shared `uv` workspace; each project syncs
-independently:
+There is deliberately no shared `uv` workspace; each project (`souk`,
+`souk-provider-sdk`, `souk-llm-provider-sdk`) syncs independently:
 
 ```bash
 cd souk && uv sync --group dev

@@ -1,26 +1,43 @@
 """KYOK translation: relaying a provider's LLM call to whoever is paying.
 
-Extracted from what used to be protocols.kyok, minus everything about HTTP.
-KYOK is structurally a second broker — a provider submits work (a completion),
-the caller's own bridge claims it and streams back the answer — so it splits
-the same way runs do: the mechanism and its checks live in core, the three
-`/kyok/*` endpoints are serving.
+KYOK is structurally a second broker — an agent provider submits work
+(a completion), an LLM provider answers it — so it splits the same way
+runs do: the mechanism and its checks live in core, the agent-facing
+endpoint is serving. The answering side is not an endpoint at all any
+more: a completion is delivered to the `ConnectedLLMProvider` the run
+was bound to at start (souk.kyok.KyokRelay), so the poll/respond
+surface this module used to carry is gone, and with it the rendezvous
+state it existed to serve.
 
 What this deliberately holds rather than leaving to a route: the two-part
 authorization. A KYOK token proves souk minted it and names a run; it does
 not prove who is presenting it. The call-time signature is the other half,
 and getting either wrong means someone else spending the caller's real LLM
 budget — not the kind of check to reimplement per transport.
+
+No claim timeout, and none is needed: there is no claim step. The old
+30s constant was applied to every inter-chunk gap and killed any model
+slower than that to its next token, while reporting "no bridge claimed
+this" — a message that was false in both halves. A bridge that hangs
+mid-stream is now the same problem as any hung upstream call, and it
+belongs to whoever is doing the waiting: the provider's own HTTP client
+timeout, or the serving layer cancelling the relay when the provider
+disconnects. Core inventing a number here would just be the old defect
+with a new name.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, cast
+
+from openai.types.chat import ChatCompletion, ChatCompletionChunk, CompletionCreateParams
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
 from souk import repo
 from souk.errors import KyokRejected
@@ -29,43 +46,50 @@ from souk.identity import (
     kyok_call_signing_payload,
     verify_signature,
 )
-from souk.kyok import (
-    COMPLETION_DONE,
-    KyokToken,
-    session_routing_key,
-    verify_kyok_token,
-)
+from souk.kyok import CompletionRequest, KyokToken, verify_kyok_token
 
 if TYPE_CHECKING:
     from souk.core import Souk
 
-# How long a provider's completion waits, queued, for the caller's bridge to
-# notice it before souk gives up — the KYOK counterpart of a run's
-# the broker's queued timeout, kept separate because a completion is expected to be
-# claimed far faster: the bridge is meant to be polling continuously for the
-# run's whole duration, not discovering work cold.
-CLAIM_TIMEOUT_SECONDS = 30.0
+logger = logging.getLogger(__name__)
 
 
 @dataclass
 class CompletionRelay:
-    """A submitted completion, and the answer coming back for it."""
+    """A completion being answered by the run's own bridge.
 
-    request_id: str
+    The bridge signals failure by raising (see souk.kyok.LLMBridge); what
+    that looks like to the provider depends on which shape it asked for,
+    which is why the two consumers below differ:
+
+    - `collapsed` (non-streaming): no bytes have been sent yet, so a
+      failure can still be an honest status — it becomes KyokRejected 502.
+    - `encode` (streaming): the 200 is long gone, so the failure goes
+      in-band as a final `{"error": ...}` payload, the shape OpenAI's own
+      streaming API uses mid-stream, and the stream ends without [DONE].
+    """
+
     stream_requested: bool
-    chunks: AsyncIterator[dict[str, Any]]
+    chunks: AsyncIterator[ChatCompletionChunk]
 
-    async def collapsed(self) -> dict[str, Any]:
+    async def collapsed(self) -> ChatCompletion:
         """Every chunk reassembled into one non-streaming response, for a
         provider that didn't ask to stream."""
-        return collapse_stream([chunk async for chunk in self.chunks])
+        try:
+            collected = [chunk async for chunk in self.chunks]
+        except Exception as e:
+            raise KyokRejected(f"KYOK bridge failed to complete: {e}", status=502) from e
+        return collapse_stream(collected)
 
     async def encode(self) -> AsyncIterator[str]:
         """The chunks as OpenAI-style SSE payloads, terminator included."""
-        async for chunk in self.chunks:
-            yield json.dumps(chunk)
-            if isinstance(chunk, dict) and set(chunk) == {"error"}:
-                return
+        try:
+            async for chunk in self.chunks:
+                yield chunk.model_dump_json()
+        except Exception as e:
+            logger.warning("KYOK bridge failed mid-stream: %s", e)
+            yield json.dumps({"error": {"message": str(e)}})
+            return
         yield "[DONE]"
 
 
@@ -74,20 +98,6 @@ class KyokAdapter:
 
     def __init__(self, souk: "Souk") -> None:
         self._souk = souk
-
-    async def poll(self, session_id: str, wait_seconds: float) -> dict[str, Any] | None:
-        """A caller's bridge asking whether any completion is waiting for it.
-
-        Takes the session id itself and derives the routing key here, so the
-        secret stops at this boundary: a transport hands over whatever the
-        bridge presented and never needs to know how sessions are keyed. The
-        provider's token carries only the derived key (see
-        kyok.session_routing_key), which is why the two sides meet at a hash
-        rather than at the id.
-        """
-        return await self._souk.kyok_bridge.poll_one(
-            session_routing_key(session_id), wait_seconds
-        )
 
     async def complete(
         self,
@@ -109,6 +119,14 @@ class KyokAdapter:
         3. the call is signed by the agent's own key, over this
            exact token + timestamp + body, so a signature can't be replayed
            onto another request.
+
+        Then the run's LLM provider answers it — the one the caller named
+        at run start, resolved by run_id (which only souk ever mints) to a
+        name, and by name to whichever connection that identity has
+        attached *right now*. Offline is 503: the run may well still be
+        going, but its LLM is unreachable, and that is exactly what the
+        agent provider is told — the same fast-fail shape as an offline
+        agent, nothing invented.
         """
         token = verify_kyok_token(bearer, self._souk.settings.token_signing_secret)
         if token is None:
@@ -121,41 +139,38 @@ class KyokAdapter:
         await self._verify_caller(token, bearer, body, timestamp, signature)
 
         try:
-            payload = json.loads(body)
+            payload = cast(CompletionCreateParams, json.loads(body))
         except json.JSONDecodeError as e:
             # After the authorization checks, not before: what a caller may
             # learn about its own malformed request is a different question
             # from whether it was allowed to ask at all.
             raise KyokRejected("KYOK completion body is not valid JSON", status=400) from e
-        request_id, queue = self._souk.kyok_bridge.submit(token.session_key, payload)
+
+        binding = self._souk.kyok_relay.binding_for(token.run_id)
+        if binding is None:
+            # The binding dies with the run (broker's forget funnel), so a
+            # token that passed the live-run check a moment ago can still
+            # land here in the narrow window where the run just ended.
+            raise KyokRejected("run has no KYOK binding any more", status=503)
+        link = self._souk.kyok_relay.serving(binding.llm_provider)
+        if link is None:
+            raise KyokRejected(
+                f"LLM provider '{binding.llm_provider}' is not attached", status=503
+            )
+
         return CompletionRelay(
-            request_id=request_id,
             stream_requested=bool(payload.get("stream")),
-            chunks=self._drain(request_id, queue),
+            chunks=link.complete(
+                CompletionRequest(
+                    run_id=token.run_id,
+                    agent=token.agent,
+                    body=payload,
+                    llm_name=binding.llm_provider.name,
+                    context=binding.context,
+                    actor_chain=binding.actor_chain,
+                )
+            ),
         )
-
-    async def respond(self, request_id: str, chunks: AsyncIterator[dict[str, Any]]) -> None:
-        """The caller's bridge streaming the real LLM's answer back, one
-        already-decoded chunk at a time. Consumed incrementally so a long
-        completion never sits whole in memory on either side.
-
-        Chunks, not newline-delimited bytes. It took the wire form until an
-        in-process caller made the cost visible: the only transport left
-        (a socket, whose frames arrive as objects) was serialising each chunk
-        to NDJSON purely so this function could parse it straight back, with
-        no network anywhere between the two. Framing belongs to whatever is
-        doing the framing; a caller that is a function call does none.
-        """
-        pending = self._souk.kyok_bridge.get(request_id)
-        if pending is None:
-            raise KyokRejected(f"no pending KYOK completion '{request_id}'", status=404)
-
-        async for chunk in chunks:
-            if chunk.get("error"):
-                pending.response_queue.put_nowait({"error": chunk["error"]})
-                break
-            pending.response_queue.put_nowait(chunk)
-        pending.response_queue.put_nowait(COMPLETION_DONE)
 
     async def _verify_caller(
         self, token: KyokToken, bearer: str, body: bytes, timestamp: str, signature: str
@@ -193,62 +208,56 @@ class KyokAdapter:
         if not verify_signature(token.agent.provider_key, signature, payload):
             raise KyokRejected("KYOK call-time signature verification failed", status=401)
 
-    async def _drain(self, request_id: str, queue: asyncio.Queue) -> AsyncIterator[dict[str, Any]]:
-        try:
-            while True:
-                item = await asyncio.wait_for(queue.get(), timeout=CLAIM_TIMEOUT_SECONDS)
-                if item is COMPLETION_DONE:
-                    return
-                yield item
-        except asyncio.TimeoutError as e:
-            raise KyokRejected(
-                "no KYOK bridge claimed this completion in time", status=502
-            ) from e
-        finally:
-            self._souk.kyok_bridge.forget(request_id)
 
+def collapse_stream(chunks: list[ChatCompletionChunk]) -> ChatCompletion:
+    """Reassembles streaming chunks into one non-streaming response, for a
+    provider that called with `stream` unset or false. A bridge always
+    produces streaming-shaped chunks (see souk.kyok.LLMBridge) regardless
+    of what the provider asked for — this is where a non-streaming caller
+    gets that collapsed back down instead of needing its own merge logic.
 
-def collapse_stream(chunks: list[dict[str, Any]]) -> dict[str, Any]:
-    """Reassembles OpenAI-style streaming chunks (chat.completion.chunk,
-    delta-shaped) into one non-streaming chat.completion response, for a
-    provider that called /kyok/v1/chat/completions with `stream` unset or
-    false. The caller's bridge always sends streaming-shaped chunks (see
-    docs/keep-your-own-key.md) regardless of what the provider asked for
-    — this is where a non-streaming caller gets that collapsed back down
-    instead of needing its own merge logic.
+    Field names come from the `openai` package on both sides of this
+    function, so a rename there fails here at type-check and construction
+    time rather than silently producing a shape no client parses.
     """
     if not chunks:
-        return {
-            "choices": [
-                {"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}
-            ]
-        }
+        return ChatCompletion(
+            id="",
+            object="chat.completion",
+            created=0,
+            model="",
+            choices=[
+                Choice(
+                    index=0,
+                    message=ChatCompletionMessage(role="assistant", content=""),
+                    finish_reason="stop",
+                )
+            ],
+        )
 
     first = chunks[0]
     content_by_index: dict[int, str] = {}
-    finish_reason_by_index: dict[int, str | None] = {}
-    role = "assistant"
+    finish_reason_by_index: dict[int, str] = {}
     for chunk in chunks:
-        for choice in chunk.get("choices", []):
-            index = choice.get("index", 0)
-            delta = choice.get("delta", {})
-            if "role" in delta:
-                role = delta["role"]
-            content_by_index[index] = content_by_index.get(index, "") + delta.get("content", "")
-            if choice.get("finish_reason"):
-                finish_reason_by_index[index] = choice["finish_reason"]
+        for chunk_choice in chunk.choices:
+            index = chunk_choice.index
+            content_by_index[index] = content_by_index.get(index, "") + (
+                chunk_choice.delta.content or ""
+            )
+            if chunk_choice.finish_reason:
+                finish_reason_by_index[index] = chunk_choice.finish_reason
 
-    return {
-        "id": first.get("id"),
-        "object": "chat.completion",
-        "created": first.get("created"),
-        "model": first.get("model"),
-        "choices": [
-            {
-                "index": index,
-                "message": {"role": role, "content": content},
-                "finish_reason": finish_reason_by_index.get(index),
-            }
+    return ChatCompletion(
+        id=first.id,
+        object="chat.completion",
+        created=first.created,
+        model=first.model,
+        choices=[
+            Choice(
+                index=index,
+                message=ChatCompletionMessage(role="assistant", content=content),
+                finish_reason=finish_reason_by_index.get(index, "stop"),
+            )
             for index, content in sorted(content_by_index.items())
         ],
-    }
+    )

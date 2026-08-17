@@ -47,11 +47,12 @@ from souk.identity import (
     SoukIdentity,
     agent_deletion_signing_payload,
     is_timestamp_fresh,
+    llm_registration_signing_payload,
     registration_signing_payload,
     verify_signature,
 )
-from souk.kyok import KyokBridge
-from souk.models import AgentRecord, AgentRef, AgentSummary, RunRecord
+from souk.kyok import ConnectedLLMProvider, KyokRelay
+from souk.models import AgentRecord, AgentRef, AgentSummary, LlmRef, RunRecord
 
 logger = logging.getLogger("souk.core")
 
@@ -209,7 +210,11 @@ class Souk:
         self.broker = broker or RunBroker(spawn=self.spawn)
         # KYOK's completion relay — structurally a second broker (see
         # souk/kyok.py), so it is held the same way for the same reasons.
-        self.kyok_bridge = KyokBridge()
+        # Its entries live exactly as long as the broker holds the run,
+        # which is why it listens on the broker's forget funnel rather
+        # than trusting anyone to remember a cleanup call.
+        self.kyok_relay = KyokRelay()
+        self.broker.add_forget_listener(self.kyok_relay.discard)
         # Every background task this souk started — see spawn().
         self._tasks: set[asyncio.Task] = set()
         # Whether start() has run. Not "is the sweeper alive": a second
@@ -650,6 +655,72 @@ class Souk:
         # Reachability is part of what the roster answers, so this changes it
         # even though no agent was added.
         self._notify_change(RosterChanged())
+
+    async def register_llm_providers(
+        self,
+        public_key: str,
+        signature: str,
+        timestamp: int,
+        names: list[str],
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, LlmRef]:
+        """Prove an identity holds its key, then record which model
+        offerings it answers KYOK completions under.
+
+        The same act as register_agents with the same machinery — an
+        Ed25519 signature over an operation-prefixed payload covering the
+        claimed names, freshness bounded — because an LLM provider's
+        identity is the same kind of thing as an agent provider's, and an
+        offering is `(provider_key, name)` exactly as an agent is.
+        """
+        if not is_timestamp_fresh(timestamp):
+            raise InvalidRegistration("registration timestamp too far from souk's clock")
+        payload = llm_registration_signing_payload(names, timestamp)
+        if not verify_signature(public_key, signature, payload):
+            raise InvalidRegistration("invalid LLM provider registration signature")
+        async with self.session() as session:
+            return await repo.register_llm_providers(session, public_key, names, metadata)
+
+    async def attach_llm_provider(
+        self, link: ConnectedLLMProvider, model_names: list[str]
+    ) -> None:
+        """Serve these models' KYOK completions from this connection —
+        the mirror of attach_provider, rule for rule: the link says who it
+        is, the names say what it is serving right now, every name must be
+        one this key registered, and sharing souk's process is not a
+        reason to skip any of it.
+
+        Attaching the same identity again replaces the mapping for those
+        names, which is what a reconnect is. Completions resolve the
+        connection per call (see KyokRelay), so runs bound to these
+        offerings simply start reaching the new link.
+        """
+        if not model_names:
+            raise ValueError(
+                f"LLM provider '{link.public_key}' attached with no model names — "
+                "there would be nothing to serve"
+            )
+        async with self.session() as session:
+            registered = await repo.get_llm_names_for_key(session, link.public_key)
+        unknown = sorted(set(model_names) - registered)
+        if unknown:
+            raise InvalidRegistration(
+                f"LLM provider '{link.public_key}' has not registered {unknown} — "
+                "register before attaching, in-process or not"
+            )
+        self.kyok_relay.attach(
+            {
+                LlmRef(provider_key=link.public_key, name=name): link
+                for name in model_names
+            }
+        )
+
+    def detach_llm_provider(self, public_key: str) -> None:
+        """This LLM provider is gone from this process. Runs bound to its
+        name are left alone — the binding names an identity, not a
+        connection, so completions for them start failing (503) until it
+        attaches again, and souk records nothing it has not observed."""
+        self.kyok_relay.detach(public_key)
 
     async def detach_provider(self, provider_public_key: str) -> None:
         """This provider is gone from this process.
