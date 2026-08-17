@@ -164,7 +164,19 @@ error.
 from souk_provider_sdk import AgentHandle, HandleProvider
 
 provider = HandleProvider([
-    AgentHandle(name="translator", run_stream=translate, description="translates"),
+    AgentHandle(
+        name="translator",
+        run_stream=translate,
+        description="translates",
+        # Merged into the agent's public card. `skills` is what discovery
+        # searches on — an agent declaring none is findable only by somebody
+        # who already knows its name.
+        agent_card_extra={"skills": [
+            {"id": "translate", "name": "Translate", "tags": ["language"]},
+        ]},
+        # souk-internal, deliberately not on the public card.
+        metadata={"cost_centre": "research"},
+    ),
     AgentHandle(name="summarizer", run_stream=summarize, description="summarizes"),
 ])
 

@@ -15,18 +15,22 @@ own dispatch object, whose input field is `input_json`, to a provider reading
 from __future__ import annotations
 
 import inspect
+import re
 
 from souk_provider_sdk import (
     CONNECTED_PROVIDER_ATTRS,
     DELIVERED_RUN_FIELDS,
+    REGISTRATION_FIELDS,
     REPORT_CALLBACKS,
     InProcessProvider,
+    AgentHandle,
     DeliveredRun,
     HandleProvider,
     ProviderIdentity,
     ProviderRuntime,
 )
 
+from souk import repo
 from souk.broker import ConnectedProvider
 from souk.models import ClaimedRun
 
@@ -105,3 +109,38 @@ def test_souk_still_has_the_two_calls_the_adapter_reports_through():
     assert not inspect.iscoroutinefunction(Souk.finish_run)
     for method in (Souk.report_event, Souk.finish_run):
         assert "claimed_by" in inspect.signature(method).parameters
+
+
+def test_a_handle_can_express_everything_register_agents_reads():
+    """The two sides of registration, compared — which nothing did before.
+
+    souk has read `agent_card_extra` and `metadata` since its first commit.
+    The HTTP model that filled them left with the serving layer, and the
+    `AgentHandle` written to replace it had neither, so every agent
+    registered through the SDK got a card of name and description alone: no
+    skills, therefore invisible to discovery, and indistinguishable from
+    healthy because `register_agents` defaults both keys.
+
+    Read off the source rather than a list repeated here — a fifth key added
+    to `register_agents` has to fail this, and it cannot if the expectation
+    is written down twice.
+    """
+    source = inspect.getsource(repo.register_agents)
+    read_by_souk = set(re.findall(r"agent(?:\.get\(|\[)[\"']([a-z_]+)[\"']", source))
+
+    assert read_by_souk, "no keys found — the regex stopped matching, not a passing test"
+    assert read_by_souk == set(REGISTRATION_FIELDS), (
+        f"register_agents reads {sorted(read_by_souk)}, "
+        f"the SDK declares {sorted(REGISTRATION_FIELDS)}"
+    )
+
+
+def test_the_handle_actually_carries_those_fields():
+    """`REGISTRATION_FIELDS` is a claim about `AgentHandle`; this is the
+    claim being true. Declaring a field souk reads and not having it is the
+    same defect one indirection later."""
+    declared = set(AgentHandle.__dataclass_fields__)
+
+    assert REGISTRATION_FIELDS <= declared, (
+        f"AgentHandle cannot express {sorted(REGISTRATION_FIELDS - declared)}"
+    )
