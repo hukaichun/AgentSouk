@@ -17,6 +17,10 @@ from souk.kyok import (
     KyokBinding,
     KyokRelay,
     issue_kyok_token,
+    kyok_forwarded_props,
+    parse_kyok_opt_in,
+    read_kyok_forwarded_props,
+    strip_kyok_context,
     verify_kyok_token,
 )
 
@@ -109,6 +113,55 @@ def test_tampered_kyok_token_signature_rejected():
 )
 def test_malformed_kyok_token_rejected(malformed):
     assert verify_kyok_token(malformed, "test-signing-secret") is None
+
+
+# ---- the typed metadata.kyok read
+
+
+def test_a_well_formed_opt_in_parses_to_the_pair_and_context():
+    opt_in = parse_kyok_opt_in(
+        {"kyok": {"llmProvider": {"providerKey": "ab" * 32, "name": "gpt4"}, "context": {"v": 1}}}
+    )
+    assert opt_in.llm_provider == LlmRef(provider_key="ab" * 32, name="gpt4")
+    assert opt_in.context == {"v": 1}
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"kyok": "not-a-dict"},
+        {"kyok": {"llmProvider": "bare-name-is-not-an-address"}},
+        {"kyok": {"llmProvider": {"name": "gpt4"}}},
+    ],
+)
+def test_anything_else_is_no_opt_in_not_an_error(metadata):
+    """Metadata is free-form by contract; only souk's own well-formed
+    corner of it opts in. A bare name is deliberately in this list — the
+    pair is the address."""
+    opt_in = parse_kyok_opt_in(metadata)
+    assert opt_in is None or opt_in.llm_provider is None
+
+
+def test_strip_removes_exactly_the_context():
+    metadata = {"kyok": {"llmProvider": {"providerKey": "k", "name": "m"}, "context": "secret"}, "other": 1}
+    stripped = strip_kyok_context(metadata)
+    assert "context" not in stripped["kyok"]
+    assert stripped["kyok"]["llmProvider"] == {"providerKey": "k", "name": "m"}
+    assert stripped["other"] == 1
+    assert metadata["kyok"]["context"] == "secret"  # input not mutated
+
+
+def test_forwarded_props_roundtrip_through_the_model():
+    """Writer and reader are the same model, so what one plants the other
+    finds — and a run without the grant reads as None, not as {}."""
+    entry = kyok_forwarded_props("run_1", _AGENT, "test-signing-secret")
+    grant = read_kyok_forwarded_props({"kyok": entry})
+    assert grant is not None
+    decoded = verify_kyok_token(grant.token, "test-signing-secret")
+    assert decoded.run_id == "run_1" and decoded.agent == _AGENT
+    assert read_kyok_forwarded_props({}) is None
+    assert read_kyok_forwarded_props(None) is None
 
 
 # ---- collapse_stream

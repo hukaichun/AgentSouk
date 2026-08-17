@@ -19,7 +19,12 @@ from souk.models import AgentRef, LlmRef
 from souk.agui import build_run_agent_input, rewrite_message_ids
 from souk.errors import AgentNotFound, InvalidRunInput
 from souk.identity import verify_actor_chain
-from souk.kyok import KyokBinding, issue_kyok_token
+from souk.kyok import (
+    KyokBinding,
+    kyok_forwarded_props,
+    parse_kyok_opt_in,
+    strip_kyok_context,
+)
 from souk.pause import is_resuming
 
 if TYPE_CHECKING:
@@ -116,7 +121,9 @@ class AGUIAdapter:
             # holds a thread_id, so persisting it would hand the one party
             # KYOK defends against the caller's credential. It lives only
             # in the run's in-memory binding, and dies with the run.
-            metadata, kyok_ref, kyok_context = _split_kyok(metadata)
+            kyok = parse_kyok_opt_in(metadata)
+            kyok_ref = kyok.llm_provider if kyok is not None else None
+            metadata = strip_kyok_context(metadata)
             if kyok_ref is not None:
                 if await repo.get_llm_provider(session, kyok_ref) is None:
                     raise InvalidRunInput(f"unknown KYOK LLM provider '{kyok_ref}'")
@@ -148,7 +155,7 @@ class AGUIAdapter:
             # Found by the leak probe in test_llm_provider_drives_kyok, not
             # by reading; keep that test if you touch this.
             if isinstance(input_dump.get("metadata"), dict):
-                input_dump["metadata"], _, _ = _split_kyok(input_dump["metadata"])
+                input_dump["metadata"] = strip_kyok_context(input_dump["metadata"])
             if resuming_run_id is not None:
                 # Reopens the *same* run_id for another round rather than
                 # minting a new one — a stable identity across pause/resume
@@ -216,40 +223,13 @@ class AGUIAdapter:
         if kyok_ref is not None:
             souk.kyok_relay.bind_run(
                 run_id,
-                KyokBinding(llm_provider=kyok_ref, context=kyok_context, actor_chain=actor_chain),
+                KyokBinding(llm_provider=kyok_ref, context=kyok.context, actor_chain=actor_chain),
             )
         souk.enqueue_run(run_id, agent, thread_id, input_json, "ag-ui", seq=starting_seq)
         # Subscribed here, not inside _relay: an async generator's body does
         # not run until it is first iterated, and a run that finishes before
         # the caller starts reading would have nothing left to subscribe to.
         return EventStream(thread_id, run_id, _relay(souk.broker.subscribe(run_id)))
-
-
-def _split_kyok(metadata: dict) -> tuple[dict, LlmRef | None, Any]:
-    """Reads the KYOK opt-in out of metadata and returns metadata with the
-    caller's context removed — the context must never reach anything that
-    persists (see the caller in `run`), and taking it out here means no
-    later line has to remember to.
-
-    `metadata.kyok.llmProvider` is `{"providerKey": ..., "name": ...}` —
-    the pair, because a bare name is not an address (two providers both
-    offering `gpt4` is normal). Malformed is treated as absent rather than
-    an error, because metadata is free-form by contract; only a well-formed
-    opt-in opts in.
-    """
-    kyok = metadata.get("kyok")
-    if not isinstance(kyok, dict):
-        return metadata, None, None
-    context = kyok.get("context")
-    if "context" in kyok:
-        metadata = {**metadata, "kyok": {k: v for k, v in kyok.items() if k != "context"}}
-    target = kyok.get("llmProvider")
-    if not isinstance(target, dict):
-        return metadata, None, context
-    provider_key, name = target.get("providerKey"), target.get("name")
-    if not (isinstance(provider_key, str) and provider_key and isinstance(name, str) and name):
-        return metadata, None, context
-    return metadata, LlmRef(provider_key=provider_key, name=name), context
 
 
 async def _relay(events: AsyncIterator[Any]) -> AsyncIterator[dict[str, Any]]:
@@ -350,7 +330,7 @@ def build_forwarded_props(
     """
     extra: dict[str, Any] = {}
     if kyok_enabled:
-        extra["kyok"] = {"token": issue_kyok_token(run_id, agent, signing_secret)}
+        extra["kyok"] = kyok_forwarded_props(run_id, agent, signing_secret)
     if verified_subject is not None:
         # The raw chain travels too, not just the resolved summary: a
         # provider that wants to delegate further needs the actual prior JWTs

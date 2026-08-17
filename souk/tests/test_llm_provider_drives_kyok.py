@@ -28,6 +28,7 @@ from openai.types.chat import ChatCompletionChunk
 from souk import repo
 from souk.errors import InvalidRegistration, InvalidRunInput, KyokRejected
 from souk.identity import new_actor_chain
+from souk.kyok import read_kyok_forwarded_props
 from souk.models import LlmRef
 from souk.protocols.a2a import A2AAdapter
 from souk.protocols.agui import AGUIAdapter
@@ -102,11 +103,12 @@ class KyokTokenAgent:
         self.got_token = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def run_stream(self, agent_name: str, run_input: dict):
-        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_name: str, run_input):
+        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "RUN_STARTED", **ids}
-        self.token = ((run_input.get("forwardedProps") or {}).get("kyok") or {}).get("token")
-        self.run_id = run_input["runId"]
+        grant = read_kyok_forwarded_props(run_input.forwarded_props)
+        self.token = grant.token if grant else None
+        self.run_id = run_input.run_id
         self.got_token.set()
         await self.release.wait()
         yield {"type": "RUN_FINISHED", **ids}
@@ -250,11 +252,12 @@ async def test_a_delegated_run_inherits_binding_and_shows_its_chain(souk, serve,
             self.identity: Identity | None = None
             self.answer: str | None = None
 
-        async def run_stream(self, agent_name: str, run_input: dict):
-            ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+        async def run_stream(self, agent_name: str, run_input):
+            ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
             yield {"type": "RUN_STARTED", **ids}
-            token = ((run_input.get("forwardedProps") or {}).get("kyok") or {}).get("token")
-            assert token, "delegated run should inherit a KYOK token"
+            grant = read_kyok_forwarded_props(run_input.forwarded_props)
+            assert grant, "delegated run should inherit a KYOK token"
+            token = grant.token
             body = _completion_body()
             relay = await KyokAdapter(souk).complete(
                 token, body, **_signed_call(self.identity, token, body)

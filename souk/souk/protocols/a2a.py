@@ -32,7 +32,7 @@ from google.protobuf.json_format import ParseDict, ParseError
 from souk import repo
 from souk.agui import build_run_agent_input
 from souk.errors import AgentNotFound, InvalidRunInput, RunNotFound
-from souk.kyok import issue_kyok_token
+from souk.kyok import kyok_forwarded_props, strip_kyok_context
 from souk.models import AgentRef
 from souk.pause import is_resuming
 from souk.protocols.a2a_translate import (
@@ -457,11 +457,7 @@ class A2AAdapter:
             # thread endpoints (see protocols.agui's _split_kyok for the
             # full argument). Stripped unconditionally, acted on never —
             # KYOK binding on the A2A path is inheritance-only today.
-            if isinstance(metadata.get("kyok"), dict) and "context" in metadata["kyok"]:
-                metadata = {
-                    **metadata,
-                    "kyok": {k: v for k, v in metadata["kyok"].items() if k != "context"},
-                }
+            metadata = strip_kyok_context(metadata)
             parent_thread_id = await _lineage_parent(session, params)
             context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
 
@@ -539,11 +535,9 @@ class A2AAdapter:
             if inherited:
                 forwarded_props = {
                     **(forwarded_props or {}),
-                    "kyok": {
-                        "token": issue_kyok_token(
-                            run_id, agent, souk.settings.token_signing_secret
-                        )
-                    },
+                    "kyok": kyok_forwarded_props(
+                        run_id, agent, souk.settings.token_signing_secret
+                    ),
                 }
 
             try:

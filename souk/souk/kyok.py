@@ -46,9 +46,10 @@ import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from openai.types.chat import ChatCompletionChunk, CompletionCreateParams
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from souk.models import AgentRef, LlmRef
 
@@ -111,6 +112,92 @@ def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
         run_id=run_id,
         agent=AgentRef(provider_key=provider_key, name=agent_name),
     )
+
+
+class KyokOptIn(BaseModel):
+    """`metadata.kyok`, as a type instead of an isinstance chain.
+
+    souk defines this shape — which offering answers the run's LLM calls,
+    and the caller's opaque credential to it — so souk states it once,
+    here, and parses with it. Metadata as a whole stays free-form by
+    contract; only souk's own corner of it gets a schema. `extra="allow"`
+    keeps that promise: unknown keys under `kyok` are somebody else's
+    business, not a validation error.
+
+    Parsing failure means "no opt-in", not "bad request" — see
+    `parse_kyok_opt_in` — because a metadata key souk happens to also use
+    is not a claim the caller must have meant souk's schema by it.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="allow", populate_by_name=True)
+
+    llm_provider: LlmRef | None = Field(default=None, alias="llmProvider")
+    context: Any = None
+
+
+def parse_kyok_opt_in(metadata: dict) -> KyokOptIn | None:
+    """The typed read of `metadata.kyok`; None when absent or not this
+    shape. `LlmRef` uses snake_case field names while the wire uses
+    camelCase — the alias on the model covers the outer key, and the pair
+    itself arrives as {"providerKey", "name"}, so it is re-keyed here,
+    the one place both spellings are known."""
+    raw = metadata.get("kyok")
+    if not isinstance(raw, dict):
+        return None
+    target = raw.get("llmProvider")
+    if isinstance(target, dict):
+        raw = {**raw, "llmProvider": {"provider_key": target.get("providerKey"), "name": target.get("name")}}
+    try:
+        return KyokOptIn.model_validate(raw)
+    except ValidationError:
+        return None
+
+
+def strip_kyok_context(metadata: dict) -> dict:
+    """Metadata with the caller's KYOK credential removed — the one part
+    of `metadata.kyok` that must never reach anything that persists (see
+    KyokBinding on why). Both run-creating paths call this before writing
+    anything, and it lives here so the shape knowledge has one home."""
+    kyok = metadata.get("kyok")
+    if isinstance(kyok, dict) and "context" in kyok:
+        return {**metadata, "kyok": {k: v for k, v in kyok.items() if k != "context"}}
+    return metadata
+
+
+class KyokForwardedProps(BaseModel):
+    """What souk plants under `forwardedProps.kyok` for the agent
+    provider: the run's token, and nothing else. A model rather than a
+    dict literal so both mint points (protocols.agui and protocols.a2a's
+    delegation inheritance) and every reader state the same shape —
+    souk-defined shapes do not travel as anonymous dicts.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token: str
+
+
+def kyok_forwarded_props(run_id: str, agent: AgentRef, signing_secret: str) -> dict[str, Any]:
+    """The `kyok` entry for a run's forwardedProps, built through the
+    model at both mint points."""
+    return KyokForwardedProps(
+        token=issue_kyok_token(run_id, agent, signing_secret)
+    ).model_dump()
+
+
+def read_kyok_forwarded_props(forwarded_props: Any) -> KyokForwardedProps | None:
+    """The reader's half: a provider-side (or test) look at
+    `forwardedProps.kyok`, through the same model that wrote it. None when
+    the run carries no KYOK grant."""
+    if not isinstance(forwarded_props, dict):
+        return None
+    raw = forwarded_props.get("kyok")
+    if raw is None:
+        return None
+    try:
+        return KyokForwardedProps.model_validate(raw)
+    except ValidationError:
+        return None
 
 
 @dataclass(frozen=True)
