@@ -47,6 +47,43 @@ if TYPE_CHECKING:
 CLAIM_TIMEOUT_SECONDS = 30.0
 
 
+# What souk puts in `type` when it is shaping a bridge's failure into an
+# OpenAI error. A vendor-specific value is exactly what this field is for, so
+# a provider that wants to tell "the caller's own model refused" apart from
+# any other 502 can, without souk inventing a field to say it in.
+BRIDGE_ERROR_TYPE = "kyok_bridge_error"
+
+
+def error_chunk(reason: Any) -> dict[str, Any]:
+    """A bridge's failure in OpenAI's own error shape.
+
+    `{"error": {"message": ...}}`, not `{"error": "..."}`. The difference is
+    not cosmetic and was measured against the real client: openai-python's
+    stream reader does spot an `error` key, but it reads `error["message"]`
+    and falls back to the string "An error occurred during streaming" when
+    `error` is not a mapping. So a bare string reached the provider as a
+    generic failure with the actual reason — "model gpt-9 is not on my
+    allow-list" — dropped on the floor, pointing whoever is debugging at
+    everything except the cause.
+
+    A bridge that already speaks the shape passes through unchanged; anything
+    else is wrapped. Normalised here, once, rather than asked of every
+    transport: `ws_kyok`'s error frame carries a plain message string, and so
+    does `souk_caller_sdk`'s, because on their side it *is* just a message.
+    """
+    if isinstance(reason, dict) and isinstance(reason.get("message"), str):
+        return {"error": reason}
+    return {"error": {"message": str(reason), "type": BRIDGE_ERROR_TYPE}}
+
+
+def _failure(chunks: list[dict[str, Any]]) -> str | None:
+    """The message from an error chunk among these, if there is one."""
+    for chunk in chunks:
+        if isinstance(chunk, dict) and set(chunk) == {"error"}:
+            return chunk["error"].get("message") if isinstance(chunk["error"], dict) else str(chunk["error"])
+    return None
+
+
 @dataclass
 class CompletionRelay:
     """A submitted completion, and the answer coming back for it."""
@@ -57,11 +94,38 @@ class CompletionRelay:
 
     async def collapsed(self) -> dict[str, Any]:
         """Every chunk reassembled into one non-streaming response, for a
-        provider that didn't ask to stream."""
-        return collapse_stream([chunk async for chunk in self.chunks])
+        provider that didn't ask to stream.
+
+        A failed relay raises instead. `collapse_stream` only understands
+        chunks with `choices`, so an error chunk collapsed to
+        `{"choices": []}` — a `200 OK` with an empty answer and the reason
+        gone, which is the exact shape of a bug this repo has already had once
+        (see CLAUDE.md on a provider failure reaching callers as an empty
+        200). Nothing downstream had to change for that to be wrong; it was
+        wrong here.
+
+        Raising is also what OpenAI does: a non-streaming failure is a
+        non-2xx with an error body, not a 200 with an empty one. This path
+        can still say so — the status has not been sent yet, unlike the
+        streaming one.
+
+        Partial content before the error goes with it, deliberately. A
+        truncated answer handed over as if it were complete is worse than an
+        error, because nothing downstream can tell.
+        """
+        chunks = [chunk async for chunk in self.chunks]
+        reason = _failure(chunks)
+        if reason is not None:
+            raise KyokRejected(reason, status=502)
+        return collapse_stream(chunks)
 
     async def encode(self) -> AsyncIterator[str]:
-        """The chunks as OpenAI-style SSE payloads, terminator included."""
+        """The chunks as OpenAI-style SSE payloads, terminator included.
+
+        No `[DONE]` after an error, matching OpenAI: the stream ends on the
+        error event, and a client that has just raised is not looking for a
+        terminator.
+        """
         async for chunk in self.chunks:
             yield json.dumps(chunk)
             if isinstance(chunk, dict) and set(chunk) == {"error"}:
@@ -152,7 +216,9 @@ class KyokAdapter:
 
         async for chunk in chunks:
             if chunk.get("error"):
-                pending.response_queue.put_nowait({"error": chunk["error"]})
+                # Shaped here so one form reaches the provider whatever the
+                # bridge said it in — see `error_chunk`.
+                pending.response_queue.put_nowait(error_chunk(chunk["error"]))
                 break
             pending.response_queue.put_nowait(chunk)
         pending.response_queue.put_nowait(COMPLETION_DONE)

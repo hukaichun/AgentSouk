@@ -111,30 +111,102 @@ async def test_a_provider_gets_the_answer_the_caller_paid_for(souk, register):
     assert answer["model"] == "whatever-i-pay-for"
 
 
-async def test_a_caller_that_refuses_fails_the_provider_rather_than_stalling_it(
-    souk, register
-):
-    """The caller's own code is the last word on whether money moves — a
-    refusal has to reach the provider as a failure, not as a timeout blamed on
-    a bridge that was right there."""
+async def _refused(souk, register, run_id: str, *, stream: bool):
+    """A caller whose own code refuses, and whatever the provider ends up
+    holding — `collapsed()` or `encode()`, the two things a provider actually
+    reads. Not `relay.chunks`: souk's internal chunk carries the reason, and
+    the first version of these tests asserted on that and proved nothing,
+    because both of the layers above it were dropping it."""
     session_id = new_session_id()
-    served, token = await _live_run(souk, register, session_id, run_id="run_kyok_refuse")
+    served, token = await _live_run(souk, register, session_id, run_id=run_id)
 
     async def i_decline(body: dict) -> AsyncIterator[dict]:
-        raise RuntimeError("model not on my allow-list")
+        raise RuntimeError("model gpt-9 is not on my allow-list")
         yield  # pragma: no cover - generator
+
+    async def provider_call():
+        relay = await _relay_completion(
+            souk, served, token, {"messages": [], "stream": stream}
+        )
+        return [line async for line in relay.encode()] if stream else await relay.collapsed()
+
+    try:
+        return await _with_bridge(souk, KyokBridge(session_id, i_decline), provider_call())
+    finally:
+        souk.broker.forget(run_id)
+
+
+async def test_a_refusal_reaches_a_non_streaming_provider_as_a_failure(souk, register):
+    """The caller's own code is the last word on whether money moves, so a
+    refusal has to arrive as a failure — with the reason.
+
+    It did not. `collapse_stream` understands chunks with `choices` and an
+    error chunk has none, so this came back as `200 OK` with
+    `{"choices": []}`: no answer, no error, no reason. That is the shape of a
+    bug this repo has had before (CLAUDE.md: a provider failure reaching
+    callers as an empty 200), and no test caught it because none of them
+    looked at what the provider receives.
+    """
+    with pytest.raises(KyokRejected) as excinfo:
+        await _refused(souk, register, "run_kyok_refuse_ns", stream=False)
+
+    assert excinfo.value.status == 502
+    assert "not on my allow-list" in str(excinfo.value)
+
+
+async def test_a_refusal_reaches_a_streaming_provider_with_the_reason_intact(
+    souk, register
+):
+    """The status is long gone by the time a stream fails, so the error rides
+    the stream — in OpenAI's own shape, which is the part that was wrong.
+
+    openai-python spots an `error` key either way, but reads
+    `error["message"]` and substitutes "An error occurred during streaming"
+    when `error` is not a mapping. A bare string therefore reached the
+    provider as a generic failure with the real reason discarded.
+    """
+    lines = await _refused(souk, register, "run_kyok_refuse_s", stream=True)
+
+    assert [json.loads(line) for line in lines] == [
+        {
+            "error": {
+                "message": "model gpt-9 is not on my allow-list",
+                "type": "kyok_bridge_error",
+            }
+        }
+    ]
+    # No terminator after an error, as OpenAI does it — a client that has
+    # just raised is not waiting for one.
+    assert "[DONE]" not in lines
+
+
+async def test_a_bridge_that_already_speaks_openai_errors_is_passed_through(
+    souk, register
+):
+    """Shaping, not overwriting: a bridge relaying a real provider's error
+    object keeps its `type` and `code`, which are the parts a provider might
+    actually branch on."""
+    session_id = new_session_id()
+    served, token = await _live_run(souk, register, session_id, run_id="run_kyok_upstream")
+    upstream = {"message": "rate limit reached", "type": "rate_limit_error", "code": "429"}
+
+    async def relays_upstream_error(body: dict) -> AsyncIterator[dict]:
+        yield {"error": upstream}
 
     try:
 
         async def provider_call():
             relay = await _relay_completion(souk, served, token, {"messages": []})
-            return [chunk async for chunk in relay.chunks]
+            return await relay.collapsed()
 
-        chunks = await _with_bridge(souk, KyokBridge(session_id, i_decline), provider_call())
+        with pytest.raises(KyokRejected) as excinfo:
+            await _with_bridge(
+                souk, KyokBridge(session_id, relays_upstream_error), provider_call()
+            )
     finally:
-        souk.broker.forget("run_kyok_refuse")
+        souk.broker.forget("run_kyok_upstream")
 
-    assert chunks == [{"error": "model not on my allow-list"}]
+    assert str(excinfo.value) == "rate limit reached"
 
 
 async def test_a_bridge_on_another_session_is_never_given_this_work(souk, register):
