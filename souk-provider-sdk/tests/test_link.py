@@ -14,8 +14,26 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from ag_ui.core import RunAgentInput
 
 from souk_provider_sdk import DeliveredRun, SoukLink
+
+
+def _run_agent_input(**overrides) -> dict:
+    """A minimal but complete `RunAgentInput` dict, souk's own spelling
+    (camelCase) — this is what `run.run_input` looks like on the wire between
+    souk and this package's `deliver`, which validates against it."""
+    base = {
+        "threadId": "t-1",
+        "runId": "r-1",
+        "state": None,
+        "messages": [],
+        "tools": [],
+        "context": [],
+        "forwardedProps": None,
+    }
+    base.update(overrides)
+    return base
 
 
 class _ClaimedRun:
@@ -78,14 +96,15 @@ async def test_the_base_translates_souks_run_for_a_transport_that_never_sees_it(
     provider = QueuedLink("abc123")
 
     accepted = await provider.deliver(
-        _ClaimedRun("r-1", "translator", {"messages": []}, "t-1")
+        _ClaimedRun("r-1", "translator", _run_agent_input(), "t-1")
     )
 
     assert accepted is True
     carried = provider.outbound.get_nowait()
     assert isinstance(carried, DeliveredRun)
     assert (carried.run_id, carried.agent_name, carried.thread_id) == ("r-1", "translator", "t-1")
-    assert carried.run_input == {"messages": []}
+    assert isinstance(carried.run_input, RunAgentInput)
+    assert (carried.run_input.thread_id, carried.run_input.run_id) == ("t-1", "r-1")
 
 
 async def test_declining_is_carried_through_unchanged():
@@ -93,7 +112,7 @@ async def test_declining_is_carried_through_unchanged():
     it or turn it into an exception."""
     provider = QueuedLink("abc123", accept=False)
 
-    assert await provider.deliver(_ClaimedRun("r-2", "a", {}, "t")) is False
+    assert await provider.deliver(_ClaimedRun("r-2", "a", _run_agent_input(), "t")) is False
 
 
 async def test_cancel_reaches_the_transport():
@@ -186,8 +205,8 @@ async def test_one_link_carries_a_run_down_and_its_results_back():
     """
     from souk_provider_sdk import AgentHandle, HandleProvider, ProviderIdentity, ProviderRuntime
 
-    async def agent(run_input: dict):
-        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def agent(run_input: RunAgentInput):
+        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "RUN_FINISHED", **ids}
 
@@ -202,8 +221,7 @@ async def test_one_link_carries_a_run_down_and_its_results_back():
         # sees `run.agent.name`.
         # A realistic run_input: souk's `build_run_agent_input` puts the ids
         # it minted in there, which is what an agent echoes back on its events.
-        run_input = {"threadId": "t-1", "runId": "r-1", "messages": []}
-        assert await link.deliver(_ClaimedRun("r-1", "a", run_input, "t-1")) is True
+        assert await link.deliver(_ClaimedRun("r-1", "a", _run_agent_input(), "t-1")) is True
 
         async with asyncio.timeout(5):
             while not link.finished:
@@ -224,7 +242,7 @@ async def test_a_runtime_with_no_link_drops_its_output_rather_than_raising():
     """
     from souk_provider_sdk import AgentHandle, HandleProvider, ProviderIdentity, ProviderRuntime
 
-    async def agent(run_input: dict):
+    async def agent(run_input: RunAgentInput):
         yield {"type": "RUN_FINISHED", "threadId": "t", "runId": "r"}
 
     runtime = ProviderRuntime(
@@ -233,7 +251,9 @@ async def test_a_runtime_with_no_link_drops_its_output_rather_than_raising():
     runtime.start()
     try:
         assert runtime.link is None
-        assert await runtime.deliver(DeliveredRun(run_id="r", agent_name="a", run_input={}))
+        assert await runtime.deliver(
+            DeliveredRun(run_id="r", agent_name="a", run_input=RunAgentInput(**_run_agent_input()))
+        )
         await asyncio.sleep(0.05)
     finally:
         await runtime.aclose()  # the loop survived; nothing raised

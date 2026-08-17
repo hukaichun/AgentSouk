@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ag_ui.core import RunAgentInput
+from ag_ui.core import RunAgentInput, RunErrorEvent, RunStartedEvent
 
 from souk import repo
 from souk.models import AgentRef, LlmRef
@@ -95,7 +95,7 @@ class AGUIAdapter:
             metadata = getattr(body, "metadata", None) or {}
             resume = [r.model_dump(mode="json", by_alias=True) for r in body.resume] if body.resume else None
 
-            metadata, verified_subject, verified_actors, actor_chain = await _verify_caller(
+            metadata, verified_subject, verified_actors, actor_chain = await verify_caller(
                 session, metadata
             )
 
@@ -275,17 +275,36 @@ async def _offline_events(thread_id: str, run_id: str) -> AsyncIterator[dict[str
     given). This path never reaches a provider, so it synthesizes the same
     standard, in-band announcement rather than relying on a souk-invented
     header — RunErrorEvent's own schema has no thread_id/run_id field to
-    carry them otherwise."""
-    yield {"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id}
-    yield {"type": "RUN_ERROR", "message": "agent is currently offline"}
+    carry them otherwise.
+
+    Built through `ag_ui.core`'s own event types rather than spelled as dict
+    literals — souk is the one authoring these two, unlike every other event
+    on this stream, which only a provider ever writes. `exclude_none` keeps
+    the wire shape identical to what this used to hand-write; the fields it
+    drops (`timestamp`, `rawEvent`, ...) were never sent before either.
+    """
+    yield RunStartedEvent(thread_id=thread_id, run_id=run_id).model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
+    yield RunErrorEvent(message="agent is currently offline").model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
 
 
-async def _verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict], Any]:
+async def verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict], Any]:
     """Optional, opt-in caller identity: `metadata.actorChain` is an ordered
     list of compact JWTs (see souk.identity.verify_actor_chain). Unsigned
     calls are still allowed; a chain that is present but fails to verify is
     rejected outright rather than silently treated as anonymous, since that
     is more likely tampering than a caller choosing not to send one.
+
+    Not AG-UI-specific despite living here — `protocols.a2a`'s `_start_run`
+    calls this too. It used to have its own copy of this exact loop, building
+    the same `{"publicKey", "agentName"}` shape independently; nothing
+    compared the two, which is the same failure this repo has already had
+    once for a different shape (see contract.py's REGISTRATION_FIELDS note in
+    souk-provider-sdk). One function both protocols call is what keeps that
+    shape from drifting between them again.
     """
     actor_chain = metadata.get("actorChain")
     if not actor_chain:

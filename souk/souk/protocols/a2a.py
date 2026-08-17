@@ -32,7 +32,6 @@ from google.protobuf.json_format import ParseDict, ParseError
 from souk import repo
 from souk.agui import build_run_agent_input
 from souk.errors import AgentNotFound, InvalidRunInput, RunNotFound
-from souk.identity import verify_actor_chain
 from souk.kyok import issue_kyok_token
 from souk.models import AgentRef
 from souk.pause import is_resuming
@@ -43,6 +42,7 @@ from souk.protocols.a2a_translate import (
     status_update_for_run_status,
     to_wire,
 )
+from souk.protocols.agui import verify_caller
 
 if TYPE_CHECKING:
     from souk.core import Souk
@@ -465,24 +465,12 @@ class A2AAdapter:
             parent_thread_id = await _lineage_parent(session, params)
             context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
 
-            # Opt-in caller identity, same mechanism as AG-UI's: unsigned
-            # calls are allowed, but a chain that is present and fails to
-            # verify is rejected rather than silently treated as anonymous —
-            # that is more likely tampering than a caller choosing not to
-            # send one.
-            verified_subject = None
-            verified_actors: list[dict] = []
-            actor_chain = metadata.get("actorChain")
-            if actor_chain:
-                result = verify_actor_chain(actor_chain)
-                verified_subject = result.subject
-                for public_key in result.actor_public_keys:
-                    resolved = await repo.get_agent_name_for_public_key(session, public_key)
-                    verified_actors.append({"publicKey": public_key, "agentName": resolved})
-                metadata = {
-                    **metadata,
-                    "verifiedActorChain": {"subject": verified_subject, "actors": verified_actors},
-                }
+            # Opt-in caller identity, same mechanism as AG-UI's and the same
+            # function — see protocols.agui.verify_caller for why this isn't
+            # its own copy of the loop.
+            metadata, verified_subject, verified_actors, actor_chain = await verify_caller(
+                session, metadata
+            )
 
             # create_if_missing stays False here, unlike AG-UI: `contextId`
             # is optional, so omitting it still yields a fresh thread, but

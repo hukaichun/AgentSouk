@@ -87,13 +87,56 @@ async def test_a_provider_that_raises_reaches_the_caller_as_run_error(brisk):
     assert [e["type"] for e in persisted] == ["RUN_ERROR"]
 
 
+async def test_a_malformed_event_fails_the_run_instead_of_relaying_garbage(brisk):
+    """A provider is not trusted to actually speak AG-UI just because it
+    connected. `souk.handlers._handle_relay` validates every event against
+    `ag_ui.core.Event` — this is what a provider sending something that
+    isn't one looks like from the caller's side: the same
+    `provider_stream_ended_without_finishing` verdict as one that raised or
+    hung, not a crash and not garbage relayed downstream."""
+    registration, identity = await _register(brisk, "malformed")
+    agent_id = registration.agents["malformed"]
+
+    class SendsGarbage:
+        async def run_stream(self, agent_id: str, run_input: dict):
+            yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+            # Missing `messageId`, which TextMessageStartEvent requires —
+            # not a shape any real AG-UI client or `reduce_events_to_messages`
+            # could make sense of.
+            yield {"type": "TEXT_MESSAGE_START", "role": "assistant"}
+            yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+
+    await brisk.attach(identity, SendsGarbage(), [agent_id.name])
+    handle = await brisk.start_run(agent_id, {"messages": []})
+
+    events = [e async for e in handle.events()]
+
+    assert [e["type"] for e in events] == ["RUN_STARTED", "RUN_ERROR"]
+    # _handle_fail's event (this path) carries `message`, not `code` —
+    # that's _handle_finish's synthesized failure, a different path.
+    assert events[-1]["message"] == "provider sent a malformed AG-UI event"
+
+    await _until(lambda: handle.run_id not in brisk.active_runs())
+    async with brisk.session() as session:
+        stored = await repo.get_run(session, handle.run_id)
+        persisted = await repo.get_run_events(session, handle.run_id)
+    assert stored.status == "failed"
+    assert stored.metadata["failureReason"] == "provider sent a malformed AG-UI event"
+    # The malformed event itself was never persisted as a run event — only
+    # the two real ones plus the synthesized failure. Nor is RUN_FINISHED,
+    # even though the provider did send one: it was already queued behind
+    # the malformed event and discarded with everything else once souk
+    # decided this stream could not be trusted.
+    assert [e["type"] for e in persisted] == ["RUN_STARTED", "RUN_ERROR"]
+
+
 async def test_a_provider_that_reports_its_own_failure_is_not_corrected(brisk):
     registration, identity = await _register(brisk, "polite")
     agent_id = registration.agents["polite"]
 
     class ReportsItsOwn:
         async def run_stream(self, agent_id: str, run_input: dict):
-            yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+            yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
             yield {"type": "RUN_ERROR", "message": "upstream model refused the request"}
 
     await brisk.attach(identity, ReportsItsOwn(), [agent_id.name])
@@ -116,7 +159,7 @@ async def test_a_cancelled_run_gets_no_run_error(brisk):
 
     class WaitsForever:
         async def run_stream(self, agent_id: str, run_input: dict):
-            yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+            yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
             started.set()
             await asyncio.Event().wait()
 

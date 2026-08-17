@@ -12,19 +12,19 @@ from souk.models import AgentRef
 
 class EchoProvider:
 
-    async def run_stream(self, agent_id: str, run_input: dict):
-        text = run_input["messages"][-1]["content"] if run_input.get("messages") else ""
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_id: str, run_input):
+        text = run_input.messages[-1].content if run_input.messages else ""
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": f"echo: {text}"}
         yield {"type": "TEXT_MESSAGE_END", "messageId": "m1"}
-        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
 
 class NeverFinishesProvider:
 
-    async def run_stream(self, agent_id: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_id: str, run_input):
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
         await asyncio.Event().wait()
 
 

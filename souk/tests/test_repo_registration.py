@@ -57,7 +57,7 @@ async def test_the_same_name_under_two_identities_is_two_agents(session, new_ide
     # reach either: the shared name addresses neither on its own.
     for identity, registered in ((a, result_a), (b, result_b)):
         row = await repo.resolve_agent(session, identity.public_key, "greeter")
-        assert AgentRef(provider_key=row["provider_key"], name=row["name"]) == registered["greeter"]
+        assert AgentRef(provider_key=row.provider_key, name=row.name) == registered["greeter"]
 
 
 async def test_omitting_an_agent_keeps_it_rather_than_removing_it(session, souk, new_identity):
@@ -130,8 +130,10 @@ async def test_an_agent_is_addressable_by_whose_it_is_and_what_it_is_called(sess
     mine = await repo.register_agents(session, a.public_key, [{"name": "translator"}])
     theirs = await repo.register_agents(session, b.public_key, [{"name": "translator"}])
 
-    assert AgentRef(**{k: (await repo.resolve_agent(session, a.public_key, "translator"))[k] for k in ("provider_key", "name")}) == mine["translator"]
-    assert AgentRef(**{k: (await repo.resolve_agent(session, b.public_key, "translator"))[k] for k in ("provider_key", "name")}) == theirs["translator"]
+    resolved_a = await repo.resolve_agent(session, a.public_key, "translator")
+    resolved_b = await repo.resolve_agent(session, b.public_key, "translator")
+    assert AgentRef(provider_key=resolved_a.provider_key, name=resolved_a.name) == mine["translator"]
+    assert AgentRef(provider_key=resolved_b.provider_key, name=resolved_b.name) == theirs["translator"]
 
 
 async def test_resolving_an_agent_a_provider_never_registered_is_a_miss(session, new_identity):
@@ -161,7 +163,7 @@ async def test_a_provider_is_addressable_by_its_fingerprint(session, new_identit
 
     assert by_fingerprint == by_key
     assert AgentRef(
-        provider_key=by_fingerprint["provider_key"], name=by_fingerprint["name"]
+        provider_key=by_fingerprint.provider_key, name=by_fingerprint.name
     ) == ids["translator"]
 
 

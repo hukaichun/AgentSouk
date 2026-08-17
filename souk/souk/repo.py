@@ -352,7 +352,7 @@ async def get_agent(session: AsyncSession, agent: AgentRef) -> AgentRecord | Non
     return AgentRecord(**row) if row else None
 
 
-async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict[str, Any] | None:
+async def resolve_agent(session: AsyncSession, provider: str, name: str) -> AgentRecord | None:
     """The agent this identity registered under this name, or None.
 
     `provider` is the identity's public key or its fingerprint — the two are
@@ -385,7 +385,7 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> dict
             )
         )
     ).mappings().first()
-    return dict(row) if row else None
+    return AgentRecord(**row) if row else None
 
 
 async def list_agents(

@@ -30,6 +30,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from souk import repo
+from souk.agui import build_run_agent_input
 from souk.broker import (
     ConnectedProvider,
     FinishStream,
@@ -51,6 +52,7 @@ from souk.identity import (
     registration_signing_payload,
     verify_signature,
 )
+from souk.ids import new_id
 from souk.kyok import ConnectedLLMProvider, KyokRelay
 from souk.models import AgentRecord, AgentRef, AgentSummary, LlmRef, RunRecord
 
@@ -178,6 +180,43 @@ class RunHandle:
         the run's own task. See `RunBroker.request_cancel`."""
         if self._broker is not None:
             self._broker.request_cancel(self.run_id)
+
+
+def _complete_run_agent_input(thread_id: str, run_id: str, run_input: dict[str, Any]) -> dict[str, Any]:
+    """`start_run`/`resume_run`'s caller-supplied `run_input` filled out into
+    a real `RunAgentInput` before dispatch.
+
+    The library facade let a caller pass a bare `{"messages": [...]}` straight
+    through to a provider — `state`/`tools`/`context`/`forwardedProps` never
+    got filled in, unlike the AG-UI and A2A protocol adapters, which both
+    build a real `RunAgentInput` via this same function before enqueueing.
+    A `SoukLink.deliver` that validates against that type (as
+    `souk-provider-sdk`'s now does) turned the gap from "a provider reads a
+    missing key as None" into every delivery through this facade failing
+    validation and the run never starting — caught by a real probe, not by
+    reading the code.
+
+    Message `id` is the other thing this facade never assigned: the protocol
+    adapters get theirs from `repo.append_thread_messages`, which this facade
+    deliberately does not call (see this method's own docstring — persisting
+    the caller's messages is a protocol surface's job). `ag_ui.core.Message`
+    requires one regardless, so one is minted here for whichever message
+    arrived without it; it is real, not a placeholder, because nothing
+    downstream of this call will assign a better one.
+    """
+    messages = [
+        m if m.get("id") else {**m, "id": new_id("msg")} for m in run_input.get("messages", [])
+    ]
+    return build_run_agent_input(
+        thread_id,
+        run_id,
+        messages,
+        state=run_input.get("state"),
+        tools=run_input.get("tools"),
+        context=run_input.get("context"),
+        forwarded_props=run_input.get("forwardedProps"),
+        resume=run_input.get("resume"),
+    )
 
 
 class Souk:
@@ -825,7 +864,7 @@ class Souk:
         async with self.session() as session:
             return await repo.get_agent(session, agent)
 
-    async def resolve_agent(self, provider: str, name: str) -> dict[str, Any] | None:
+    async def resolve_agent(self, provider: str, name: str) -> AgentRecord | None:
         """Which agent a provider means by a name — `provider` being its
         public key, the only identity it has.
 
@@ -964,7 +1003,7 @@ class Souk:
             run_id,
             agent,
             resolved_thread_id,
-            {**run_input, "threadId": resolved_thread_id, "runId": run_id},
+            _complete_run_agent_input(resolved_thread_id, run_id, run_input),
             "ag-ui",
         )
         return RunHandle(
@@ -994,7 +1033,7 @@ class Souk:
             run_id,
             AgentRef(provider_key=stored.provider_key, name=stored.agent_name),
             stored.thread_id,
-            run_input,
+            _complete_run_agent_input(stored.thread_id, run_id, run_input),
             stored.protocol or "ag-ui",
             seq=starting_seq,
         )
