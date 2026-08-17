@@ -361,3 +361,8 @@ class KyokRelay:
 
     def serving(self, ref: LlmRef) -> ConnectedLLMProvider | None:
         return self._links.get(ref)
+
+    def serving_any(self, public_key: str) -> bool:
+        """Whether this identity has any offering attached — what detach
+        checks so a no-op departure doesn't announce a roster change."""
+        return any(ref.provider_key == public_key for ref in self._links)

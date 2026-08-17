@@ -43,6 +43,16 @@ class RosterChanged:
 
 
 @dataclass(frozen=True)
+class LlmRosterChanged:
+    """The LLM-provider mirror of RosterChanged: which offerings exist, or
+    who is serving them — a registration, or an LLM provider attaching or
+    detaching. Its own event rather than RosterChanged widened, because
+    that one's meaning is welded to the agent roster and `AgentSummary.
+    online`; a subscriber told "look again" has to know which list to look
+    at."""
+
+
+@dataclass(frozen=True)
 class RunStatusChanged:
     """One run moved to `status`. Covers every transition souk records,
     including the ones a health sweep decides rather than a worker."""
@@ -51,4 +61,4 @@ class RunStatusChanged:
     status: str
 
 
-ChangeEvent = RosterChanged | RunStatusChanged
+ChangeEvent = RosterChanged | LlmRosterChanged | RunStatusChanged

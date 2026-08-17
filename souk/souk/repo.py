@@ -316,6 +316,25 @@ async def get_llm_names_for_key(session: AsyncSession, public_key: str) -> set[s
     return set(rows)
 
 
+async def touch_llm_providers(
+    session: AsyncSession, provider_key: str, names: list[str]
+) -> None:
+    """Marks this identity's offerings as seen — the mirror of
+    touch_agents, called on attach for the same reason: attached is
+    online from that moment, not from whenever work first arrives."""
+    if not names:
+        return
+    await session.execute(
+        update(llm_providers)
+        .where(
+            llm_providers.c.provider_key == provider_key,
+            llm_providers.c.name.in_(names),
+        )
+        .values(last_seen_at=_utcnow())
+    )
+    await session.commit()
+
+
 async def touch_agents(session: AsyncSession, provider_key: str, names: list[str]) -> None:
     """Marks this provider's agents as seen — one statement for the batch,
     where it used to be one per agent."""

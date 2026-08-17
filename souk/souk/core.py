@@ -38,10 +38,10 @@ from souk.broker import (
     RunBroker,
     RunSnapshot,
 )
-from souk.changes import ChangeEvent, RosterChanged, RunStatusChanged
+from souk.changes import ChangeEvent, LlmRosterChanged, RosterChanged, RunStatusChanged
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, EXPECTED_SCHEMA_REVISION, quoted_schema
-from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration
+from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration, LlmProviderNotFound
 from souk.handlers import make_handlers
 from souk.health import run_health_sweeps_forever
 from souk.identity import (
@@ -718,7 +718,11 @@ class Souk:
         if not verify_signature(public_key, signature, payload):
             raise InvalidRegistration("invalid LLM provider registration signature")
         async with self.session() as session:
-            return await repo.register_llm_providers(session, public_key, names, metadata)
+            registered = await repo.register_llm_providers(
+                session, public_key, names, metadata
+            )
+        self._notify_change(LlmRosterChanged())
+        return registered
 
     async def attach_llm_provider(
         self, link: ConnectedLLMProvider, model_names: list[str]
@@ -743,7 +747,7 @@ class Souk:
             registered = await repo.get_llm_names_for_key(session, link.public_key)
         unknown = sorted(set(model_names) - registered)
         if unknown:
-            raise InvalidRegistration(
+            raise LlmProviderNotFound(
                 f"LLM provider '{link.public_key}' has not registered {unknown} — "
                 "register before attaching, in-process or not"
             )
@@ -753,13 +757,27 @@ class Souk:
                 for name in model_names
             }
         )
+        async with self.session() as session:
+            await repo.touch_llm_providers(session, link.public_key, model_names)
+            await session.commit()
+        # Reachability is part of what the roster answers, so this changes
+        # it even though no offering was added — same sentence as
+        # attach_provider, deliberately.
+        self._notify_change(LlmRosterChanged())
 
     def detach_llm_provider(self, public_key: str) -> None:
         """This LLM provider is gone from this process. Runs bound to its
-        name are left alone — the binding names an identity, not a
+        offerings are left alone — a binding names an offering, not a
         connection, so completions for them start failing (503) until it
-        attaches again, and souk records nothing it has not observed."""
+        attaches again, and souk records nothing it has not observed.
+
+        No database write, for detach_provider's reason verbatim:
+        unregistering *is* going offline, and reachability is read from
+        the relay, not from `last_seen_at`."""
+        if not self.kyok_relay.serving_any(public_key):
+            return
         self.kyok_relay.detach(public_key)
+        self._notify_change(LlmRosterChanged())
 
     async def detach_provider(self, provider_public_key: str) -> None:
         """This provider is gone from this process.
