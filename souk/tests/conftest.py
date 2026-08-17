@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import os
@@ -114,18 +113,6 @@ def new_identity() -> type[Identity]:
 
 @pytest.fixture
 async def attach(souk: Souk):
-    """Attach a provider the way a real one arrives: the SDK's runtime, with
-    an adapter in front of it that souk can hand a run to.
-
-    souk used to take a bare object with `run_stream` and build the loop
-    around it itself. It does not any more — the loop is the provider's — so
-    a test that wants an agent served goes through the same steps a
-    deployment does: make a runtime, adapt it, attach it.
-
-    Every runtime is stopped when the test ends. The `souk` fixture is
-    session-scoped, so one left running stays registered with the broker and
-    takes the next test's runs.
-    """
     started: list[ProviderRuntime] = []
 
     async def _attach(identity: ProviderIdentity, provider, names, **kwargs) -> ProviderRuntime:
@@ -141,9 +128,6 @@ async def attach(souk: Souk):
 
 
 class EchoAgent:
-    """A provider that answers with one short message and remembers who
-    called it. Shared because two suites need exactly this and a test module
-    importing another test module is how deleting one file broke a second."""
 
     def __init__(self) -> None:
         self.seen_caller: dict | None = None
@@ -160,8 +144,6 @@ class EchoAgent:
 
 @dataclass
 class Served:
-    """What `serve` hands back: everything a test needs to talk about the
-    provider it just stood up."""
 
     identity: Identity
     provider: Any
@@ -171,12 +153,6 @@ class Served:
 
 @pytest.fixture
 async def serve(souk: Souk, attach):
-    """Register a provider's agents and attach it, in one step.
-
-    Both halves, because they are always done together and neither is
-    optional: registration is what makes the names souk's to serve, and
-    attaching is what makes them reachable.
-    """
 
     async def _serve(provider=None, *names: str, **kwargs) -> Served:
         provider = EchoAgent() if provider is None else provider
@@ -194,8 +170,6 @@ async def serve(souk: Souk, attach):
 
 @pytest.fixture
 async def register(souk: Souk):
-    """Register agents without attaching anything — for the cases that are
-    about souk knowing a name, not about anybody serving it."""
 
     async def _register(*names: str) -> Served:
         identity = Identity()

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from a2a.types import a2a_pb2 as pb
@@ -98,9 +97,6 @@ def test_inbound_parts_are_read_under_every_spec_version():
 
     as_content = [{"role": m["role"], "content": m["content"]} for m in (current[0], v0_3[0], original[0])]
     assert as_content == [{"role": "user", "content": "hi"}] * 3
-    # `id` is real now (ag_ui.core.UserMessage requires one) but a
-    # placeholder — repo.append_thread_messages is what assigns the one that
-    # actually gets stored, so this function's own id is never read.
     assert current[0]["id"] == "unset"
 
 

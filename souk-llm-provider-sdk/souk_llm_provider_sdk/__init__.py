@@ -1,7 +1,3 @@
-"""The LLM provider's side of KYOK — identity, the completion port, and
-the policy seam. See docs/keep-your-own-key.md in the AgentSouk repo.
-"""
-
 from souk_provider_sdk.identity import ProviderIdentity
 
 from souk_llm_provider_sdk.contract import (

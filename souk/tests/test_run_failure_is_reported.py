@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -13,10 +12,6 @@ from souk.broker import RunBroker
 from souk.core import Souk
 
 
-
-# Local rather than imported from another test module: these used to come
-# from test_in_process_worker, which was deleted with the mechanism it tested,
-# and took this file's collection down with it.
 async def _until(predicate, timeout: float = 5.0) -> None:
     async with asyncio.timeout(timeout):
         while not predicate():
@@ -32,16 +27,8 @@ async def _register(souk, *names: str):
     return registration, identity
 
 
-
-
 @pytest.fixture
 async def brisk(settings: CoreSettings):
-    """Its own souk, because these tests want the health sweeps' own timing.
-
-    Started, not merely constructed: the broker's loop is the only thing that
-    hands a run to anybody, so a souk that was never started accepts runs and
-    dispatches none of them.
-    """
     souk = Souk(settings)
     await souk.start()
     runtimes: list[ProviderRuntime] = []
@@ -88,21 +75,12 @@ async def test_a_provider_that_raises_reaches_the_caller_as_run_error(brisk):
 
 
 async def test_a_malformed_event_fails_the_run_instead_of_relaying_garbage(brisk):
-    """A provider is not trusted to actually speak AG-UI just because it
-    connected. `souk.handlers._handle_relay` validates every event against
-    `ag_ui.core.Event` — this is what a provider sending something that
-    isn't one looks like from the caller's side: the same
-    `provider_stream_ended_without_finishing` verdict as one that raised or
-    hung, not a crash and not garbage relayed downstream."""
     registration, identity = await _register(brisk, "malformed")
     agent_id = registration.agents["malformed"]
 
     class SendsGarbage:
         async def run_stream(self, agent_id: str, run_input: dict):
             yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
-            # Missing `messageId`, which TextMessageStartEvent requires —
-            # not a shape any real AG-UI client or `reduce_events_to_messages`
-            # could make sense of.
             yield {"type": "TEXT_MESSAGE_START", "role": "assistant"}
             yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
@@ -112,8 +90,6 @@ async def test_a_malformed_event_fails_the_run_instead_of_relaying_garbage(brisk
     events = [e async for e in handle.events()]
 
     assert [e["type"] for e in events] == ["RUN_STARTED", "RUN_ERROR"]
-    # _handle_fail's event (this path) carries `message`, not `code` —
-    # that's _handle_finish's synthesized failure, a different path.
     assert events[-1]["message"] == "provider sent a malformed AG-UI event"
 
     await _until(lambda: handle.run_id not in brisk.active_runs())
@@ -122,11 +98,6 @@ async def test_a_malformed_event_fails_the_run_instead_of_relaying_garbage(brisk
         persisted = await repo.get_run_events(session, handle.run_id)
     assert stored.status == "failed"
     assert stored.metadata["failureReason"] == "provider sent a malformed AG-UI event"
-    # The malformed event itself was never persisted as a run event — only
-    # the two real ones plus the synthesized failure. Nor is RUN_FINISHED,
-    # even though the provider did send one: it was already queued behind
-    # the malformed event and discarded with everything else once souk
-    # decided this stream could not be trusted.
     assert [e["type"] for e in persisted] == ["RUN_STARTED", "RUN_ERROR"]
 
 
@@ -179,14 +150,6 @@ async def test_a_cancelled_run_gets_no_run_error(brisk):
 
 
 async def test_a_run_nobody_ever_comes_for_is_given_up_on(settings: CoreSettings):
-    """The caller is watching a run for an agent no provider is serving. souk
-    cannot make one appear, and leaving the caller to wait forever is the
-    failure mode issue #37 was about — so the broker gives up, and says why.
-
-    Its own souk with its own broker, because how long a run may go unwanted
-    is the broker's number: a copy of it in settings is a copy that can
-    disagree with the one actually used, which it once did.
-    """
     souk = Souk(settings, broker=RunBroker(queued_timeout_seconds=0.05))
     await souk.start()
     try:
@@ -194,9 +157,6 @@ async def test_a_run_nobody_ever_comes_for_is_given_up_on(settings: CoreSettings
         agent = _registration.agents["unserved"]
 
         handle = await souk.start_run(agent, {"messages": []})
-        # Bounded: if the broker stops giving up on unwanted runs, this stream
-        # never ends, and an unbounded read turns that into a hung suite
-        # instead of a failing test. Measured — it hung for 200s.
         async with asyncio.timeout(5):
             [_ async for _ in handle.events()]
 

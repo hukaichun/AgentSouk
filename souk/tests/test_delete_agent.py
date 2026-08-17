@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -38,14 +37,6 @@ class _Identity(ProviderIdentity):
     def registration_signature(self, names: list[str], timestamp: int) -> str:
         signature, _ = self.sign_registration(names, timestamp)
         return signature
-
-
-# There used to be an `souk` fixture here, a whole second Souk with
-# `online_window_seconds=0`, because registering marked an agent seen and
-# "seen recently" was what `online` meant — so every test in this file would
-# otherwise have had to wait out the window it had just started. Deleting is
-# refused for an agent a provider is *serving*, which registering does not
-# make true, so the plain souk works and the fixture is gone.
 
 
 async def test_a_registration_signature_is_not_a_deletion_order(souk):
@@ -113,12 +104,7 @@ async def test_deleting_an_agent_that_never_existed_is_not_found(souk):
         )
 
 
-
-
 async def test_an_agent_someone_is_serving_is_refused(souk, attach):
-    """One refusal where there were two. `online` and `attached` were separate
-    reasons only because souk could not see reachability and had to infer it
-    from when the provider was last heard from. It can see it now."""
     identity = _Identity()
     await identity.register(souk, "local")
     await attach(identity, _Provider(), ["local"])

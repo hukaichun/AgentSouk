@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -79,8 +78,6 @@ async def test_roster_and_agent_lookup(souk, new_identity, attach):
 
     roster = await souk.list_agents()
     assert [a.name for a in roster] == ["echo"]
-    # Registered is not reachable. `online` is whether somebody is serving it,
-    # not whether souk has heard from it lately.
     assert roster[0].online is False
 
     await attach(identity, EchoProvider(), ["echo"])
@@ -110,12 +107,6 @@ async def test_cancel_a_running_agent(souk, new_identity, attach):
 
 
 class StubbornProvider:
-    """Takes runs, is asked to stop, and finishes anyway.
-
-    souk can ask; it cannot compel. Complying is the provider's choice, so
-    this one is written not to — the point is that souk records what the
-    stream actually did rather than what it requested.
-    """
 
     def __init__(self, public_key: str) -> None:
         self.public_key = public_key
@@ -142,9 +133,6 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
     await _until(lambda: provider.taken == [handle.run_id])
 
     souk.cancel_run(handle.run_id)
-    # The flag flips synchronously so nothing hands the run out meanwhile;
-    # telling the provider happens on the run's own task, in order behind
-    # everything else about it.
     assert souk.broker.get(handle.run_id).cancel_requested is True
     await _until(lambda: provider.asked_to_stop == [handle.run_id])
     souk.report_event(
