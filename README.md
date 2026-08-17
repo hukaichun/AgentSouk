@@ -33,7 +33,7 @@ The same mechanism/policy split runs through the codebase itself, as a hard line
 | | **AgentSouk** (this repo) | **[AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)** |
 |---|---|---|
 | **Owns** | The domain: agents, threads, runs, identity, persistence, protocol *translation* | The network: ports, transports, TLS, CORS, endpoints, wire framing, admin surface |
-| **Ships** | `souk` (the network-free core library) + the provider/caller SDKs | The reference gateway — one HTTP port serving callers and relaying to providers |
+| **Ships** | `souk` (the network-free core library) + [`souk-provider-sdk`](souk-provider-sdk/) (the provider-side contract, also transport-free) | The reference gateway, the transport SDKs (`souk-agent-sdk`, `souk-client-sdk`) and the reference providers |
 | **May it bind a socket?** | ❌ Never. `souk` cannot even *import* a transport — enforced by packaging and by `souk/tests/test_core_is_network_free.py` | ✅ That is its entire job |
 
 Three consequences, recorded in [AgentSouk#27](https://github.com/hukaichun/AgentSouk/issues/27) and load-bearing:
@@ -134,9 +134,10 @@ Modular, independent distributions — no shared workspace, each stands alone:
 | Module Path | Description |
 |---|---|
 | [`souk/`](souk/) | **The core library.** Agents, threads, runs, identity, the AG-UI/A2A/KYOK adapters, and SQLite/Postgres persistence. Network-free: it depends on no web framework, no gRPC, no WebSocket library — and cannot, by packaging and by test |
+| [`souk-provider-sdk/`](souk-provider-sdk/) | **What a provider and souk agree on**, from the provider's side: identity and what it signs, the port an agent implements, and the provider's own worker loop. Carries no transport — its dependencies are `cryptography` and `pyjwt`, and not `souk` either. See its [README](souk-provider-sdk/README.md) |
 | [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
 
-The SDKs (`souk-agent-sdk`, `souk-client-sdk`), the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`) moved to [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer): the gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
+Three names circulate and they are different packages: **`souk-provider-sdk` is here** and defines the interaction; `souk-agent-sdk` (a client for the gateway's provider WebSocket) and `souk-client-sdk` (the caller's side) live in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer), along with the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`). The gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
 
 ---
 

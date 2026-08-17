@@ -40,9 +40,10 @@ from sqlalchemy import delete
 
 from souk.config import CoreSettings
 from souk.core import Souk
+
 from souk.identity import registration_signing_payload
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
-from souk_provider_sdk import ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessProvider, ProviderIdentity, ProviderRuntime
 
 DB = Path(tempfile.gettempdir()) / "souk_probe_new_database.db"
 URL = f"sqlite+aiosqlite:///{DB}"
@@ -89,9 +90,9 @@ async def main() -> int:
     first = await register()
     # Attached once, with the names from this provider's own configuration.
     # Through the SDK's runtime, because that is what souk can hand a run to.
-    runtime = ProviderRuntime(identity, Provider(), souk)
+    runtime = ProviderRuntime(identity, Provider())
     runtime.start()
-    await souk.attach_provider(runtime, ["translator"])
+    await souk.attach_provider(InProcessProvider(souk, runtime), ["translator"])
 
     handle = await souk.start_run(first.agents["translator"], {"messages": []})
     before = [event async for event in handle.events()]

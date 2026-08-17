@@ -1,7 +1,15 @@
 # Agent provider guide: situations, how to handle them, what souk does
 
+Two quick starts, for two different questions.
+[`souk-provider-sdk/README.md`](../souk-provider-sdk/README.md) is this
+repo's: what a provider and souk agree on, and how to serve an agent with
+souk as a library in your own process.
 [souk-agent-sdk's README](https://github.com/hukaichun/AgentSoukServer/blob/main/souk-agent-sdk/README.md)
-(in the AgentSoukServer repo) is the pitch and the quick start. This document is the other half: the specific situations
+(in the AgentSoukServer repo) is the other: running an agent against a
+deployed gateway, over a network. They are different packages — see the table
+in `souk-provider-sdk/README.md` if the names are running together.
+
+This document is the third thing: the specific situations
 a provider design runs into once it's live, how to handle each one, and
 exactly what souk does or doesn't do for you. Nothing here is required
 reading to get a first agent running — it's what to come back to once

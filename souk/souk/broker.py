@@ -224,10 +224,31 @@ class _Capacity:
 class ConnectedProvider(Protocol):
     """Whoever is serving an agent right now, as the broker sees them.
 
-    Three things, because they are the three the broker needs and no more:
-    who this is, how to hand it a run, and how to ask it to stop one. What
-    carries any of them — a call in this process, a frame on a socket — is
-    not the broker's business and does not appear here.
+    Four things, because they are the four the broker needs and no more: who
+    this is, how much it will take at once, how to hand it a run, and how to
+    ask it to stop one. What carries any of them — a call in this process, a
+    frame on a socket — is not the broker's business and does not appear here.
+
+    It said "three" until this docstring was corrected, having gained
+    `max_concurrent_runs` without it. That is the easiest of the four to miss,
+    because it is the only one that is not a call: a provider without it
+    constructs and attaches perfectly well, then fails inside
+    `register_provider` when the broker sizes its capacity bucket. Anything
+    counting the members of this protocol should count the annotations too,
+    not just the methods.
+
+    A `Protocol` rather than a base class, deliberately. The implementations
+    live in other distributions and one of them must be able to exist without
+    ever importing souk:
+
+    - `souk_provider_sdk.InProcessProvider` — a direct call, no wire
+    - AgentSoukServer's `SocketProvider` — a frame, and an ack to wait on
+
+    Both subclass `souk_provider_sdk.SoukConnection`, which is where the
+    translation from this `ClaimedRun` into that package's own delivered-run
+    type happens — once, rather than per transport. Souk requires none of
+    that: anything with these four members works, whether or not it has ever
+    heard of that package.
     """
 
     # The provider's Ed25519 public key. Established when it connected, not

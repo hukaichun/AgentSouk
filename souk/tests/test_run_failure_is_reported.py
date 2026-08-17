@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 
-from souk_provider_sdk import ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessProvider, ProviderIdentity, ProviderRuntime
 
 import pytest
 
@@ -11,6 +11,7 @@ from souk import repo
 from souk.config import CoreSettings
 from souk.broker import RunBroker
 from souk.core import Souk
+
 
 
 # Local rather than imported from another test module: these used to come
@@ -46,10 +47,10 @@ async def brisk(settings: CoreSettings):
     runtimes: list[ProviderRuntime] = []
 
     async def _attach(identity, provider, names):
-        runtime = ProviderRuntime(identity, provider, souk)
+        runtime = ProviderRuntime(identity, provider)
         runtimes.append(runtime)
         runtime.start()
-        await souk.attach_provider(runtime, list(names))
+        await souk.attach_provider(InProcessProvider(souk, runtime), list(names))
         return runtime
 
     souk.attach = _attach

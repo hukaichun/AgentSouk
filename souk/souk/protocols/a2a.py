@@ -31,7 +31,7 @@ from google.protobuf.json_format import ParseDict, ParseError
 
 from souk import repo
 from souk.agui import build_run_agent_input
-from souk.errors import AgentNotFound, AmbiguousAgentName, InvalidRunInput, RunNotFound
+from souk.errors import AgentNotFound, InvalidRunInput, RunNotFound
 from souk.identity import verify_actor_chain
 from souk.models import AgentRef
 from souk.pause import is_resuming
@@ -165,26 +165,14 @@ class A2AAdapter:
     Holds no address of its own: see `ServedInterface` for why the Agent
     Card's `supported_interfaces` is something a caller supplies rather than
     something core builds.
+
+    Takes an `AgentRef` and never a bare display name — see the note under
+    `ServedInterface`: the URL a card advertises is the gateway's to shape,
+    so it can carry the pair and nothing here has to guess from a name.
     """
 
     def __init__(self, souk: "Souk") -> None:
         self._souk = souk
-
-    async def resolve_agent(self, name: str) -> AgentRef:
-        """Which agent a bare display name means — zero, one, or ambiguous.
-
-        A browsing question, and it can legitimately fail: names are not
-        exclusive across providers. Addressing an agent unambiguously is
-        `AgentRef(provider_key, name)`, which needs no resolution at all.
-        """
-        candidates = await self._souk.resolve_agents_by_name(name)
-        if not candidates:
-            raise AgentNotFound(f"agent '{name}' is not registered")
-        if len(candidates) > 1:
-            raise AmbiguousAgentName(name, candidates)
-        return AgentRef(
-            provider_key=candidates[0]["provider_key"], name=candidates[0]["name"]
-        )
 
     async def agent_card(
         self, agent: AgentRef, interfaces: "list[ServedInterface] | None" = None

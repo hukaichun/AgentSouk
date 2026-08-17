@@ -1,41 +1,52 @@
-"""The provider's own loop: take the runs souk hands over, run them, push
-their events back.
+"""The provider's own loop: take the runs handed over, run them, push their
+events back.
 
 Two queues and one loop between them, which is the whole shape:
 
-    souk ──deliver()──▶ job queue ──▶ loop ──▶ output queue ──▶ souk
-                            │                      │
-                    full ⇒ declined          one event per chunk
+    deliver() ──▶ job queue ──▶ loop ──▶ output queue ──▶ on_event/on_finish
+                      │                       │
+              full ⇒ declined           one event per chunk
 
-**souk hands work over; it does not ask for it.** The broker finds whoever
-serves an agent and offers each run, and `deliver` is where that offer lands.
-Returning True is the ack: from that moment souk records the run as started.
-Returning False leaves it queued for someone to take later — so declining is
-this provider's way of saying it is full, and the job queue being full is what
-says it.
+**Work is handed over; this loop does not ask for it.** Whoever is serving
+this provider offers each run, and `deliver` is where that offer lands.
+Returning True is the ack — the run counts as started from that moment.
+Returning False leaves it with the caller for someone to take later, so
+declining is this provider's way of saying it is full, and the job queue
+being full is what says it.
 
-That is the only channel capacity has. souk cannot see how much a provider can
-take, and does not try: it offers, and a provider that cannot take more says
-no.
+That is the only channel capacity has. The other side cannot see how much a
+provider can take, and does not try: it offers, and a provider that cannot
+take more says no.
 
 **The loop is this provider's, and everything in it is this provider's
 policy** — how deep the job queue is, how many runs to have going at once,
 what to do when an agent raises. souk shipped one of these once and it took
 those decisions with it.
 
-Nothing here imports souk. `souk` below is anything with `report_event` and
-`finish_run` (see `SoukConnection`); a `Souk` object satisfies it structurally
-in-process, and a remote binding carries the same two calls over a wire.
+**This module names nothing on the other side.** It used to hold a `souk`
+and call `souk.report_event(...)` / `souk.finish_run(...)`, and read
+`run.run_id` / `run.agent.name` / `run.run_input` off souk's own object —
+souk's method names, argument order and model fields were all part of this
+package's interface without either side declaring it. Now runs arrive as
+`DeliveredRun` and results leave through two callables the caller supplies.
+Whoever wires the two together is the one place entitled to know both
+shapes; see `contract.py`.
+
+What stays here is what belongs to a loop: ordering. `_report_output` is a
+single consumer, so a run's events leave in the order the agent produced
+them — a guarantee that would evaporate if this handed out a stream for
+callers to drain however they liked.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from souk_provider_sdk.identity import ProviderIdentity
-from souk_provider_sdk.provider import Provider
+from souk_provider_sdk.provider import DeliveredRun, Provider
 
 logger = logging.getLogger("souk_provider_sdk.runtime")
 
@@ -44,22 +55,32 @@ class ProviderRuntime:
     """One of these per provider, never per agent: its capacity is a budget
     across every agent it serves, exactly as one process is.
 
-    Satisfies souk's `ConnectedProvider` — `public_key`, `deliver`, `cancel`
-    — which is the whole of what the broker needs to know about anybody.
+    `public_key`, `deliver` and `cancel` are what a caller needs to hand this
+    thing work — souk's `ConnectedProvider` is that same trio, so an adapter
+    that converts souk's delivered run into a `DeliveredRun` is the whole of
+    what standing this in front of a souk takes.
+
+    `on_event(run_id, event)` and `on_finish(run_id)` are where results go.
+    Both are called from this runtime's own task, in production order, and
+    both are synchronous on purpose: an agent must never be made to wait on
+    whatever is on the other end, and `on_finish` is called while unwinding a
+    cancellation, where an await would be interrupted before it arrived.
     """
 
     def __init__(
         self,
         identity: ProviderIdentity,
         provider: Provider,
-        souk: Any,
         *,
+        on_event: Callable[[str, Any], Any] | None = None,
+        on_finish: Callable[[str], Any] | None = None,
         max_queued_runs: int = 1,
         max_concurrent_runs: int | None = None,
     ) -> None:
         self.identity = identity
         self.provider = provider
-        self.souk = souk
+        self.on_event = on_event
+        self.on_finish = on_finish
         # How many runs may be waiting to start. This is what souk sees as
         # capacity: when it is full, `deliver` declines and the run stays
         # souk's problem rather than becoming a backlog nobody can see.
@@ -84,15 +105,19 @@ class ProviderRuntime:
         half, so there is nothing to look up and nothing to be told."""
         return self.identity.public_key
 
-    # ---- What souk calls
+    # ---- What the other side calls
 
-    async def deliver(self, run: Any) -> bool:
-        """souk is offering this run. Take it, or say no.
+    async def deliver(self, run: DeliveredRun) -> bool:
+        """This run is being offered. Take it, or say no.
 
-        True means it is accepted and will be started; souk records the run
-        as running from here. False means it was not taken and souk should
-        keep it — the only honest answer when this provider is full, and the
-        only way it has of saying so.
+        True means it is accepted and will be started, and the caller may
+        record it as running from here. False means it was not taken and the
+        caller keeps it — the only honest answer when this provider is full,
+        and the only way it has of saying so.
+
+        `run` is a `DeliveredRun`, this package's own type. Converting from
+        whatever the other side sends is the caller's job, deliberately: this
+        loop reading another codebase's model is how it broke before.
         """
         if not self._running:
             return False
@@ -105,11 +130,11 @@ class ProviderRuntime:
         return True
 
     def cancel(self, run_id: str) -> None:
-        """souk is asking for a run to stop.
+        """The other side is asking for a run to stop.
 
-        A request, and complying is this provider's choice: souk publishes it
-        and then waits to see what the stream does. One that ignores it and
-        finishes has finished, and souk records that.
+        A request, and complying is this provider's choice: the asker
+        publishes it and then waits to see what the stream does. One that
+        ignores it and finishes has finished, and that is what gets recorded.
 
         This one complies, by cancelling the task running the agent — the
         only way to interrupt an arbitrary async generator.
@@ -130,10 +155,14 @@ class ProviderRuntime:
     async def aclose(self, *, cancel_in_flight: bool = False) -> None:
         """Stop taking work, then wait for what is already going.
 
-        `cancel_in_flight` picks the shutdown: draining lets souk see each
-        run's real outcome, cancelling makes each stream end without a
-        RUN_FINISHED, which souk records as failed unless it had already
+        `cancel_in_flight` picks the shutdown: draining lets the other side
+        see each run's real outcome, cancelling makes each stream end without
+        a RUN_FINISHED, which souk records as failed unless it had already
         asked for a stop. Neither is a lie — they are different shutdowns.
+
+        Closing says nothing to whoever is serving this provider. Going off
+        their roster is a separate call on their side, and forgetting it
+        leaves these agents looking reachable until a liveness sweep notices.
         """
         self._running = False
         if cancel_in_flight:
@@ -161,7 +190,7 @@ class ProviderRuntime:
         One task per run rather than one at a time: a provider serving
         several agents is the ordinary case, and a slow one must not hold up
         the rest. How many at once is `max_concurrent_runs`, enforced where
-        souk can see it — in `deliver`, by declining.
+        the other side can see it — in `deliver`, by declining.
         """
         while True:
             run = await self._jobs.get()
@@ -171,15 +200,16 @@ class ProviderRuntime:
                 lambda _t, run_id=run.run_id: self._in_flight.pop(run_id, None)
             )
 
-    async def _execute(self, run: Any) -> None:
+    async def _execute(self, run: DeliveredRun) -> None:
         """One run, start to finish, its output queued as it comes.
 
         The end-of-stream marker is queued in a `finally` because it is the
-        only thing that ends the run for souk: however this stops — finishing,
-        raising, or being cancelled — souk decides the outcome from what it
-        saw, and can decide nothing until it knows the stream is over.
+        only thing that ends the run for the other side: however this stops —
+        finishing, raising, or being cancelled — the outcome is decided from
+        what was seen, and nothing can be decided until the stream is known
+        to be over.
         """
-        name = run.agent.name
+        name = run.agent_name
         try:
             async for event in self.provider.run_stream(name, run.run_input):
                 self._output.put_nowait((run.run_id, event))
@@ -192,26 +222,37 @@ class ProviderRuntime:
             self._output.put_nowait((run.run_id, _END))
 
     async def _report_output(self) -> None:
-        """Drain the output queue into souk, in order.
+        """Drain the output queue through the callbacks, in order.
 
-        One consumer, so a run's events reach souk in the order the agent
-        produced them. Reporting is synchronous on souk's side by design — a
-        provider must never wait on souk's persistence, and the end marker is
-        sent while unwinding a cancellation, where an await would be
-        interrupted before it ever arrived.
+        **One consumer, and that is the point.** A run's events leave in the
+        order the agent produced them because exactly one task takes them off
+        this queue. Handing callers a stream to drain themselves would make
+        that ordering theirs to preserve, and nothing would go red when two
+        of their tasks raced — so the guarantee stays here, which is the one
+        thing this loop owes anybody.
+
+        Both callbacks are synchronous by design: an agent must never be made
+        to wait on whatever is downstream, and the end marker is sent while
+        unwinding a cancellation, where an await would be interrupted before
+        it ever arrived.
+
+        A callback that raises is logged and swallowed. It belongs to the
+        caller, and one bad send must not kill the consumer that every other
+        run's ordering depends on.
         """
         while True:
             run_id, event = await self._output.get()
             try:
                 if event is _END:
-                    self.souk.finish_run(run_id, claimed_by=self.public_key)
-                else:
-                    self.souk.report_event(run_id, event, claimed_by=self.public_key)
+                    if self.on_finish is not None:
+                        self.on_finish(run_id)
+                elif self.on_event is not None:
+                    self.on_event(run_id, event)
             except Exception:
-                logger.exception("run %s: reporting to souk failed", run_id)
+                logger.exception("run %s: reporting failed", run_id)
 
 
-# Queued after a run's last event. Not an AG-UI event and never relayed as
-# one — souk's `finish_run` is a different call, and this only says which of
-# the two to make.
+# Queued after a run's last event. Not an AG-UI event and never passed to
+# `on_event` — ending a run is `on_finish`, a different call, and this only
+# says which of the two to make.
 _END = object()
