@@ -1,28 +1,30 @@
 """Keep Your Own Key: run-scoped bearer tokens for souk's
-OpenAI-compatible LLM bridge (see api_llm_bridge.py and
-docs/keep-your-own-key.md for the full picture).
+OpenAI-compatible LLM bridge (see docs/keep-your-own-key.md for the full
+picture).
 
-A KYOK token binds one run_id to the caller's bridge session_id (souk.
-souk.kyok's KyokBridge) — the only thing /kyok/v1/chat/completions
-needs from the "api_key" a provider sends it is "which session should
-this be relayed to". Same signing mechanism as souk.identity.
-the session token souk used to issue (HMAC over a base64 JSON body, same
-token_signing_secret) — deliberately not that pair, since the payload shape
-and what a forged one could do were different enough to be worth keeping
-apart. That one is gone with the call it guarded; this is now the only thing
-`token_signing_secret` signs.
+A KYOK token binds one run to the caller's bridge session, because the
+only thing a completion call needs from the "api_key" a provider sends
+it is "which session should this be relayed to". It is an HMAC over a
+base64 JSON body under `settings.token_signing_secret` — the same
+mechanism souk.identity once used for provider session tokens; that one
+is gone with the call it guarded, so this is now the only thing that
+secret signs.
 
 Also carries the agent — souk already knows, at the moment it mints this
-token (souk.api_agui._build_forwarded_props, called with the run's own
-the pair), exactly which provider identity this run belongs to; the
-token says so explicitly rather than leaving that implicit. See
-protocols.kyok's KyokAdapter.complete for where this gets checked against
-souk.broker's live view of who's actually running run_id right now — a
-provider's identity is real (its Ed25519 keypair, souk_agent_sdk.
-identity) even though this HTTP endpoint itself, unlike a worker's own
-calls, carries no bearer proving it on the wire (staying
-OpenAI-wire-compatible rules that out) — this is how the binding still
-happens without needing one.
+token (protocols.agui's build_forwarded_props, called with the run's own
+pair), exactly which provider identity this run belongs to; the token
+says so explicitly rather than leaving that implicit. See protocols.kyok's
+KyokAdapter.complete for where this gets checked against souk.broker's
+live view of who is actually running run_id right now — a provider's
+identity is real (its Ed25519 keypair) even though this HTTP endpoint
+itself, unlike a worker's own calls, carries no bearer proving it on the
+wire (staying OpenAI-wire-compatible rules that out) — this is how the
+binding still happens without needing one.
+
+**Signed, not sealed.** Everything in the body is readable by whoever
+holds the token, which is the provider — the one party KYOK exists to
+keep the caller's key away from. So nothing goes in here that the
+provider must not learn; see `session_routing_key` for the one that did.
 """
 
 from __future__ import annotations
@@ -48,10 +50,35 @@ from souk.models import AgentRef
 KYOK_TOKEN_TTL_SECONDS = 3600
 
 
+def session_routing_key(session_id: str) -> str:
+    """What a queued completion is filed under: a hash of the session id the
+    caller minted, never the id itself.
+
+    The id is the caller's only secret on the bridge side — a connection
+    presenting it is served, and nothing else is asked. The routing key, by
+    contrast, travels: it is in the token, and the token goes to the provider.
+
+    Those two facts used to be the same value, and it was probed, not
+    theorised. A provider decoded its own token, read the session id, opened a
+    bridge connection under it, and was handed a completion belonging to a
+    *different* provider on that session — reading that provider's prompt and
+    answering it itself, which is injected tool input for whatever agent acts
+    on the answer. Encrypting the token would not have helped: the attacker is
+    the party the token is *for*.
+
+    Hashing costs nothing and removes the disclosure outright. The provider
+    learns a value that opens nothing, because a bridge is asked for the
+    preimage, and the session id goes back to being what
+    docs/keep-your-own-key.md always claimed — known only to the caller and
+    souk. It stays a bearer secret; this only stops souk handing it out.
+    """
+    return hashlib.sha256(session_id.encode()).hexdigest()
+
+
 @dataclass
 class KyokToken:
     run_id: str
-    session_id: str
+    session_key: str
     agent: AgentRef
 
 
@@ -60,7 +87,7 @@ def issue_kyok_token(run_id: str, session_id: str, agent: AgentRef, signing_secr
         json.dumps(
             {
                 "runId": run_id,
-                "sessionId": session_id,
+                "sessionKey": session_routing_key(session_id),
                 "providerKey": agent.provider_key,
                 "agentName": agent.name,
                 "exp": int(time.time()) + KYOK_TOKEN_TTL_SECONDS,
@@ -72,9 +99,9 @@ def issue_kyok_token(run_id: str, session_id: str, agent: AgentRef, signing_secr
 
 
 def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
-    """Returns the decoded (run_id, session_id, agent) if `token` is a
+    """Returns the decoded (run_id, session_key, agent) if `token` is a
     well-formed, correctly-signed, unexpired KYOK token, else None. Called
-    on every /kyok/v1/chat/completions request — see api_llm_bridge.py,
+    on every completion call — see protocols.kyok's KyokAdapter.complete,
     which additionally checks the returned agent against souk.broker's
     live record of who's running run_id right now; this function only
     checks the token is genuinely souk's own and hasn't expired.
@@ -93,22 +120,22 @@ def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
     if payload.get("exp", 0) < time.time():
         return None
     run_id = payload.get("runId")
-    session_id = payload.get("sessionId")
+    session_key = payload.get("sessionKey")
     provider_key = payload.get("providerKey")
     agent_name = payload.get("agentName")
     if not all(
-        isinstance(v, str) for v in (run_id, session_id, provider_key, agent_name)
+        isinstance(v, str) for v in (run_id, session_key, provider_key, agent_name)
     ):
         return None
     return KyokToken(
         run_id=run_id,
-        session_id=session_id,
+        session_key=session_key,
         agent=AgentRef(provider_key=provider_key, name=agent_name),
     )
 
 
 # Sentinel put on a completion's response_queue once its bridge finishes
-# sending chunks (or the /kyok/respond connection drops) — mirrors
+# sending chunks (or the bridge's connection drops) — mirrors
 # broker.END_OF_STREAM.
 COMPLETION_DONE = object()
 
@@ -136,10 +163,9 @@ class _Session:
 
 @dataclass
 class PendingCompletion:
-    session_id: str
+    session_key: str
     body: dict[str, Any]
     response_queue: asyncio.Queue[Any] = field(default_factory=asyncio.Queue)
-    claimed: bool = False
 
 
 class KyokBridge:
@@ -155,11 +181,11 @@ class KyokBridge:
     - `_requests` is keyed by a **souk-minted** `request_id` (`new_id`). Its
       keys cannot be influenced from outside, and it has a removal path
       (`forget`, called by protocols.kyok once a completion is done).
-    - `_sessions` is keyed by a `session_id` souk neither mints nor
-      authenticates. It is a rendezvous label the caller chooses, and
-      `GET /kyok/poll` accepts any string by design (see
-      docs/keep-your-own-key.md). The cardinality of *that* key space is
-      under a stranger's control.
+    - `_sessions` is keyed by a `session_routing_key` derived from a session
+      id souk neither mints nor authenticates. It is a rendezvous label the
+      caller chooses, and any caller-supplied string reaches this map by
+      design (see docs/keep-your-own-key.md). The cardinality of *that* key
+      space is under a stranger's control.
 
     A bare mapping records neither who may create a key nor when it stops
     existing, so the second kind needs its lifetime made explicit somewhere
@@ -189,38 +215,38 @@ class KyokBridge:
         self._sessions: dict[str, _Session] = {}
         self._requests: dict[str, PendingCompletion] = {}
 
-    def submit(self, session_id: str, body: dict[str, Any]) -> tuple[str, asyncio.Queue[Any]]:
+    def submit(self, session_key: str, body: dict[str, Any]) -> tuple[str, asyncio.Queue[Any]]:
         """The only thing that creates a session entry — and the caller
         reaching it has already passed the token/live-run/signature checks in
         protocols.kyok's `complete`."""
         request_id = new_id("kyokreq")
-        pending = PendingCompletion(session_id=session_id, body=body)
+        pending = PendingCompletion(session_key=session_key, body=body)
         self._requests[request_id] = pending
-        session = self._sessions.setdefault(session_id, _Session())
+        session = self._sessions.setdefault(session_key, _Session())
         session.queue.append(request_id)
         for event in session.waiters:
             event.set()
         return request_id, pending.response_queue
 
-    async def poll_one(self, session_id: str, wait_seconds: float) -> dict[str, Any] | None:
+    async def poll_one(self, session_key: str, wait_seconds: float) -> dict[str, Any] | None:
         """Returns `{"requestId": ..., "body": ...}` for the next
-        completion queued for `session_id`, waiting up to `wait_seconds`
+        completion queued for `session_key`, waiting up to `wait_seconds`
         if none is queued yet (0 means return immediately either way).
         None if nothing showed up within the wait.
 
-        A read, and it behaves like one: an unknown session_id is answered
+        A read, and it behaves like one: an unknown session_key is answered
         without being recorded.
         """
-        session = self._sessions.get(session_id)
+        session = self._sessions.get(session_key)
         if (session is None or not session.queue) and wait_seconds > 0:
-            await self._wait_for_work(session_id, wait_seconds)
-        return self._take(session_id)
+            await self._wait_for_work(session_key, wait_seconds)
+        return self._take(session_key)
 
-    async def _wait_for_work(self, session_id: str, wait_seconds: float) -> None:
+    async def _wait_for_work(self, session_key: str, wait_seconds: float) -> None:
         """Park until `submit` wakes this session or the wait runs out. The
         waiting *is* the session's reason to exist for that long, which is why
         this may create one — and why it must drop it again on the way out."""
-        session = self._sessions.setdefault(session_id, _Session())
+        session = self._sessions.setdefault(session_key, _Session())
         event = asyncio.Event()
         # One `_Session` shared by every waiter, so the last one out is the
         # one that removes it: a concurrent waiter's event is still in this
@@ -232,9 +258,9 @@ class KyokBridge:
             pass
         finally:
             session.waiters.discard(event)
-            self._drop_if_idle(session_id, session)
+            self._drop_if_idle(session_key, session)
 
-    def _take(self, session_id: str) -> dict[str, Any] | None:
+    def _take(self, session_key: str) -> dict[str, Any] | None:
         """The queue's head, dropping ids whose request is already gone.
 
         Skipping rather than giving up on the first dead id: a request
@@ -242,7 +268,7 @@ class KyokBridge:
         every live request queued behind it, and answer "nothing to do" to a
         bridge that has work waiting.
         """
-        session = self._sessions.get(session_id)
+        session = self._sessions.get(session_key)
         if session is None:
             return None
         try:
@@ -251,13 +277,12 @@ class KyokBridge:
                 pending = self._requests.get(request_id)
                 if pending is None:
                     continue
-                pending.claimed = True
                 return {"requestId": request_id, "body": pending.body}
             return None
         finally:
-            self._drop_if_idle(session_id, session)
+            self._drop_if_idle(session_key, session)
 
-    def _drop_if_idle(self, session_id: str, session: _Session) -> None:
+    def _drop_if_idle(self, session_key: str, session: _Session) -> None:
         """The one place a session key is removed.
 
         Identity-checked before deleting: only ever drop the object this
@@ -265,8 +290,8 @@ class KyokBridge:
         that key now. Nothing here awaits, so today that cannot differ — the
         check is what keeps it true if anything above this ever does.
         """
-        if session.is_idle() and self._sessions.get(session_id) is session:
-            del self._sessions[session_id]
+        if session.is_idle() and self._sessions.get(session_key) is session:
+            del self._sessions[session_key]
 
     def get(self, request_id: str) -> PendingCompletion | None:
         return self._requests.get(request_id)

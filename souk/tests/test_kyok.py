@@ -2,37 +2,52 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import base64
 import json
-import time
 
 import pytest
 
-from souk import repo
+from souk.identity import kyok_call_signing_payload
+from souk_provider_sdk.identity import kyok_call_payload
 from souk.models import AgentRef
 from souk.protocols.kyok import collapse_stream
-from souk.kyok import KyokBridge, issue_kyok_token, verify_kyok_token
-
-
-def _kyok_headers(bearer: str, private_key, body: bytes) -> dict:
-    timestamp = str(int(time.time()))
-    body_hash = hashlib.sha256(body).hexdigest()
-    payload = f"{bearer}:{timestamp}:{body_hash}".encode()
-    signature = private_key.sign(payload).hex()
-    return {
-        "Authorization": f"Bearer {bearer}",
-        "X-Souk-Kyok-Timestamp": timestamp,
-        "X-Souk-Kyok-Signature": signature,
-    }
-
-
-async def _register_agent(session, new_identity, name: str = "greeter"):
-    identity = new_identity()
-    registered = await repo.register_agents(session, identity.public_key, [{"name": name}])
-    return identity, registered[name]
+from souk.kyok import (
+    KyokBridge,
+    issue_kyok_token,
+    session_routing_key,
+    verify_kyok_token,
+)
 
 
 _AGENT = AgentRef(provider_key="ab" * 32, name="translator")
+
+
+def test_a_kyok_call_signs_what_it_is_for():
+    """Every signed payload in this system starts with the operation it
+    authorises, so a signature captured for one cannot be presented as
+    another (see souk.identity). This one did not, and the only thing
+    stopping a collision with a registration was that it would have needed a
+    bearer equal to the literal string `souk-register`.
+    """
+    payload = kyok_call_signing_payload("some-token", 1755300000, "ab" * 32).decode()
+
+    assert payload.startswith("souk-kyok-call:")
+    assert payload == f"souk-kyok-call:some-token:1755300000:{'ab' * 32}"
+
+
+def test_both_sides_state_the_kyok_signing_payload_the_same_way():
+    """souk and souk_provider_sdk each write this payload out themselves and
+    neither imports the other, which is the point (see that package's
+    identity.py): a copy derived from souk agrees with souk by construction
+    and therefore checks nothing. Two independent statements only check each
+    other if something compares them, and this is that something.
+
+    Unlike registration, no other test compares these implicitly — nothing in
+    core's suite plays the KYOK caller yet.
+    """
+    assert kyok_call_payload("tok", 1755300000, "cafe") == kyok_call_signing_payload(
+        "tok", 1755300000, "cafe"
+    )
 
 
 def test_kyok_token_roundtrip():
@@ -40,8 +55,26 @@ def test_kyok_token_roundtrip():
     result = verify_kyok_token(token, "test-signing-secret")
     assert result is not None
     assert result.run_id == "run_1"
-    assert result.session_id == "sess_1"
+    assert result.session_key == session_routing_key("sess_1")
     assert result.agent == _AGENT
+
+
+def test_a_token_does_not_carry_the_session_id_it_was_minted_for():
+    """The token is signed, not sealed, and its reader is the provider — the
+    one party KYOK exists to keep away from the caller's key. Anything in here
+    is disclosed to it.
+
+    Probed before it was fixed: a provider decoded its own token, read the
+    session id, connected as the caller's bridge and was handed another
+    provider's completion on that session — its prompt to read, its answer to
+    write. The assertion is over the whole decoded body rather than one field,
+    so a later addition that reintroduces the id under any name fails here.
+    """
+    token = issue_kyok_token("run_1", "sess_secret", _AGENT, "test-signing-secret")
+    body = json.loads(base64.urlsafe_b64decode(token.split(".", 1)[0].encode()))
+
+    assert "sess_secret" not in json.dumps(body)
+    assert body["sessionKey"] == session_routing_key("sess_secret")
 
 
 def test_expired_kyok_token_rejected(monkeypatch):

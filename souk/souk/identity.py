@@ -99,6 +99,7 @@ def is_timestamp_fresh(timestamp: int) -> bool:
 # the prefixes arrive with it rather than after.
 _REGISTER = "souk-register"
 _DELETE_AGENT = "souk-delete-agent"
+_KYOK_CALL = "souk-kyok-call"
 
 
 def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
@@ -120,6 +121,21 @@ def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:
     list. Registration is declarative and idempotent; this is neither.
     """
     return f"{_DELETE_AGENT}:{agent_name}:{timestamp}".encode()
+
+
+def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
+    """What one KYOK completion call signs (see souk.protocols.kyok): the
+    token being presented, when, and the exact body — so a captured
+    signature is usable for that one request, briefly, and nothing else.
+
+    Here rather than beside the verifier so that all three signed payloads
+    are one list. This was the only one without a prefix, and the reason it
+    never collided was not the mechanism above but an accident: a collision
+    would have needed a `bearer` equal to the literal string `souk-register`,
+    and souk mints the bearer itself. Safe by coincidence is not the
+    invariant this file describes, so it now has the prefix too.
+    """
+    return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
 
 
 # How long one freshly-signed hop stays usable. Only the last hop's expiry
