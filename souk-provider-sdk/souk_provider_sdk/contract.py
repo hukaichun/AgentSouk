@@ -45,6 +45,23 @@ LINK_REPORT_METHODS = {
     "finish_run": ("run_id",),
 }
 
+# What a provider may ask souk about the work it was given. Stated as data
+# for the same reason as everything else here, and kept deliberately short.
+#
+# **This is not a mirror of souk's API, and must not become one.** `Souk` has
+# threads, runs, agents, health, KYOK and change subscriptions; every method
+# that lands on `SoukLink` is one every transport has to implement and one
+# more frame type every wire has to carry. The test for admitting one is
+# whether a provider needs it *about the work souk gave it* and has no other
+# way to know — which `thread_messages` passes and very little else does.
+#
+# Delegation is outside it: a provider calling another agent does that as an
+# A2A caller on its own connection, a different relationship that already has
+# a path. Roster lookups and agent cards belong there, not here.
+LINK_QUERY_METHODS = {
+    "thread_messages": ("thread_id", "limit"),
+}
+
 # What souk's broker needs from a provider: who it is, how much it will take
 # at once, how to give it a run, how to ask it to stop one. Souk's
 # `ConnectedProvider` protocol is the same four.

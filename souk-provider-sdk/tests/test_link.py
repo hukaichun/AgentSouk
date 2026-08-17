@@ -41,6 +41,7 @@ class QueuedLink(SoukLink):
         self._limit = limit
         self.outbound: asyncio.Queue = asyncio.Queue()
         self.cancelled: list[str] = []
+        self.queried: list[tuple[str, int | None]] = []
         # The upward half: a real socket link would encode and write these.
         self.reported: list[tuple[str, object]] = []
         self.finished: list[str] = []
@@ -65,6 +66,12 @@ class QueuedLink(SoukLink):
 
     async def finish_run(self, run_id: str) -> None:
         self.finished.append(run_id)
+
+    async def thread_messages(self, thread_id: str, *, limit: int | None = None):
+        # A socket link would send `limit` and let the far side slice; this
+        # stand-in just records what it was asked for.
+        self.queried.append((thread_id, limit))
+        return []
 
 
 async def test_the_base_translates_souks_run_for_a_transport_that_never_sees_it():
@@ -117,6 +124,9 @@ def test_a_transport_that_declares_nothing_is_not_constructible():
         async def finish_run(self, run_id: str) -> None:
             pass
 
+        async def thread_messages(self, thread_id: str, *, limit: int | None = None):
+            return []
+
     with pytest.raises(TypeError, match="max_concurrent_runs"):
         Forgetful()
 
@@ -135,6 +145,7 @@ class LoopbackLink(SoukLink):
         runtime.link = self
         self.reported: list[tuple[str, object]] = []
         self.finished: list[str] = []
+        self.queried: list[tuple[str, int | None]] = []
 
     @property
     def public_key(self) -> str:
@@ -155,6 +166,12 @@ class LoopbackLink(SoukLink):
 
     async def finish_run(self, run_id: str) -> None:
         self.finished.append(run_id)
+
+    async def thread_messages(self, thread_id: str, *, limit: int | None = None):
+        # A socket link would send `limit` and let the far side slice; this
+        # stand-in just records what it was asked for.
+        self.queried.append((thread_id, limit))
+        return []
 
 
 async def test_one_link_carries_a_run_down_and_its_results_back():

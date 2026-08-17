@@ -20,6 +20,7 @@ from souk_provider_sdk.contract import (
     CONNECTED_PROVIDER_ATTRS,
     DELIVERED_RUN_FIELDS,
     REGISTRATION_FIELDS,
+    LINK_QUERY_METHODS,
     LINK_REPORT_METHODS,
 )
 from souk_provider_sdk.inprocess import InProcessLink
@@ -38,6 +39,7 @@ __all__ = [
     "SoukLink",
     "DELIVERED_RUN_FIELDS",
     "REGISTRATION_FIELDS",
+    "LINK_QUERY_METHODS",
     "LINK_REPORT_METHODS",
     "AgentHandle",
     "DeliveredRun",
