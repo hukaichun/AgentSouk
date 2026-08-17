@@ -21,6 +21,7 @@ from souk_provider_sdk.connection import SoukConnection
 from souk_provider_sdk.contract import (
     CONNECTED_PROVIDER_ATTRS,
     DELIVERED_RUN_FIELDS,
+    REGISTRATION_FIELDS,
     REPORT_CALLBACKS,
 )
 from souk_provider_sdk.inprocess import InProcessProvider
@@ -37,6 +38,7 @@ __all__ = [
     "InProcessProvider",
     "SoukConnection",
     "DELIVERED_RUN_FIELDS",
+    "REGISTRATION_FIELDS",
     "REPORT_CALLBACKS",
     "AgentHandle",
     "DeliveredRun",

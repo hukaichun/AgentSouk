@@ -52,14 +52,47 @@ class DeliveredRun:
 
 @dataclass
 class AgentHandle:
-    """One agent, declared the way AG-UI defines one."""
+    """One agent, declared the way AG-UI defines one — plus what souk stores
+    about it.
+
+    The two halves are not the same list, and treating them as one is how
+    `skills` stopped reaching souk. This class was written from AG-UI's answer
+    to "what is an agent" — a run input in, events out, and a name — while the
+    HTTP registration model it replaced was written from souk's, which has two
+    more fields. Nothing compared them, so registration through a handle
+    silently produced a card of name and description alone.
+
+    `agent_card_extra` is the *only* route `skills` takes into souk, and
+    skills and their tags are what discovery searches. An agent without them
+    registers fine, appears on the roster, and is findable only by somebody
+    who already knows its name — a failure shaped exactly like health. See
+    `contract.REGISTRATION_FIELDS`, which is what now keeps this list and
+    `repo.register_agents` from drifting apart again.
+    """
 
     name: str
     run_stream: Callable[[dict[str, Any]], AsyncIterator[Any]]
     description: str = ""
+    # Merged into the agent's public card. `skills` goes here.
+    agent_card_extra: dict[str, Any] = field(default_factory=dict)
+    # souk-internal, and deliberately not on the card: things souk stores
+    # about an agent that its A2A Agent Card should not advertise.
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_registration(self) -> dict[str, Any]:
-        return {"name": self.name, "description": self.description}
+        """This handle as one entry in a registration batch.
+
+        The empty ones are omitted rather than sent as `{}` — souk defaults
+        both, so an absent key and an empty one mean the same thing, and
+        leaving them out keeps a batch readable at the point somebody is
+        debugging why an agent has no skills.
+        """
+        registration: dict[str, Any] = {"name": self.name, "description": self.description}
+        if self.agent_card_extra:
+            registration["agent_card_extra"] = self.agent_card_extra
+        if self.metadata:
+            registration["metadata"] = self.metadata
+        return registration
 
 
 class HandleProvider:

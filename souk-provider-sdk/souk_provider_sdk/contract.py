@@ -59,3 +59,22 @@ REPORT_CALLBACKS = {
 CONNECTED_PROVIDER_ATTRS = frozenset(
     {"public_key", "max_concurrent_runs", "deliver", "cancel"}
 )
+
+
+# Every key `repo.register_agents` reads off one entry in a registration
+# batch. `AgentHandle` must be able to express all of them, and this is the
+# assertion that says so.
+#
+# It is here because the pair silently disagreed. souk has read
+# `agent_card_extra` and `metadata` since its first commit; the HTTP model
+# that used to fill them left with the serving layer, and the `AgentHandle`
+# written to replace it was modelled on AG-UI's answer to "what is an agent"
+# rather than on souk's. `register_agents` defaults both with `.get(..., {})`,
+# so the two missing keys were not an error — every agent registered through
+# the SDK simply got a card of name and description, no skills, and was
+# therefore invisible to discovery while looking perfectly healthy.
+#
+# The same shape of defect as the run fields above, arriving by the same
+# route: a migration that carried one side across and not the other, with
+# nothing comparing them.
+REGISTRATION_FIELDS = frozenset({"name", "description", "agent_card_extra", "metadata"})
