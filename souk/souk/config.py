@@ -96,3 +96,28 @@ class CoreSettings(BaseSettings):
     # nuisance, so this must always be set explicitly, via the
     # SOUK_TOKEN_SIGNING_SECRET environment variable or the constructor.
     token_signing_secret: str
+
+    # This souk's own Ed25519 private key, hex-encoded (32-byte seed, so 64
+    # hex characters). What lets a provider tell one souk from another.
+    #
+    # Everything else here is one-directional: a provider proves who it is and
+    # souk proves nothing back, so a provider connects to a URL and trusts
+    # whatever answers. TLS does not close that — it authenticates a
+    # *hostname*, and in an enterprise it routinely terminates at an
+    # intercepting proxy whose CA the endpoints already trust. A key souk
+    # holds is checkable without trusting any of that.
+    #
+    # **Optional, and a key that is absent is not a key that is generated.**
+    # An ephemeral one would change on every restart, so every provider that
+    # pinned it would fail on reconnect — which teaches people to click
+    # through the warning, destroying the only thing pinning is worth. Unset
+    # means souk simply cannot prove itself, which is today's behaviour and an
+    # honest state to be in.
+    #
+    # A value rather than a path, for the same reason
+    # `token_signing_secret` is: every replica of one souk must present the
+    # same identity, or a provider sees a different one depending on which it
+    # reaches, and it has to survive restarts. That makes it something to
+    # provision, like any other secret — not something a process creates for
+    # itself.
+    identity_private_key: str | None = None

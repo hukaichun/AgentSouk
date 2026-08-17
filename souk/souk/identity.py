@@ -300,3 +300,67 @@ def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) ->
         return False
 
 
+# ---- souk's own identity
+#
+# The other end of everything above. A provider is its keypair and proves that
+# on demand; until now souk held no key at all and proved nothing back, so the
+# relationship was one-directional and a provider had no way to tell one souk
+# from another. This is souk's half, and it is deliberately the same shape as
+# the provider's — a private key, a public half to publish, and a signature
+# over bytes somebody else chose.
+
+
+class SoukIdentity:
+    """The keypair one souk is, when it has been given one.
+
+    Constructed from configuration rather than generated, and never generated
+    here: see `CoreSettings.identity_private_key` for why a souk that mints
+    its own on startup is worse than a souk with no identity at all.
+    """
+
+    def __init__(self, private_key: Ed25519PrivateKey) -> None:
+        self._private_key = private_key
+        self.public_key = private_key.public_key().public_bytes_raw().hex()
+
+    @classmethod
+    def from_hex(cls, private_key_hex: str) -> "SoukIdentity":
+        """Load from a hex-encoded 32-byte seed.
+
+        Raises `ValueError` on anything that is not one, at construction —
+        a souk configured with a malformed key should fail to start rather
+        than fail the first provider that asks it to prove itself.
+        """
+        try:
+            raw = bytes.fromhex(private_key_hex)
+        except ValueError as e:
+            raise ValueError("identity_private_key is not valid hex") from e
+        if len(raw) != 32:
+            raise ValueError(
+                f"identity_private_key must be a 32-byte seed (64 hex chars), got {len(raw)} bytes"
+            )
+        return cls(Ed25519PrivateKey.from_private_bytes(raw))
+
+    @staticmethod
+    def generate_hex() -> str:
+        """A fresh key, hex-encoded, for whoever is provisioning one.
+
+        A helper for operators — `python -c "from souk.identity import
+        SoukIdentity; print(SoukIdentity.generate_hex())"` — and deliberately
+        not called by souk itself. Generating is a provisioning act with a
+        secret to store; doing it implicitly at startup is what produces a
+        souk whose identity changes under its providers.
+        """
+        return Ed25519PrivateKey.generate().private_bytes_raw().hex()
+
+    def sign(self, payload: bytes) -> str:
+        """Sign arbitrary bytes. The mirror of `verify_signature` above, and
+        of `ProviderIdentity.sign` on the other side.
+
+        What gets signed is not souk's to decide: proving identity when a
+        connection opens is a serving act, so the payload belongs to whoever
+        is serving souk (see docs/library-architecture.md on the boundary).
+        Core supplies the primitive.
+        """
+        return self._private_key.sign(payload).hex()
+
+

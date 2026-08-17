@@ -44,6 +44,7 @@ from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration
 from souk.handlers import make_handlers
 from souk.health import run_health_sweeps_forever
 from souk.identity import (
+    SoukIdentity,
     agent_deletion_signing_payload,
     is_timestamp_fresh,
     registration_signing_payload,
@@ -188,6 +189,15 @@ class Souk:
 
     def __init__(self, settings: CoreSettings | None = None, broker: RunBroker | None = None) -> None:
         self.settings = settings or CoreSettings()
+        # Built here rather than on first use, so a malformed key fails the
+        # process at construction instead of failing the first provider that
+        # asks this souk to prove itself. None when unconfigured, which is a
+        # supported state — see `CoreSettings.identity_private_key`.
+        self.identity = (
+            SoukIdentity.from_hex(self.settings.identity_private_key)
+            if self.settings.identity_private_key
+            else None
+        )
         self.engine = _create_engine(self.settings)
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False)
         # Live dispatch state, held per instance rather than as a module
@@ -216,6 +226,41 @@ class Souk:
         `async with SessionLocal() as session:`."""
         async with self.sessionmaker() as session:
             yield session
+
+    # ---- Who this souk is
+
+    @property
+    def identity_public_key(self) -> str | None:
+        """This souk's Ed25519 public key, or None if it has no identity.
+
+        What a provider pins so it can tell this souk from another one. None
+        is a real answer and not an error: an unconfigured souk cannot prove
+        itself, which is what every souk did before this existed.
+        """
+        return self.identity.public_key if self.identity is not None else None
+
+    def sign(self, payload: bytes) -> str:
+        """Prove this souk holds its key, over bytes somebody else chose.
+
+        The mirror of what a provider does at registration, and the half that
+        was missing: `verify_signature` has always taken arbitrary bytes, so
+        souk could check anyone while being uncheckable itself.
+
+        What to sign is deliberately not decided here. Proving identity as a
+        connection opens is a serving act — the payload belongs to whoever
+        serves souk, and core supplies the primitive it is built from.
+
+        Raises `RuntimeError` if this souk has no identity, rather than
+        returning something unusable: a caller reaching this without a key
+        configured has a deployment problem, and a signature nobody can
+        verify would hide it until a provider rejected the handshake.
+        """
+        if self.identity is None:
+            raise RuntimeError(
+                "this souk has no identity: set identity_private_key "
+                "(SOUK_IDENTITY_PRIVATE_KEY) to a hex-encoded Ed25519 seed"
+            )
+        return self.identity.sign(payload)
 
     # ---- Lifecycle
 
