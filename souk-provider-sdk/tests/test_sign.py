@@ -14,7 +14,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 import pytest
 
-from souk_provider_sdk import ProviderIdentity
+from souk_provider_sdk import ProviderIdentity, verify_signature
 
 
 def _verify(identity: ProviderIdentity, signature_hex: str, payload: bytes) -> bool:
@@ -82,3 +82,46 @@ def test_the_named_signers_still_agree_with_the_general_one():
     general = identity.sign(registration_payload(["translator"], timestamp))
 
     assert named == general
+
+
+# ---- verify_signature: the half this package was missing
+
+
+def test_it_accepts_what_this_package_signs():
+    identity = ProviderIdentity.generate()
+    payload = b"souk-auth:souk:nonce_p:nonce_s"
+
+    assert verify_signature(identity.public_key, identity.sign(payload), payload)
+
+
+def test_it_rejects_a_signature_over_different_bytes():
+    """The whole reason a challenge works: yesterday's answer is a signature
+    over yesterday's nonce."""
+    identity = ProviderIdentity.generate()
+
+    assert not verify_signature(identity.public_key, identity.sign(b"nonce-1"), b"nonce-2")
+
+
+def test_it_rejects_a_signature_from_another_key():
+    """What tells one souk from another. A relay can pass frames through and
+    still cannot produce this."""
+    mine, theirs = ProviderIdentity.generate(), ProviderIdentity.generate()
+    payload = b"anything"
+
+    assert not verify_signature(theirs.public_key, mine.sign(payload), payload)
+
+
+@pytest.mark.parametrize(
+    "public_key, signature",
+    [
+        ("not hex", "aa" * 64),
+        ("ab" * 32, "not hex"),
+        ("", "aa" * 64),
+        ("ab" * 32, ""),
+        ("ab" * 8, "aa" * 64),   # right shape, wrong length
+    ],
+)
+def test_malformed_input_is_false_and_not_an_exception(public_key: str, signature: str):
+    """Everything here arrived over a wire. A caller asking "is this valid?"
+    gets an answer, not a traceback to guard against at every call site."""
+    assert verify_signature(public_key, signature, b"payload") is False

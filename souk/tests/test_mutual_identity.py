@@ -137,3 +137,69 @@ def test_a_malformed_key_fails_at_construction(settings: CoreSettings, bad: str,
                 identity_private_key=bad,
             )
         )
+
+
+# ---- The two verifiers are two implementations, and they have to agree
+
+
+def test_each_side_accepts_what_the_other_signs(settings: CoreSettings):
+    """The handshake in both directions, with each side using its *own*
+    verifier — which is the point.
+
+    `souk.identity.verify_signature` and `souk_provider_sdk.verify_signature`
+    are separate implementations on purpose: this package cannot import souk,
+    and a copy derived from souk would agree with souk by construction and
+    therefore check nothing. Same device as the signing payloads. This is
+    where a drift between them fails, at merge, rather than at a handshake.
+    """
+    from souk_provider_sdk import verify_signature as sdk_verify
+
+    provider = ProviderIdentity.generate()
+    souk = _souk_with_identity(settings)
+    nonce_p, nonce_s = b"nonce-from-provider", b"nonce-from-souk"
+
+    # souk proves itself; the provider checks with the SDK's verifier.
+    souk_proof = souk.sign(b"souk-auth:souk:" + nonce_p + b":" + nonce_s)
+    assert sdk_verify(
+        souk.identity_public_key, souk_proof, b"souk-auth:souk:" + nonce_p + b":" + nonce_s
+    )
+
+    # The provider proves itself; souk checks with its own.
+    provider_proof = provider.sign(b"souk-auth:provider:" + nonce_p + b":" + nonce_s)
+    assert verify_signature(
+        provider.public_key, provider_proof, b"souk-auth:provider:" + nonce_p + b":" + nonce_s
+    )
+
+
+def test_both_verifiers_reject_the_same_things(settings: CoreSettings):
+    """Agreeing on what is valid is half of it; agreeing on what is not is
+    the half an attacker cares about."""
+    from souk_provider_sdk import verify_signature as sdk_verify
+
+    identity = ProviderIdentity.generate()
+    signature = identity.sign(b"nonce-1")
+    other = ProviderIdentity.generate()
+
+    cases = [
+        (identity.public_key, signature, b"nonce-2"),      # wrong payload
+        (other.public_key, signature, b"nonce-1"),         # wrong key
+        ("not hex", signature, b"nonce-1"),                # malformed key
+        (identity.public_key, "not hex", b"nonce-1"),      # malformed signature
+        (identity.public_key, "", b"nonce-1"),             # empty signature
+    ]
+    for public_key, sig, payload in cases:
+        assert verify_signature(public_key, sig, payload) is False
+        assert sdk_verify(public_key, sig, payload) is False
+
+
+def test_a_provider_pinning_one_souk_rejects_another(settings: CoreSettings):
+    """What #45 is for, checked from the side that has to act on it: the
+    provider holds a public key it pinned, and the SDK's verifier is what
+    turns that into a decision."""
+    from souk_provider_sdk import verify_signature as sdk_verify
+
+    pinned, impostor = _souk_with_identity(settings), _souk_with_identity(settings)
+    challenge = b"souk-auth:souk:nonce_p:nonce_s"
+
+    assert sdk_verify(pinned.identity_public_key, pinned.sign(challenge), challenge)
+    assert not sdk_verify(pinned.identity_public_key, impostor.sign(challenge), challenge)
