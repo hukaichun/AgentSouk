@@ -22,6 +22,13 @@ independently:
 cd souk && uv sync --group dev
 ```
 
+The two contract SDKs (`souk-provider-sdk/`, `souk-caller-sdk/`) are their
+own projects with their own suites, and CI runs each as a separate job. Both
+are also editable dev dependencies of `souk` itself, deliberately: they state
+their side of an agreement independently, and souk's suite is what compares
+the two statements. A non-editable install would freeze that second opinion
+at sync time.
+
 ## Running the tests
 
 `souk/tests/` holds nearly all of the business logic (registration/

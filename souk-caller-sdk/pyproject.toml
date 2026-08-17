@@ -1,0 +1,27 @@
+[project]
+name = "souk-caller-sdk"
+version = "0.1.0"
+description = "What a caller and souk agree on, from the caller's side: the Keep Your Own Key bridge and its port"
+requires-python = ">=3.12"
+# No dependencies, and the empty list is the point. This package defines an
+# interaction, not a transport: no httpx, no websockets, and no souk. A
+# network binding is downstream's to build, and if this list ever grows one of
+# those, the boundary was not real.
+#
+# No LLM client either — not litellm, not openai. A `CompletionSource` is
+# whatever the caller supplies, because choosing how you call your own model is
+# the one decision Keep Your Own Key exists to leave you.
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["souk_caller_sdk"]

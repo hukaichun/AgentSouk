@@ -86,7 +86,22 @@ jobs:
       - run: uv run pytest -v
         working-directory: souk-provider-sdk
 
-  # Everything else — the gateway, both SDKs, the reference providers and
-  # the directory UI — lives in AgentSoukServer, which carries its own CI,
-  # including the app-builds probe only it can run.
+  souk-caller-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk-caller-sdk
+      # Zero dependencies, and its own suite reads the manifest to say so —
+      # no transport, and no LLM client either, since which model a caller
+      # pays for is the one decision KYOK exists to leave them.
+      - run: uv run pytest -v
+        working-directory: souk-caller-sdk
+
+  # Everything else — the gateway, both transport SDKs, the reference
+  # providers and the directory UI — lives in AgentSoukServer, which carries
+  # its own CI, including the app-builds probe only it can run.
 

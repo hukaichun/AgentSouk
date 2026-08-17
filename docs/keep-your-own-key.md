@@ -9,20 +9,25 @@ accepted again — tracked as
 [AgentSoukServer#14](https://github.com/hukaichun/AgentSoukServer/issues/14).
 The session-hash fix below needs nothing downstream.
 
-All three pieces — souk's side (`souk/kyok.py`
-and `souk/protocols/kyok.py`, see `souk/tests/test_kyok.py`), the
-provider-side signer (`kyok_auth.py` in souk-agent-sdk) and the caller's
-bridge (`kyok_bridge.py` in souk-client-sdk; both SDKs live in the
-AgentSoukServer repo now, next to the gateway that serves them) — have
-real test coverage. `souk-client-sdk` still has no README (parked, not yet
-written). What's still genuinely untested is real network behavior end
-to end (these are all in-process/mocked tests, not a live three-process
-run) and the scope this stays "experimental" for regardless: the
-pending-completion registry is in-memory, single-process on souk's
-side, and the caller's bridge holds no durable state either — there is
-no recovery path if souk, the provider, or the caller's bridge dies
-mid-relay. See "Scope / limitations" below — those gaps are unchanged
-by adding tests, and not what this round of work addressed.
+All the pieces have real test coverage: souk's side (`souk/kyok.py`,
+`souk/protocols/kyok.py`), the caller's bridge and its port
+(`souk-caller-sdk/`, here), the provider-side signer (`kyok_auth.py` in
+souk-agent-sdk) and the WebSocket carrier (souk-client-sdk; both of those
+live in AgentSoukServer, next to the gateway that serves them).
+
+**The loop itself is now exercised end to end** — a provider asking for a
+completion, the caller's own code answering, chunks arriving back — in
+`souk/tests/test_kyok_in_process.py`, over `souk_caller_sdk.InProcessLink`.
+Until that existed, every KYOK test in every repo stopped at a frame: they
+drove souk's adapter with hand-made queue entries, or a socket with
+hand-made JSON, and nothing joined the two ends.
+
+What is still untested is the same loop over a real network with three real
+processes and a real key — `docker compose up`, not a suite. And the scope
+this stays "experimental" for regardless: the pending-completion registry is
+in-memory and single-process on souk's side, and the caller's bridge holds no
+durable state either, so there is no recovery path if any of the three dies
+mid-relay. See "Scope / limitations" below.
 
 ## Problem
 
@@ -97,6 +102,32 @@ discussion:
   public AG-UI HTTP surface (`souk-client-sdk`).
 
 KYOK is a third, independent channel, orthogonal to both.
+
+## The caller's side is a port, not a socket
+
+What the caller does — claim a completion, call their own model, stream the
+answer back — is stated transport-free in `souk-caller-sdk` (here), the peer
+of `souk-provider-sdk`. Two methods (`CallerLink.claim` / `.answer`) and one
+callable the caller supplies:
+
+```python
+CompletionSource = (body: dict) -> AsyncIterator[chunk: dict]
+```
+
+That callable is deliberately not a library. `litellm` is a fine default and
+it lives downstream, in the package that owns a socket — because *which model,
+which vendor, which key, what it costs and whether to refuse* is the one
+decision KYOK exists to leave the caller, and a package that made it for them
+would be undoing the point. It is also the natural home for a per-run spend
+ceiling ([#26](https://github.com/hukaichun/AgentSouk/issues/26)): only the
+caller's side can price anything.
+
+`InProcessLink` is a carrier like any other, and gets no shortcut a remote
+bridge does not — same session routing, and the same handshake if the bridge
+side ever gains a credential. Its purpose is not deployment; nobody runs a
+caller inside souk. It is that the loop becomes testable without a gateway,
+three processes and a real key, which is how
+`souk/tests/test_kyok_in_process.py` exists at all.
 
 ## Binding a run to a caller's bridge session
 

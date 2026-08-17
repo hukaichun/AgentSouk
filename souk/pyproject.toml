@@ -65,6 +65,11 @@ dev = [
     # was added, 219 tests passed, and no provider in the world could register
     # any more. See souk_provider_sdk.identity.
     "souk-provider-sdk",
+    # And the caller SDK for the same reason, one relationship over: its
+    # InProcessLink is what lets the whole KYOK loop — provider asks, caller's
+    # own code answers, chunks come back — be a test here rather than a
+    # gateway, three processes and a real key.
+    "souk-caller-sdk",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "psycopg[binary,pool]>=3.2",
@@ -86,3 +91,4 @@ packages = ["souk"]
 # them would not fail a local test run — only a fresh CI install. The copy is
 # only a second opinion if it is the live one.
 souk-provider-sdk = { path = "../souk-provider-sdk", editable = true }
+souk-caller-sdk = { path = "../souk-caller-sdk", editable = true }

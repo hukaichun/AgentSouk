@@ -1002,6 +1002,7 @@ dev = [
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "souk-caller-sdk" },
     { name = "souk-provider-sdk" },
 ]
 
@@ -1024,7 +1025,21 @@ dev = [
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "souk-caller-sdk", editable = "../souk-caller-sdk" },
     { name = "souk-provider-sdk", editable = "../souk-provider-sdk" },
+]
+
+[[package]]
+name = "souk-caller-sdk"
+version = "0.1.0"
+source = { editable = "../souk-caller-sdk" }
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-asyncio", specifier = ">=0.24" },
 ]
 
 [[package]]
