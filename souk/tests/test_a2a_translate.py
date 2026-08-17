@@ -96,7 +96,12 @@ def test_inbound_parts_are_read_under_every_spec_version():
     v0_3 = a2a_message_to_agui_messages({"role": "user", "parts": [{"kind": "text", "text": "hi"}]})
     original = a2a_message_to_agui_messages({"role": "user", "parts": [{"type": "text", "text": "hi"}]})
 
-    assert current == v0_3 == original == [{"role": "user", "content": "hi"}]
+    as_content = [{"role": m["role"], "content": m["content"]} for m in (current[0], v0_3[0], original[0])]
+    assert as_content == [{"role": "user", "content": "hi"}] * 3
+    # `id` is real now (ag_ui.core.UserMessage requires one) but a
+    # placeholder — repo.append_thread_messages is what assigns the one that
+    # actually gets stored, so this function's own id is never read.
+    assert current[0]["id"] == "unset"
 
 
 def test_an_agent_role_is_recognised_under_either_spelling():

@@ -54,8 +54,8 @@ def migrate() -> None:
 
 
 class Agent:
-    async def run_stream(self, name: str, run_input: dict):
-        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, name: str, run_input):
+        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "RUN_FINISHED", **ids}
 

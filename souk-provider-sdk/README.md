@@ -4,10 +4,13 @@ What a provider and souk agree on, stated from the provider's side: an
 identity and what it signs, the port an agent implements, and the provider's
 own worker loop.
 
-**It carries no transport.** Its dependencies are `cryptography` and `pyjwt`
-— no `httpx`, no `websockets`, no `grpcio`, and no `souk`. Wrapping the calls
-in a network is a downstream job, and that dependency list is what makes the
-boundary checkable rather than a matter of discipline.
+**It carries no transport.** Its dependencies are `cryptography`, `pyjwt` and
+`ag-ui-protocol` — no `httpx`, no `websockets`, no `grpcio`, and no `souk`.
+Wrapping the calls in a network is a downstream job, and that dependency list
+is what makes the boundary checkable rather than a matter of discipline.
+`ag-ui-protocol` is there because a run input is a `RunAgentInput` and a
+thread's messages are `ag_ui.core.Message` — the same package souk itself
+validates both against, not a network dependency.
 
 ## Which SDK is this
 
@@ -28,9 +31,11 @@ a binding of your own and need to know what the two sides actually agree on.
 ## An agent is one method
 
 ```python
+from ag_ui.core import RunAgentInput
+
 class Greeter:
-    async def run_stream(self, agent_name: str, run_input: dict):
-        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_name: str, run_input: RunAgentInput):
+        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "hello"}

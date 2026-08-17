@@ -31,7 +31,14 @@ from __future__ import annotations
 from typing import Any
 
 from a2a.types import a2a_pb2 as pb
+from ag_ui.core import AssistantMessage, UserMessage
 from google.protobuf.json_format import MessageToDict
+
+# `ag_ui.core.Message.id` is required, but the real id is
+# `repo.append_thread_messages`'s to mint — this one is overwritten
+# unconditionally before storage and never read. See
+# `a2a_message_to_agui_messages`.
+_PLACEHOLDER_MESSAGE_ID = "unset"
 
 # souk's run statuses <-> A2A's own task states. 'input-required' is
 # already A2A vocabulary (a task legitimately paused waiting on more
@@ -88,18 +95,34 @@ def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, 
     v0.3 and `{"type": "text", "text": ...}` in the original — all three carry
     the text under the same key, so souk reads the key and ignores the
     discriminator entirely. Roles are `ROLE_USER`/`ROLE_AGENT` in v1.0 and
-    `user`/`agent` before it.
+    `user`/`agent` before it. The *input* side stays a bare dict for this
+    reason: three A2A spec generations don't share one shape to validate
+    against, and rejecting two of them for a discriminator souk doesn't
+    need would be exactly the forced protocol deviation this repo avoids.
 
-    No `id` here on purpose — repo.append_thread_messages assigns the real,
+    The *output* is a different question — this always produces AG-UI's own
+    shape, souk's own `RunAgentInput.messages` on the other protocol goes
+    through `ag_ui.core` on its way here too (see protocols.agui), and dict
+    literals with hand-spelled `role`/`content` keys were the one place that
+    type wasn't actually checked. Built through `UserMessage`/`AssistantMessage`
+    and dumped, same as `protocols.agui`'s own `raw_messages` — so a rename on
+    that side breaks this construction at the same moment, not later at
+    whatever field a provider happens to read off the stored dict.
+
+    No real `id` here — `repo.append_thread_messages` assigns the real,
     database-generated one for whatever it stores this under; an id minted
-    here would just be discarded.
+    here would just be discarded, which is what `_PLACEHOLDER_MESSAGE_ID` is.
     """
     raw_role = str(a2a_message.get("role", "")).upper()
-    role = "assistant" if raw_role in ("ROLE_AGENT", "AGENT") else "user"
     text = "".join(
         part["text"] for part in a2a_message.get("parts", []) if isinstance(part.get("text"), str)
     )
-    return [{"role": role, "content": text}]
+    message = (
+        AssistantMessage(id=_PLACEHOLDER_MESSAGE_ID, content=text)
+        if raw_role in ("ROLE_AGENT", "AGENT")
+        else UserMessage(id=_PLACEHOLDER_MESSAGE_ID, content=text)
+    )
+    return [message.model_dump(mode="json", by_alias=True, exclude_none=True)]
 
 
 def text_delta_of(event: dict[str, Any]) -> tuple[str, str] | None:
