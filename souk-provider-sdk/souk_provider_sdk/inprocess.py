@@ -1,37 +1,36 @@
-"""souk in this process: the shortest `SoukConnection` there is.
+"""souk in this process: the shortest `SoukLink` there is.
 
-One of several, and deliberately named like the others — `InProcessProvider`
-here, `SocketProvider` where a gateway carries the same four calls over a
-WebSocket. In-process is a transport, not a special case, and nothing it gets
-is a shortcut a remote provider does not: it registers, it proves its
-identity, and souk offers it work the same way.
+One of several, and deliberately named like the others — `InProcessLink`
+here, and whatever a socket client calls itself where a wire is involved.
+In-process is a transport, not a special case: nothing it gets is a shortcut
+a remote provider does not get, and it registers, proves its identity and is
+offered work the same way.
 
-What it adds over the base is the report direction, which the base cannot
-carry: it holds the `ProviderRuntime`, so it wires the runtime's two output
-callbacks straight to souk. Over a wire those become frames written by
-whatever is on the provider's side of the socket, and the connection souk
-talks to has no runtime at all.
+Both directions are here because both directions are this object's, which is
+the whole reason `SoukLink` covers both. Downward it converts and calls;
+upward it calls souk directly. Neither half needs a queue, an ack or a
+correlation id — that is what a transport is for, and there is no transport.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from souk_provider_sdk.connection import SoukConnection
+from souk_provider_sdk.link import SoukLink
 
 if TYPE_CHECKING:
     from souk_provider_sdk.provider import DeliveredRun
     from souk_provider_sdk.runtime import ProviderRuntime
 
 
-class InProcessProvider(SoukConnection):
+class InProcessLink(SoukLink):
     """A `ProviderRuntime` and a souk in one process, joined.
 
-    Constructing one *sets* the runtime's callbacks, so build it before the
-    runtime is given work: events queued while `on_event` is still None are
-    dropped, silently and by design — a callback belongs to the caller, and
-    one bad send must not kill the single consumer every run's ordering
-    depends on.
+    Constructing one *attaches it to the runtime*, so build it before the
+    runtime is given work: events produced while the runtime has no link are
+    dropped, silently and by design — reporting belongs to the caller, and one
+    bad send must not kill the single consumer every run's ordering depends
+    on.
 
     `souk` is anything with `report_event(run_id, event, claimed_by=...)` and
     `finish_run(run_id, claimed_by=...)`. A `Souk` object satisfies that in
@@ -41,11 +40,9 @@ class InProcessProvider(SoukConnection):
     def __init__(self, souk: Any, runtime: "ProviderRuntime") -> None:
         self._souk = souk
         self._runtime = runtime
-        runtime.on_event = self._on_event
-        runtime.on_finish = self._on_finish
+        runtime.link = self
 
-    # ---- Who, and how much. Both the runtime's to declare; this only carries
-    # them across the seam.
+    # ---- souk → provider
 
     @property
     def public_key(self) -> str:
@@ -53,9 +50,9 @@ class InProcessProvider(SoukConnection):
 
     @property
     def max_concurrent_runs(self) -> int | None:
+        """Passed straight through. Capacity is the provider's to declare;
+        this only carries it across the seam."""
         return self._runtime.max_concurrent_runs
-
-    # ---- The transport, such as it is
 
     async def offer(self, run: "DeliveredRun") -> bool:
         """A function call. There is nothing between the two ends, so the
@@ -65,10 +62,19 @@ class InProcessProvider(SoukConnection):
     def cancel(self, run_id: str) -> None:
         self._runtime.cancel(run_id)
 
-    # ---- The report direction, which only exists when the runtime is local
+    # ---- provider → souk
+    #
+    # `claimed_by` is added here rather than carried by the runtime: which
+    # identity holds a run is a fact about this link, and the runtime that
+    # produced the event has no reason to know souk's argument names.
+    #
+    # Neither of these awaits anything, and both are still `async`: souk's
+    # own calls are synchronous by its own design (a provider must not wait
+    # on its persistence — the run's pipeline does that on its own task), but
+    # the *interface* is where a socket transport needs to await its write.
 
-    def _on_event(self, run_id: str, event: Any) -> None:
+    async def report_event(self, run_id: str, event: Any) -> None:
         self._souk.report_event(run_id, event, claimed_by=self.public_key)
 
-    def _on_finish(self, run_id: str) -> None:
+    async def finish_run(self, run_id: str) -> None:
         self._souk.finish_run(run_id, claimed_by=self.public_key)

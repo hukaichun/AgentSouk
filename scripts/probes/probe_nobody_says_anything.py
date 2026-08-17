@@ -36,7 +36,7 @@ from souk.core import Souk
 
 from souk.models import AgentRef
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
-from souk_provider_sdk import InProcessProvider, ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
 
 DB = Path(tempfile.gettempdir()) / "souk_probe_silence.db"
 URL = f"sqlite+aiosqlite:///{DB}"
@@ -113,7 +113,7 @@ async def main() -> int:
     runtime = ProviderRuntime(identity, Agent())
     runtime.start()
     try:
-        await souk.attach_provider(InProcessProvider(souk, runtime), ["translatr"])
+        await souk.attach_provider(InProcessLink(souk, runtime), ["translatr"])
         outcome = "attached, and will now be offered nothing, forever"
         silent = True
     except Exception as exc:
@@ -156,7 +156,7 @@ async def main() -> int:
     await register(souk, identity, "steady")
     runtime = ProviderRuntime(identity, Agent())
     runtime.start()
-    await souk.attach_provider(InProcessProvider(souk, runtime), ["steady"])
+    await souk.attach_provider(InProcessLink(souk, runtime), ["steady"])
     async with souk.session() as session:
         for table in (run_events, thread_messages, runs, threads, agents, providers):
             await session.execute(delete(table))

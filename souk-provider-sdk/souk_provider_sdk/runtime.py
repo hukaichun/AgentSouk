@@ -3,7 +3,7 @@ events back.
 
 Two queues and one loop between them, which is the whole shape:
 
-    deliver() ──▶ job queue ──▶ loop ──▶ output queue ──▶ on_event/on_finish
+    deliver() ──▶ job queue ──▶ loop ──▶ output queue ──▶ link
                       │                       │
               full ⇒ declined           one event per chunk
 
@@ -28,9 +28,8 @@ and call `souk.report_event(...)` / `souk.finish_run(...)`, and read
 `run.run_id` / `run.agent.name` / `run.run_input` off souk's own object —
 souk's method names, argument order and model fields were all part of this
 package's interface without either side declaring it. Now runs arrive as
-`DeliveredRun` and results leave through two callables the caller supplies.
-Whoever wires the two together is the one place entitled to know both
-shapes; see `contract.py`.
+`DeliveredRun` and results leave through a `SoukLink`, which is the one
+object entitled to know both sides' shapes; see `contract.py`.
 
 What stays here is what belongs to a loop: ordering. `_report_output` is a
 single consumer, so a run's events leave in the order the agent produced
@@ -42,11 +41,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from souk_provider_sdk.identity import ProviderIdentity
 from souk_provider_sdk.provider import DeliveredRun, Provider
+
+if TYPE_CHECKING:
+    from souk_provider_sdk.link import SoukLink
 
 logger = logging.getLogger("souk_provider_sdk.runtime")
 
@@ -60,11 +61,10 @@ class ProviderRuntime:
     that converts souk's delivered run into a `DeliveredRun` is the whole of
     what standing this in front of a souk takes.
 
-    `on_event(run_id, event)` and `on_finish(run_id)` are where results go.
-    Both are called from this runtime's own task, in production order, and
-    both are synchronous on purpose: an agent must never be made to wait on
-    whatever is on the other end, and `on_finish` is called while unwinding a
-    cancellation, where an await would be interrupted before it arrived.
+    Results go out through `link` — a `SoukLink`, which is also the object
+    souk hands runs *to*, because a provider and a souk are one relationship
+    and not two. It is set by the link's own constructor rather than passed
+    here: the two hold each other, and the link is built second.
     """
 
     def __init__(
@@ -72,15 +72,14 @@ class ProviderRuntime:
         identity: ProviderIdentity,
         provider: Provider,
         *,
-        on_event: Callable[[str, Any], Any] | None = None,
-        on_finish: Callable[[str], Any] | None = None,
         max_queued_runs: int = 1,
         max_concurrent_runs: int | None = None,
     ) -> None:
         self.identity = identity
         self.provider = provider
-        self.on_event = on_event
-        self.on_finish = on_finish
+        # Set by `SoukLink`'s constructor. None until then, and a runtime
+        # given work without one drops its output — see `_report_output`.
+        self.link: "SoukLink | None" = None
         # How many runs may be waiting to start. This is what souk sees as
         # capacity: when it is full, `deliver` declines and the run stays
         # souk's problem rather than becoming a backlog nobody can see.
@@ -231,23 +230,25 @@ class ProviderRuntime:
         of their tasks raced — so the guarantee stays here, which is the one
         thing this loop owes anybody.
 
-        Both callbacks are synchronous by design: an agent must never be made
-        to wait on whatever is downstream, and the end marker is sent while
-        unwinding a cancellation, where an await would be interrupted before
-        it ever arrived.
+        Awaiting the link here is what keeps backpressure honest: a slow
+        transport slows this drain, and the pressure lands on one queue
+        instead of a second one inside every transport. It costs the agent
+        nothing — it left at `put_nowait` in `_execute` and is not waiting on
+        any of this.
 
-        A callback that raises is logged and swallowed. It belongs to the
-        caller, and one bad send must not kill the consumer that every other
-        run's ordering depends on.
+        A link that raises is logged and swallowed. It belongs to the caller,
+        and one bad send must not kill the consumer that every other run's
+        ordering depends on.
         """
         while True:
             run_id, event = await self._output.get()
             try:
+                if self.link is None:
+                    continue
                 if event is _END:
-                    if self.on_finish is not None:
-                        self.on_finish(run_id)
-                elif self.on_event is not None:
-                    self.on_event(run_id, event)
+                    await self.link.finish_run(run_id)
+                else:
+                    await self.link.report_event(run_id, event)
             except Exception:
                 logger.exception("run %s: reporting failed", run_id)
 

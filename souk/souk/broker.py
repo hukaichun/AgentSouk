@@ -241,14 +241,17 @@ class ConnectedProvider(Protocol):
     live in other distributions and one of them must be able to exist without
     ever importing souk:
 
-    - `souk_provider_sdk.InProcessProvider` — a direct call, no wire
+    - `souk_provider_sdk.InProcessLink` — a direct call, no wire
     - AgentSoukServer's `SocketProvider` — a frame, and an ack to wait on
 
-    Both subclass `souk_provider_sdk.SoukConnection`, which is where the
-    translation from this `ClaimedRun` into that package's own delivered-run
-    type happens — once, rather than per transport. Souk requires none of
-    that: anything with these four members works, whether or not it has ever
-    heard of that package.
+    They are not the same kind of object, which is worth knowing before
+    reading either. The first is provider-side and subclasses
+    `souk_provider_sdk.SoukLink`, where this `ClaimedRun` is translated into
+    that package's own delivered-run type — once, rather than per transport.
+    The second is gateway-side, holds an outbound queue and no runtime, and
+    satisfies this protocol directly; it neither does nor should import that
+    package. Souk requires nothing of either: anything with these four
+    members works, whether or not it has ever heard of the SDK.
     """
 
     # The provider's Ed25519 public key. Established when it connected, not

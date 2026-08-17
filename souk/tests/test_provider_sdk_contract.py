@@ -4,7 +4,7 @@ still agree.
 `souk_provider_sdk` cannot import souk, and no longer names anything of
 souk's either — runs reach it as its own `DeliveredRun` and results leave
 through two callables. So nothing makes the pair agree by construction, and
-the seam has moved: it is now `souk_provider_sdk.InProcessProvider`,
+the seam has moved: it is now `souk_provider_sdk.InProcessLink`,
 the one module there that names souk's shapes — and still does not import it.
 
 That seam is what these assert. It has been broken before: souk delivered its
@@ -21,8 +21,8 @@ from souk_provider_sdk import (
     CONNECTED_PROVIDER_ATTRS,
     DELIVERED_RUN_FIELDS,
     REGISTRATION_FIELDS,
-    REPORT_CALLBACKS,
-    InProcessProvider,
+    LINK_REPORT_METHODS,
+    InProcessLink,
     AgentHandle,
     DeliveredRun,
     HandleProvider,
@@ -45,7 +45,7 @@ def test_the_adapter_can_fill_every_field_the_sdk_declares():
     """
     assert set(DeliveredRun.__dataclass_fields__) == DELIVERED_RUN_FIELDS
 
-    source = inspect.getsource(InProcessProvider.deliver)
+    source = inspect.getsource(InProcessLink.deliver)
     for field in ("run_id", "agent_name", "run_input", "thread_id"):
         assert f"{field}=" in source, f"the adapter never fills {field}"
 
@@ -70,7 +70,7 @@ def test_the_two_sides_agree_on_what_a_connected_provider_is():
 
 def test_the_in_process_connection_is_something_souks_broker_can_deliver_to():
     runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]))
-    adapter = InProcessProvider(souk=None, runtime=runtime)
+    adapter = InProcessLink(souk=None, runtime=runtime)
 
     for name in ConnectedProvider.__protocol_attrs__:
         assert hasattr(adapter, name), f"ConnectedProvider needs {name}"
@@ -87,22 +87,43 @@ def test_the_runtime_itself_needs_the_same_trio():
         assert hasattr(runtime, name)
 
 
-def test_the_callbacks_the_sdk_declares_are_what_the_adapter_supplies():
-    runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]))
-    InProcessProvider(souk=None, runtime=runtime)
+def test_the_reporting_half_the_sdk_declares_is_what_the_link_supplies():
+    """`LINK_REPORT_METHODS` is a claim about `SoukLink`'s upward half — the
+    direction that used to be two loose callables on the runtime and is now
+    part of the same object souk hands runs to."""
+    link = InProcessLink(souk=None, runtime=ProviderRuntime(ProviderIdentity.generate(), HandleProvider([])))
 
-    for name, params in REPORT_CALLBACKS.items():
-        callback = getattr(runtime, name)
-        assert callback is not None, f"the adapter left {name} unset"
-        # Synchronous on purpose: an agent must never wait on souk's
-        # persistence, and on_finish is called while unwinding a
-        # cancellation, where an await would be interrupted before arriving.
-        assert not inspect.iscoroutinefunction(callback)
-        bound = list(inspect.signature(callback).parameters)
+    for name, params in LINK_REPORT_METHODS.items():
+        method = getattr(link, name, None)
+        assert method is not None, f"the link has no {name}"
+        # Async, so a transport with a wire under it can await its write.
+        # These were sync on a rule that described a different line: the
+        # agent's decoupling is ProviderRuntime's output queue, not this.
+        assert inspect.iscoroutinefunction(method)
+        bound = list(inspect.signature(method).parameters)
         assert len(bound) == len(params), f"{name}{params} vs {bound}"
 
 
+def test_the_runtime_reports_through_the_link_and_holds_no_callbacks():
+    """The merge, asserted: a runtime has one `link`, not an `on_event` and
+    an `on_finish` that something else has to remember to set."""
+    runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]))
+
+    assert runtime.link is None
+    assert not hasattr(runtime, "on_event")
+    assert not hasattr(runtime, "on_finish")
+
+    link = InProcessLink(souk=None, runtime=runtime)
+    assert runtime.link is link
+
+
 def test_souk_still_has_the_two_calls_the_adapter_reports_through():
+    """souk's own pair stays synchronous while `SoukLink`'s is async, and the
+    two are not in tension: souk returns immediately because a provider must
+    not wait on its persistence — the run's own pipeline does that, on its own
+    task — whereas the link is async so a transport with a wire under it can
+    await its write. `InProcessLink` sits between them and awaits nothing.
+    """
     from souk.core import Souk
 
     assert not inspect.iscoroutinefunction(Souk.report_event)
