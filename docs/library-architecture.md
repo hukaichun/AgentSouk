@@ -384,6 +384,51 @@ run ignores it. Which is the same answer souk gives everywhere else: it
 carries data to a provider and checks it arrived, and how that provider
 arranges itself is its own business.
 
+### souk has an identity too, and neither side generates one
+
+Authentication ran one way. A provider *is* its Ed25519 keypair and proves
+that on demand; souk held no key at all — its only secret is
+`token_signing_secret`, which is symmetric and therefore cannot prove
+anything to somebody who does not already hold it. So a provider connected to
+a URL and trusted whatever answered.
+
+TLS does not close that, and the reason matters because it recurs. TLS
+authenticates a *hostname*, and in an enterprise it routinely terminates at an
+intercepting proxy whose CA the endpoints have been made to trust — that is
+the proxy's whole function, not a defeat of it. "The same souk as last time"
+and "a host holding a valid certificate for this name" are different claims,
+and only the first is what a provider needs. So souk gets a keypair of its
+own (`SoukIdentity`), and both sides gain a general `sign(payload: bytes)`:
+core already published `verify_signature` over arbitrary bytes, so each side
+could check anyone while being uncheckable itself.
+
+**What gets signed is not core's to decide.** Proving identity as a
+connection opens is a serving act, so the payload belongs to whoever serves
+souk (#27), and core supplies only the primitive. The handshake built on it —
+challenge-response over a nonce each way, replacing a self-signed assertion
+that was replayable within its freshness window — is designed in issues #44
+and #45.
+
+Two decisions worth keeping, because both will be re-proposed:
+
+- **Channel binding is out.** It is the standard answer to a relay, and it is
+  unusable here: an intercepting proxy re-originates TLS by design, so the two
+  sides never derive the same value and the check fails for every enterprise
+  running one. It was also never the fix — challenge-response already stops
+  the credential being *stealable*, with such a proxy in the path. What stays
+  open is tampering on a live connection, deliberately: the proxy is in the
+  trust model by construction, and signing every frame is a large cost against
+  a threat the operator chose.
+- **An absent key is not a generated key.** `identity_private_key` is
+  optional and souk never mints one for itself. An ephemeral identity would
+  change on every restart and fail every provider's pin, which trains people
+  to click through the warning and destroys the only thing pinning is worth.
+  It is a hex value rather than a path for the same reason
+  `token_signing_secret` is: every replica of one souk must present the same
+  identity, and it must survive restarts, so it is something to provision.
+  `SoukIdentity.generate_hex()` exists for whoever provisions it and is called
+  by nothing.
+
 ### In-process is not trusted
 
 The first version of attaching an agent put an object in a dictionary. That

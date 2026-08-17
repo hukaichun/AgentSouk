@@ -88,6 +88,31 @@ class ProviderIdentity:
         path.chmod(0o600)
         return identity
 
+    def sign(self, payload: bytes) -> str:
+        """Sign arbitrary bytes with this identity.
+
+        For payloads souk does not define. The three below cover the
+        operations souk itself verifies; a transport proving who it is when it
+        *opens a connection* is not one of them, because what a connection is
+        belongs to whoever is serving souk — so the payload is theirs and this
+        is the primitive they build it from.
+
+        souk already publishes the verifying half generically
+        (`souk.identity.verify_signature`, which takes arbitrary bytes), so
+        this is the missing symmetric piece rather than a new capability:
+        anything a gateway can check, the identity it is checking should be
+        able to produce.
+
+        No restriction on what may be signed, deliberately. Refusing souk's
+        own payload prefixes was considered and dropped — it protects against
+        nothing, since `sign_registration` and `sign_deletion` are public on
+        this same object, and it would re-introduce a smaller version of
+        exactly the problem this method exists to fix: this package deciding
+        what its holder is allowed to sign. Keeping distinct operations
+        distinct is the job of whoever defines the payload.
+        """
+        return self._private_key.sign(payload).hex()
+
     def sign_registration(self, agent_names: list[str], timestamp: int | None = None) -> tuple[str, int]:
         """Returns `(signature_hex, timestamp)` — both, because souk verifies
         the signature *over* the timestamp and would otherwise be handed two
