@@ -1,0 +1,92 @@
+"""The package's own pure tests — no souk anywhere. The cross-repo
+comparisons (payload builder vs souk.identity, protocol attrs vs souk's
+ConnectedLLMProvider) live in souk's suite, which imports both sides.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+
+from openai.types.chat import ChatCompletionChunk
+
+from souk_llm_provider_sdk import (
+    DELIVERED_COMPLETION_FIELDS,
+    DeliveredCompletion,
+    InProcessLLMProvider,
+    ProviderIdentity,
+    llm_registration_payload,
+    sign_llm_registration,
+)
+
+
+def test_delivered_completion_fields_match_contract():
+    assert set(DeliveredCompletion.__dataclass_fields__) == DELIVERED_COMPLETION_FIELDS
+
+
+def test_llm_registration_payload_states_its_operation_and_sorts_names():
+    payload = llm_registration_payload(["smart", "fast"], 1755300000).decode()
+    assert payload == "souk-register-llm:fast,smart:1755300000"
+
+
+def test_sign_llm_registration_returns_signature_over_its_own_timestamp():
+    identity = ProviderIdentity.generate()
+    signature, timestamp = sign_llm_registration(identity, ["gpt4"], 1755300000)
+    assert timestamp == 1755300000
+    assert isinstance(signature, str) and len(signature) == 128
+
+
+# The adapter seam: complete() reads souk's CompletionRequest by attribute.
+# This stub states the fields it reads, which is exactly what souk's
+# contract test asserts souk still sends.
+@dataclass(frozen=True)
+class _AgentRefLike:
+    provider_key: str
+    name: str
+
+
+@dataclass(frozen=True)
+class _CompletionRequestLike:
+    run_id: str
+    agent: _AgentRefLike
+    body: dict
+    llm_name: str = "gpt4"
+    context: dict | None = None
+    actor_chain: list | None = None
+
+
+async def test_inprocess_provider_hands_its_llm_a_delivered_completion():
+    seen: list[DeliveredCompletion] = []
+
+    async def llm(delivered: DeliveredCompletion) -> AsyncIterator[ChatCompletionChunk]:
+        seen.append(delivered)
+        return
+        yield  # pragma: no cover — makes this an async generator
+
+    provider = InProcessLLMProvider(ProviderIdentity.generate(), llm)
+    request = _CompletionRequestLike(
+        run_id="run_1",
+        agent=_AgentRefLike(provider_key="ab" * 32, name="translator"),
+        body={"model": "m", "messages": []},
+        context={"voucher": "v1"},
+        actor_chain=["jwt1", "jwt2"],
+    )
+    async for _ in provider.complete(request):
+        pass
+
+    assert seen == [
+        DeliveredCompletion(
+            run_id="run_1",
+            provider_key="ab" * 32,
+            agent_name="translator",
+            body={"model": "m", "messages": []},
+            llm_name="gpt4",
+            context={"voucher": "v1"},
+            actor_chain=["jwt1", "jwt2"],
+        )
+    ]
+
+
+def test_public_key_is_the_identitys_own():
+    identity = ProviderIdentity.generate()
+    assert InProcessLLMProvider(identity, llm=None).public_key == identity.public_key

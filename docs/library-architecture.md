@@ -125,7 +125,7 @@ along the same line as the packages:
 | `run_stall_timeout_seconds` | how long a claimed run may go silent before it is presumed stalled |
 | `paused_timeout_seconds` | how long an `input-required` run may wait on a human (`None` = forever) |
 | `health_sweep_interval_seconds` | how often the sweeps above run |
-| `token_signing_secret` | signs session tokens (`identity.py`) and KYOK HMACs (`kyok.py`) |
+| `token_signing_secret` | signs KYOK tokens (`kyok.py`) — the only thing it signs now |
 
 None of these describe a network. The signing secret is the one arguable
 case, and it stays in core because issuing a token is part of registering an
@@ -768,7 +768,7 @@ Where souk's state lives:
 | run status, `run_events` | each `Run`'s `in_queue` / `out_queue` |
 | | `RunBroker._providers` — who is reachable |
 | | `_capacity` — what each has in flight |
-| | the KYOK bridge registry (same shape) |
+| | `KyokRelay` — run→LLM-provider bindings, and which LLM provider is attached (same shape) |
 
 The database is the durable record and is deliberately *not* on the live
 event-relay hot path, so dispatch runs on plain asyncio primitives.
@@ -967,48 +967,59 @@ because that is what is in the tree; the swap is tracked as its own piece of
 work. What it must not touch is anything above this heading — if it does,
 the boundary this document is about was not real.
 
-## KYOK splits the same way, for a structural reason
+## KYOK is a second provider kind, and splits the same way
 
-KYOK (`souk/kyok.py`, `api_llm_bridge.py`) lets a caller keep its own LLM
-credentials: the caller's own bridge is what actually calls the model, so the
-caller decides the key *and* the model/endpoint, while the provider only ever
-sees an OpenAI-compatible URL.
+KYOK (`souk/kyok.py`, `souk/protocols/kyok.py`) lets whoever pays for a
+run keep their own LLM credentials: an **LLM provider** — a first-class,
+identity-holding party, not an anonymous bridge — is what actually calls
+the model, so the paying side decides the key *and* the model/endpoint,
+while the agent provider only ever sees an OpenAI-compatible URL and a
+run-scoped token as its `api_key`.
 
-Mechanically it is a **second broker**, structurally identical to the run
-broker that already lives in core:
+It is a **second broker** in the strong sense now, not just structurally:
 
 | KYOK | run equivalent |
 |---|---|
-| `GET /kyok/poll` | waiting for work to arrive |
-| `POST /kyok/v1/chat/completions` | submitting a unit of work |
-| `POST /kyok/respond/{id}` | streaming the result back |
-| `_DONE` sentinel | `END_OF_STREAM` |
-| its local queued timeout | `RunBroker.queued_timeout_seconds` |
+| `LlmRef` (provider_key, name) — an offering | `AgentRef` — an agent |
+| `register_llm_providers` (`souk-register-llm` payload, batch of models) | `register_agents` |
+| `attach_llm_provider(link, model_names)` / `detach_llm_provider` | `attach_provider` / `detach_provider` |
+| `ConnectedLLMProvider` (`public_key`, `complete`) | `ConnectedProvider` |
+| `KyokRelay` (run→binding, LlmRef→link roster) | `RunBroker` (`_runs`, `_providers`) |
+| offline → 503 fast-fail | `agent_offline` fast-fail |
 
-KYOK still *polls*, and that is a real difference now that runs do not: the
-caller's bridge reaches souk rather than souk reaching it, so souk has
-nothing to deliver to. Whether it should be inverted the same way has not
-been asked. `token_signing_secret` signs its token and nothing else, which is
-the whole of what is left of that key's job.
+The caller binds a run to an LLM offering **by the pair** at run start
+(`metadata.kyok.llmProvider = {providerKey, name}`) — names are not
+exclusive across identities, two providers both offering `gpt4` is
+normal, and nobody owns a word. The caller's `context` (its credential to
+that LLM provider, opaque to souk) rides in the binding, is stripped
+before anything persists, and is inherited souk-side down A2A delegation
+so it never transits an agent provider — see docs/keep-your-own-key.md.
+Resolution to a live connection happens per completion call, never at
+bind time, so a reconnect just works. The binding dies with the run
+through `RunBroker`'s forget-listener funnel.
 
-So it splits exactly like runs do, and gets its own port:
+KYOK no longer polls: there is an attach step, so souk delivers — the
+same inversion runs went through, for the same #37-shaped reason. The
+old poll/respond endpoints and the rendezvous session state behind them
+are gone entirely.
 
-```python
-class LLMBridge(Protocol):
-    """Whoever answers a completion request — the caller's own bridge."""
-    async def complete(self, request: CompletionRequest) -> AsyncIterator[Chunk]: ...
-```
-
-- **in-process** — call a local LLM client directly; no HTTP anywhere
-- **HTTP** (the gateway) — today's three `/kyok/*` endpoints
+Policy lives with the LLM provider, on souk's own invariant that it
+never decides on a provider's behalf: every delivered completion carries
+the run and the *proven* calling-agent identity
+(`souk.kyok.CompletionRequest`), and serving, throttling, billing or
+refusing (an exception, relayed as 502) is that party's own business.
+This is where a spend ceiling belongs (AgentSouk#26).
 
 Token minting/verifying (`kyok.py`) is core: it signs with
-`token_signing_secret`, which core already holds, and the `agent_id` it
-carries is checked against the broker's live view of who is running that
-`run_id` right now — a domain judgement, not a transport concern.
+`token_signing_secret` (the only thing that secret signs now), and the
+agent it carries is checked against the broker's live view of who is
+running that `run_id` right now — plus an Ed25519 call-time signature
+from the agent provider itself — a domain judgement, not a transport
+concern. Wire shapes come from the `openai` package; souk hand-writes no
+completion field name, the same rule that put `ag-ui-protocol` and
+`a2a-sdk` in the dependency list.
 
-Partly done already: `KyokBridge` and `PendingCompletion` moved from
-`api_llm_bridge` into `souk/kyok.py` when live dispatch state stopped being a
-module singleton, since the bridge is structurally a second broker and is
-held per-Souk for the same reasons. What remains for step 5 is the three
-`/kyok/*` endpoints and the `LLMBridge` port.
+The in-process implementation is `souk_llm_provider_sdk.
+InProcessLLMProvider` — registration, attach and per-call resolution
+identical to a remote one, because in-process is a transport, not a
+special case.

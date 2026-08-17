@@ -136,6 +136,29 @@ agents = Table(
 )
 
 
+# One row per LLM provider offering: the party that answers KYOK
+# completions (see souk/kyok.py), shaped exactly like `agents` and for
+# the same reasons. An offering is `(provider_key, name)` and has no
+# other identity — names are deliberately NOT exclusive across
+# identities: two providers both offering `gpt4` is normal, so a bare
+# name cannot be an address and no one gets first-come ownership of a
+# word. The caller binds a run with the pair
+# (metadata.kyok.llmProvider = {providerKey, name}).
+#
+# The identity itself lives in `providers`, same as for agents — one key
+# may sit in both rosters, and "identity is identity" holds in the
+# database, not just in prose.
+llm_providers = Table(
+    "llm_providers",
+    metadata,
+    Column("provider_key", String, ForeignKey("providers.public_key"), primary_key=True),
+    Column("name", String, primary_key=True),
+    Column("metadata", _JSON, nullable=False, default=dict),
+    Column("joined_at", _TS, nullable=False, default=_utcnow),
+    Column("last_seen_at", _TS, nullable=False, default=_utcnow),
+)
+
+
 threads = Table(
     "threads",
     metadata,

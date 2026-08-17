@@ -33,8 +33,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.identity import provider_fingerprint
 from souk.ids import new_id
-from souk.models import AgentRecord, AgentRef, AgentSummary, RunRecord
-from souk.schema import agents, providers, run_events, runs, thread_messages, threads
+from souk.models import AgentRecord, AgentRef, AgentSummary, LlmRef, RunRecord
+from souk.schema import (
+    agents,
+    llm_providers,
+    providers,
+    run_events,
+    runs,
+    thread_messages,
+    threads,
+)
 
 
 # The statuses that mean a run is not finished with. Defined once because
@@ -243,6 +251,66 @@ async def get_agent_names_for_provider(session: AsyncSession, provider_key: str)
     rows = (
         await session.execute(
             select(agents.c.name).where(agents.c.provider_key == provider_key)
+        )
+    ).scalars().all()
+    return set(rows)
+
+
+async def register_llm_providers(
+    session: AsyncSession,
+    public_key: str,
+    names: list[str],
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, LlmRef]:
+    """Upserts this identity's LLM offerings — mirror of register_agents,
+    and the same rules on purpose: an offering is `(provider_key, name)`,
+    names are free across identities (two providers both offering `gpt4`
+    is normal, not a race for a word), absence from a later batch does not
+    de-list, and what comes back is the pairs the caller already knew, not
+    ids souk minted.
+    """
+    await ensure_provider(session, public_key)
+    now = _utcnow()
+    registered: dict[str, LlmRef] = {}
+    for name in names:
+        stmt = _upsert(session, llm_providers).values(
+            provider_key=public_key,
+            name=name,
+            metadata=metadata or {},
+            joined_at=now,
+            last_seen_at=now,
+        )
+        # joined_at deliberately not in the update set — an existing row
+        # keeps its original join time, same as agents.
+        stmt = stmt.on_conflict_do_update(
+            index_elements=[llm_providers.c.provider_key, llm_providers.c.name],
+            set_={"metadata": stmt.excluded.metadata, "last_seen_at": now},
+        )
+        await session.execute(stmt)
+        registered[name] = LlmRef(provider_key=public_key, name=name)
+    await session.commit()
+    return registered
+
+
+async def get_llm_provider(session: AsyncSession, ref: LlmRef) -> dict[str, Any] | None:
+    row = (
+        await session.execute(
+            select(llm_providers).where(
+                llm_providers.c.provider_key == ref.provider_key,
+                llm_providers.c.name == ref.name,
+            )
+        )
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+async def get_llm_names_for_key(session: AsyncSession, public_key: str) -> set[str]:
+    """Which offering names this key has registered — what stops one
+    identity being attached for another's offerings (see
+    Souk.attach_llm_provider), same as get_agent_names_for_provider."""
+    rows = (
+        await session.execute(
+            select(llm_providers.c.name).where(llm_providers.c.provider_key == public_key)
         )
     ).scalars().all()
     return set(rows)

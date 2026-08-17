@@ -574,6 +574,15 @@ class RunBroker:
         # in. Keeping this one made every later loop raise "bound to a
         # different event loop" the moment the sweep tried to rest.
         self._work_to_do = asyncio.Event()
+        # Called with the run_id on every `forget`, whatever the ending.
+        # Listeners, not a ctor parameter: a broker is injectable
+        # (`Souk(broker=...)`), and whoever holds a constructed one must
+        # still be able to hear its endings — souk wires its KYOK relay
+        # here (see core.py) so a run's bridge entry dies with the run.
+        self._forget_listeners: list[Callable[[str], None]] = []
+
+    def add_forget_listener(self, listener: Callable[[str], None]) -> None:
+        self._forget_listeners.append(listener)
 
     # ---- The broker's own loop
 
@@ -1104,3 +1113,5 @@ class RunBroker:
                 # A place came back, so there may now be somewhere to put
                 # something. This is what lets the loop wait instead of ask.
                 self._work_to_do.set()
+        for listener in self._forget_listeners:
+            listener(run_id)

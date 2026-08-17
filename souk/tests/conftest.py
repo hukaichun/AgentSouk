@@ -28,7 +28,15 @@ DATABASE_URL = os.environ.get(
     "SOUK_DATABASE_URL", f"sqlite+aiosqlite:///{Path(tempfile.gettempdir()) / 'souk_pytest.db'}"
 )
 
-_TABLES_CHILD_FIRST = ("run_events", "thread_messages", "runs", "threads", "agents", "providers")
+_TABLES_CHILD_FIRST = (
+    "run_events",
+    "thread_messages",
+    "runs",
+    "threads",
+    "agents",
+    "llm_providers",
+    "providers",
+)
 
 
 @pytest.fixture(scope="session")
@@ -66,8 +74,8 @@ async def _clean_db(souk: Souk) -> AsyncIterator[None]:
     async with souk.engine.begin() as conn:
         if is_postgres:
             await conn.exec_driver_sql(
-                "TRUNCATE providers, agents, threads, runs, thread_messages, run_events "
-                "RESTART IDENTITY CASCADE"
+                "TRUNCATE providers, agents, threads, runs, thread_messages, run_events, "
+                "llm_providers RESTART IDENTITY CASCADE"
             )
         else:
             for table in _TABLES_CHILD_FIRST:
