@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CompletionRelay:
+    """A completion in flight from an attached LLM provider back to the KYOK caller, either
+    consumed in one shot as an OpenAI `ChatCompletion` (`collapsed`) or streamed out as
+    server-sent chunks (`encode`). Any error raised while draining `chunks` is surfaced as
+    `KyokRejected` (status 502) from `collapsed`, or as an inline `{"error": ...}` payload
+    followed by end-of-stream from `encode`."""
 
     stream_requested: bool
     chunks: AsyncIterator[ChatCompletionChunk]
@@ -63,6 +68,12 @@ class KyokAdapter:
         timestamp: str,
         signature: str,
     ) -> CompletionRelay:
+        """Authenticates a KYOK completion call and forwards it to the bound LLM provider.
+        `bearer` must be a valid, unexpired KYOK token for a run that is still active (not
+        cancelled) for the agent named in the token, and `timestamp`/`signature` must be a
+        fresh, correctly signed proof that the calling agent itself made this call — else raises
+        `KyokRejected` with 401 or 403. Raises `KyokRejected` (400) if `body` isn't valid JSON,
+        and (503) if the run's bound LLM provider is no longer attached."""
         token = verify_kyok_token(bearer, self._souk.settings.token_signing_secret)
         if token is None:
             raise KyokRejected("invalid or expired KYOK token", status=401)
@@ -104,6 +115,9 @@ class KyokAdapter:
     async def _verify_caller(
         self, token: KyokToken, bearer: str, body: bytes, timestamp: str, signature: str
     ) -> None:
+        """Raises `KyokRejected` unless `signature` is a fresh, valid signature — by the agent
+        named in `token`, using its registered public key — over the bearer token, timestamp,
+        and a hash of the request body."""
         if not timestamp or not signature:
             raise KyokRejected("missing KYOK call-time signature", status=401)
         try:
@@ -126,6 +140,10 @@ class KyokAdapter:
 
 
 def collapse_stream(chunks: list[ChatCompletionChunk]) -> ChatCompletion:
+    """Merges a sequence of `ChatCompletionChunk`s into a single `ChatCompletion`, concatenating
+    each choice index's content deltas and taking that index's last non-empty finish reason
+    (defaulting to `"stop"`). An empty chunk list collapses to one empty assistant message with
+    finish reason `"stop"`."""
     if not chunks:
         return ChatCompletion(
             id="",

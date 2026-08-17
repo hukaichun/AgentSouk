@@ -4,6 +4,12 @@ from typing import Any
 
 
 def reduce_events_to_messages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Folds a stream of AG-UI events into the thread-history messages they represent, in the
+    order each message first appeared. Text-message events accumulate into one assistant
+    message per `messageId`; tool-call events accumulate into the parent message's `toolCalls`
+    (or their own standalone message if there is no parent); a `TOOL_CALL_RESULT` becomes its
+    own tool message. Lifecycle and state events (e.g. `RUN_STARTED`, `STATE_DELTA`) produce
+    nothing."""
     messages: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     tool_call_parent: dict[str, str] = {}

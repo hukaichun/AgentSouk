@@ -14,6 +14,8 @@ logger = logging.getLogger("souk_provider_sdk.runtime")
 
 
 class ProviderRuntime:
+    """Runs a `Provider`'s agents locally: queues delivered runs, executes each as a task, and streams
+    resulting events back through `link` (dropping them if no link is attached)."""
 
     def __init__(
         self,
@@ -39,6 +41,7 @@ class ProviderRuntime:
 
 
     async def deliver(self, run: DeliveredRun) -> bool:
+        """Queues `run` for execution; returns False (without queuing) if not started, at `max_concurrent_runs`, or the queue is full."""
         if not self._running:
             return False
         if self.max_concurrent_runs is not None and len(self._in_flight) >= self.max_concurrent_runs:
@@ -50,12 +53,14 @@ class ProviderRuntime:
         return True
 
     def cancel(self, run_id: str) -> None:
+        """Cancels the asyncio task executing `run_id`, if it is currently in flight; a no-op otherwise."""
         task = self._in_flight.get(run_id)
         if task is not None:
             task.cancel()
 
 
     def start(self) -> None:
+        """Starts the background job-consuming and output-reporting loops; a no-op if already running."""
         if self._running:
             return
         self._running = True
@@ -63,6 +68,7 @@ class ProviderRuntime:
         self._spawn(self._report_output(), name="provider-output")
 
     async def aclose(self, *, cancel_in_flight: bool = False) -> None:
+        """Stops the runtime, optionally cancelling in-flight runs, and awaits its background tasks to finish."""
         self._running = False
         if cancel_in_flight:
             for task in list(self._in_flight.values()):
@@ -90,6 +96,8 @@ class ProviderRuntime:
             )
 
     async def _execute(self, run: DeliveredRun) -> None:
+        """Streams the provider's events for `run` into the output queue, always enqueuing a terminal marker
+        (triggering `finish_run`) even on cancellation or an unhandled exception."""
         name = run.agent_name
         try:
             async for event in self.provider.run_stream(name, run.run_input):

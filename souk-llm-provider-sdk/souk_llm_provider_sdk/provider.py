@@ -25,6 +25,7 @@ CompletionHandler = Callable[[DeliveredCompletion], AsyncIterator[ChatCompletion
 
 
 class InProcessLLMProvider:
+    """Adapts a `CompletionHandler` to the shape KYOK expects of an attached LLM provider."""
 
     def __init__(self, identity: ProviderIdentity, llm: CompletionHandler) -> None:
         self._identity = identity
@@ -35,6 +36,7 @@ class InProcessLLMProvider:
         return self._identity.public_key
 
     def complete(self, request: Any) -> AsyncIterator[ChatCompletionChunk]:
+        """Repackages a completion request's fields into a `DeliveredCompletion` and hands it to the LLM."""
         return self._llm(
             DeliveredCompletion(
                 run_id=request.run_id,

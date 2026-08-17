@@ -19,6 +19,10 @@ async def _close_with_terminal_event(souk: "Souk", run_id: str, failure_reason: 
 
 
 async def sweep_once(souk: "Souk") -> None:
+    """Fails runs that have gone silent (claimed but no activity) past
+    `run_stall_timeout_seconds`. Also fails runs stuck paused
+    (input-required) past `paused_timeout_seconds`, but only if that setting
+    is configured — it's skipped entirely when it's None."""
     settings = souk.settings
     async with souk.session() as session:
         stalled = await repo.fail_stalled_runs(session, settings.run_stall_timeout_seconds)

@@ -49,6 +49,7 @@ class Registration:
 
 @dataclass(frozen=True)
 class Health:
+    """Snapshot of database reachability, schema version, and dispatch state."""
 
     database: bool
     schema_revision: str | None
@@ -68,6 +69,7 @@ class Health:
 
 @dataclass
 class RunHandle:
+    """Caller-facing reference to a run: its id, thread, and its event stream."""
 
     run_id: str
     thread_id: str
@@ -76,6 +78,7 @@ class RunHandle:
     _events: AsyncIterator[Any] | None = None
 
     async def events(self) -> AsyncIterator[Any]:
+        """Yield the run's AG-UI events; yields nothing if no stream was attached."""
         if self._events is None:
             return
         async for item in self._events:
@@ -87,6 +90,7 @@ class RunHandle:
 
 
 def _complete_run_agent_input(thread_id: str, run_id: str, run_input: dict[str, Any]) -> dict[str, Any]:
+    """Fill in a message id for any message that lacks one, then build an AG-UI run input."""
     messages = [
         m if m.get("id") else {**m, "id": new_id("msg")} for m in run_input.get("messages", [])
     ]
@@ -103,6 +107,7 @@ def _complete_run_agent_input(thread_id: str, run_id: str, run_input: dict[str, 
 
 
 class Souk:
+    """The network-free facade: agent/LLM-provider rosters, threads, runs, and dispatch."""
 
     def __init__(self, settings: CoreSettings | None = None, broker: RunBroker | None = None) -> None:
         self.settings = settings or CoreSettings()
@@ -131,6 +136,7 @@ class Souk:
         return self.identity.public_key if self.identity is not None else None
 
     def sign(self, payload: bytes) -> str:
+        """Sign `payload` with this souk's identity key, or raise if none is configured."""
         if self.identity is None:
             raise RuntimeError(
                 "this souk has no identity: set identity_private_key "
@@ -140,6 +146,11 @@ class Souk:
 
 
     async def start(self) -> list[str]:
+        """Run once: fail any run left queued/running from a prior process and start dispatch.
+
+        A second call is a no-op that returns an empty list, so it cannot reap runs
+        queued after the first call. Returns the ids of runs marked failed as orphaned.
+        """
         if self._started:
             return []
         self._started = True
@@ -157,6 +168,7 @@ class Souk:
         return orphaned
 
     async def health(self, timeout: float = 2.0) -> Health:
+        """Probe the database within `timeout` and report reachability, schema, and dispatch state."""
         revision: str | None = None
         reachable = True
         error: str | None = None
@@ -183,12 +195,14 @@ class Souk:
 
 
     def spawn(self, coro, *, name: str | None = None) -> asyncio.Task:
+        """Start `coro` as a tracked background task so `aclose` can cancel it later."""
         task = asyncio.create_task(coro, name=name)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return task
 
     async def aclose(self) -> None:
+        """Stop dispatch, cancel every task spawned via `spawn`, and dispose the engine."""
         self.broker.stop()
         self._started = False
         for task in list(self._tasks):
@@ -206,6 +220,10 @@ class Souk:
         agents: list[dict[str, Any]],
         provider_name: str | None = None,
     ) -> Registration:
+        """Verify the signed registration, store the agents, and drop any attached agent no longer registered.
+
+        Raises `InvalidRegistration` if the timestamp is stale or the signature doesn't verify.
+        """
         if not is_timestamp_fresh(timestamp):
             raise InvalidRegistration("registration timestamp too far from souk's clock")
         payload = registration_signing_payload([a["name"] for a in agents], timestamp)
@@ -230,6 +248,12 @@ class Souk:
     async def delete_agent(
         self, public_key: str, name: str, signature: str, timestamp: int
     ) -> None:
+        """Delete an agent record after verifying the signature and that it's safe to remove.
+
+        Raises `AgentNotFound` if unregistered, or `AgentInUse` if a provider is currently
+        serving it, it has active runs, or it has any thread/run history (which must be
+        removed by taking the agent offline instead, not by deleting the record).
+        """
         if not is_timestamp_fresh(timestamp):
             raise InvalidRegistration("deletion timestamp too far from souk's clock")
         if not verify_signature(
@@ -268,6 +292,10 @@ class Souk:
         self._notify_change(RosterChanged())
 
     def report_event(self, run_id: str, event: Any, *, claimed_by: str) -> bool:
+        """Relay `event` into the run's stream if `claimed_by` holds the run (or can late-claim it).
+
+        Returns False, without relaying, for an unknown run or one held by a different claimant.
+        """
         run = self.broker.get(run_id)
         if run is None:
             return False
@@ -290,6 +318,7 @@ class Souk:
         return self.broker.push(run_id, RelayEvent(event))
 
     def finish_run(self, run_id: str, *, claimed_by: str) -> bool:
+        """End the run's stream if `claimed_by` currently holds it; False for an unknown or mismatched run."""
         run = self.broker.get(run_id)
         if run is None:
             return False
@@ -306,6 +335,11 @@ class Souk:
     async def attach_provider(
         self, provider: ConnectedProvider, agent_names: list[str]
     ) -> None:
+        """Connect `provider` as the live server for its already-registered `agent_names`.
+
+        Raises `ValueError` for an empty list and `AgentNotFound` if any name was never
+        registered under this provider's key — attaching does not implicitly register.
+        """
         if not agent_names:
             raise ValueError(
                 f"provider '{provider.public_key}' attached with no agent names — "
@@ -341,6 +375,7 @@ class Souk:
         names: list[str],
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, LlmRef]:
+        """Verify the signed registration and store `names` as LLM offerings for this key."""
         if not is_timestamp_fresh(timestamp):
             raise InvalidRegistration("registration timestamp too far from souk's clock")
         payload = llm_registration_signing_payload(names, timestamp)
@@ -356,6 +391,11 @@ class Souk:
     async def attach_llm_provider(
         self, link: ConnectedLLMProvider, model_names: list[str]
     ) -> None:
+        """Connect `link` as the live server for its already-registered `model_names`.
+
+        Raises `ValueError` for an empty list and `LlmProviderNotFound` if any name was
+        never registered under this key.
+        """
         if not model_names:
             raise ValueError(
                 f"LLM provider '{link.public_key}' attached with no model names — "
@@ -381,12 +421,14 @@ class Souk:
         self._notify_change(LlmRosterChanged())
 
     def detach_llm_provider(self, public_key: str) -> None:
+        """Remove every model offering served by `public_key`; a no-op (no change event) if none."""
         if not self.kyok_relay.serving_any(public_key):
             return
         self.kyok_relay.detach(public_key)
         self._notify_change(LlmRosterChanged())
 
     async def detach_provider(self, provider_public_key: str) -> None:
+        """Take every agent served by `provider_public_key` offline; a no-op if it's serving nothing."""
         attached = self.broker.agents_served_by(provider_public_key)
         if not attached:
             return
@@ -416,6 +458,7 @@ class Souk:
         self._notify_change(RunStatusChanged(run_id=run_id, status=status))
 
     async def list_agents(self) -> list[AgentSummary]:
+        """List registered agents with `online` set to whether a provider is currently serving each."""
         async with self.session() as session:
             stored = await repo.list_agents(
                 session,
@@ -461,6 +504,7 @@ class Souk:
             return await repo.get_thread_snapshot(session, thread_id)
 
     async def get_thread_tree(self, thread_id: str) -> dict[str, Any] | None:
+        """Return `thread_id` and its descendant threads nested as `children`, or None if it doesn't exist."""
         async with self.session() as session:
             root = await repo.get_thread(session, thread_id)
             if root is None:
@@ -511,6 +555,10 @@ class Souk:
         thread_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> RunHandle:
+        """Create (or reuse) a thread, create a queued run on it, and enqueue it for dispatch.
+
+        Returns a live `RunHandle` subscribed to the run's event stream.
+        """
         async with self.session() as session:
             resolved_thread_id = await repo.ensure_thread(
                 session, agent, thread_id, metadata=metadata, create_if_missing=True
@@ -536,6 +584,11 @@ class Souk:
         )
 
     async def resume_run(self, run_id: str, run_input: dict[str, Any], metadata: dict | None = None) -> RunHandle:
+        """Reopen an existing run under its same `run_id` and re-enqueue it with new input.
+
+        Raises `LookupError` if `run_id` doesn't exist. The returned handle's event stream
+        continues appending from the run's last stored event sequence.
+        """
         async with self.session() as session:
             stored = await repo.get_run(session, run_id)
             if stored is None:

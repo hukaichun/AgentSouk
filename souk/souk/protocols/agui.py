@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class EventStream:
+    """A live run's AG-UI events, addressable by thread and run id before they are consumed."""
 
     thread_id: str
     run_id: str
@@ -38,6 +39,9 @@ class EventStream:
 
 @dataclass
 class ThreadSnapshot:
+    """Returned instead of a new run's `EventStream` when the target thread already has an
+    active run that the incoming request isn't resuming; carries the thread's current state,
+    including the in-flight run's id."""
 
     data: dict[str, Any]
 
@@ -48,6 +52,13 @@ class AGUIAdapter:
         self._souk = souk
 
     async def run(self, agent: AgentRef, body: RunAgentInput) -> EventStream | ThreadSnapshot:
+        """Starts (or resumes) an AG-UI run for `agent`. Creates a new thread if `body.thread_id`
+        is unseen, ignores the caller-supplied `run_id` and mints souk's own, and returns a
+        `ThreadSnapshot` instead of starting a run if the thread already has an unrelated active
+        run. If the agent is registered but not currently served, the run is recorded as failed
+        and the returned stream carries a `RUN_ERROR` event rather than hanging. Raises
+        `AgentNotFound` if `agent` isn't registered, `LlmProviderNotFound` if a KYOK opt-in names
+        an unknown LLM provider, and `InvalidRunInput` if the assembled AG-UI input is invalid."""
         souk = self._souk
         async with souk.session() as session:
             if await repo.get_agent(session, agent) is None:
@@ -150,6 +161,11 @@ async def _offline_events(thread_id: str, run_id: str) -> AsyncIterator[dict[str
 
 
 async def verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict], Any]:
+    """Verifies `metadata["actorChain"]` if present, resolving each actor's public key to a
+    registered agent name and returning `(metadata with a verifiedActorChain entry added,
+    verified subject, verified actors, raw actor chain)`. Raises `InvalidActorChain` if the
+    chain is tampered. Returns `metadata` unchanged with empty/`None` verification fields if
+    there is no actor chain to verify."""
     actor_chain = metadata.get("actorChain")
     if not actor_chain:
         return metadata, None, [], None
@@ -176,6 +192,9 @@ def build_forwarded_props(
     verified_actors: list[dict] | None = None,
     actor_chain: Any = None,
 ) -> Any:
+    """Merges souk-added forwarded-props extras (a KYOK grant if `kyok_enabled`, verified caller
+    identity if present) into the caller-supplied `forwarded_props`, returning the caller's value
+    unchanged if there is nothing to add."""
     extra: dict[str, Any] = {}
     if kyok_enabled:
         extra["kyok"] = kyok_forwarded_props(run_id, agent, signing_secret)

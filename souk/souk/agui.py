@@ -16,6 +16,9 @@ _MESSAGE_ID_EVENT_TYPES = {
 
 
 def rewrite_message_ids(event: dict[str, Any], id_map: dict[str, str]) -> dict[str, Any]:
+    """Replaces a text-message event's `messageId` with a souk-issued id, reusing the same
+    souk id for every event sharing the original id (tracked in `id_map`). Events outside the
+    text-message-lifecycle types, or without a `messageId`, are returned unchanged."""
     if event.get("type") not in _MESSAGE_ID_EVENT_TYPES:
         return event
     original = event.get("messageId")
@@ -35,6 +38,8 @@ def build_run_agent_input(
     forwarded_props: Any = None,
     resume: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    """Builds and validates a wire-format AG-UI `RunAgentInput` dict from the given fields,
+    raising `ValueError` if the assembled input fails AG-UI's own validation."""
     try:
         model = RunAgentInput.model_validate(
             {

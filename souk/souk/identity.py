@@ -18,6 +18,12 @@ FINGERPRINT_HEX_LENGTH = 16
 
 
 def provider_fingerprint(public_key: str) -> str:
+    """Derives a short, deterministic identifier for a provider from its public key.
+
+    Two different providers registering under the same fingerprint is treated
+    as a collision (see `ProviderFingerprintTaken`); an agent can be resolved
+    by either its full public key or this fingerprint.
+    """
     return hashlib.sha256(bytes.fromhex(public_key)).hexdigest()[:FINGERPRINT_HEX_LENGTH]
 
 
@@ -36,6 +42,13 @@ _KYOK_CALL = "souk-kyok-call"
 
 
 def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
+    """Builds the canonical bytes a provider must sign to prove it holds the key it registers with.
+
+    Names are sorted so the payload doesn't depend on list order. The
+    domain tag keeps this payload from colliding with a deletion payload
+    for the same names/timestamp — a registration signature must not be
+    replayable as a deletion order.
+    """
     return f"{_REGISTER}:{','.join(sorted(agent_names))}:{timestamp}".encode()
 
 
@@ -44,6 +57,11 @@ def llm_registration_signing_payload(names: list[str], timestamp: int) -> bytes:
 
 
 def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:
+    """Builds the canonical bytes a provider must sign to authorize deleting one of its agents.
+
+    Uses a distinct domain tag from `registration_signing_payload` so a
+    captured registration signature can't be replayed to delete the agent.
+    """
     return f"{_DELETE_AGENT}:{agent_name}:{timestamp}".encode()
 
 
@@ -70,10 +88,17 @@ def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | N
 
 
 def new_actor_chain(private_key: Ed25519PrivateKey, subject: dict) -> list[str]:
+    """Starts a new actor chain: a single hop, signed by `private_key`, vouching for `subject`."""
     return [_sign_hop(private_key, subject, None)]
 
 
 def extend_actor_chain(private_key: Ed25519PrivateKey, prev_chain: list[str]) -> list[str]:
+    """Appends a new hop signed by `private_key` to `prev_chain`, carrying the same subject forward.
+
+    The new hop links to the chain's last hop via a hash of that token, so
+    the chain records who acted on whose behalf, in order. Raises
+    `ValueError` if `prev_chain` is empty.
+    """
     if not prev_chain:
         raise ValueError(
             "extend_actor_chain requires a non-empty prev_chain — use new_actor_chain to originate one"
@@ -97,6 +122,17 @@ def _hop_hash(token: str) -> str:
 
 
 def verify_actor_chain(chain: list[str]) -> ChainResult:
+    """Verifies an actor chain and returns the subject it vouches for plus each hop's actor key, in order.
+
+    Each hop's signature must verify under its own embedded public key, and
+    each hop after the first must link to the previous hop via a matching
+    `prevHash` — reordering, truncating, or splicing in a hop from a
+    different chain breaks this and is rejected. Every hop must vouch for
+    the same `subject`. Only the last hop's expiry is enforced; earlier
+    hops may have expired since they were signed. Raises
+    `InvalidActorChain` on any of these failures, including an empty chain
+    or an unparseable/forged token.
+    """
     if not chain:
         raise InvalidActorChain("empty actor chain")
 
@@ -149,6 +185,11 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
 
 
 def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
+    """Returns True if `signature_hex` is a valid Ed25519 signature by `public_key_hex` over `payload`.
+
+    Returns False (never raises) for a mismatched key, a mismatched
+    payload, or malformed hex in either the key or the signature.
+    """
     try:
         public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
         public_key.verify(bytes.fromhex(signature_hex), payload)
@@ -158,6 +199,13 @@ def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) ->
 
 
 class SoukIdentity:
+    """A souk instance's own signing identity, distinct from any provider's.
+
+    Two instances built from different keys are different identities that
+    don't verify each other's signatures; the same key hex produces the
+    same public identity across restarts, letting a provider pin souk by
+    its public key.
+    """
 
     def __init__(self, private_key: Ed25519PrivateKey) -> None:
         self._private_key = private_key
@@ -165,6 +213,11 @@ class SoukIdentity:
 
     @classmethod
     def from_hex(cls, private_key_hex: str) -> "SoukIdentity":
+        """Builds an identity from a 32-byte seed given as 64 hex chars.
+
+        Raises `ValueError` if the string isn't valid hex or doesn't
+        decode to exactly 32 bytes.
+        """
         try:
             raw = bytes.fromhex(private_key_hex)
         except ValueError as e:
@@ -177,9 +230,11 @@ class SoukIdentity:
 
     @staticmethod
     def generate_hex() -> str:
+        """Generates a fresh private key and returns it as a 32-byte hex seed."""
         return Ed25519PrivateKey.generate().private_bytes_raw().hex()
 
     def sign(self, payload: bytes) -> str:
+        """Signs `payload` with this identity's private key, returning the signature as hex."""
         return self._private_key.sign(payload).hex()
 
 

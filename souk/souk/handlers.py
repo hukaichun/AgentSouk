@@ -30,11 +30,19 @@ _EVENT = TypeAdapter(Event)
 
 
 async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
+    """Mark the run "running" once a provider has claimed it."""
     async with souk.session() as session:
         await souk.mark_run_status(session, run.run_id, "running")
 
 
 async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
+    """Validate, persist, and forward a provider event; fail the run on invalid AG-UI.
+
+    An event that doesn't validate as AG-UI drains the run's queue and pushes a `Fail`
+    instead of relaying anything further. A `RUN_FINISHED` carrying an interrupt outcome
+    records it as the run's pause payload; a `RUN_ERROR` is remembered so `_handle_finish`
+    doesn't synthesize a second one.
+    """
     event = cmd.event
     try:
         _EVENT.validate_python(event)
@@ -64,6 +72,12 @@ async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
 
 
 async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
+    """Settle the run's final status and, on success, fold its events into thread messages.
+
+    Status is "input-required" if the run paused, "completed" if it saw `RUN_FINISHED`,
+    "cancelled" if a cancel was requested, else "failed". A run that ends failed without
+    ever having reported its own `RUN_ERROR` gets one synthesized and appended.
+    """
     if run.pause_payload is not None:
         status, metadata = "input-required", run.pause_payload
     elif run.saw_run_finished:
@@ -99,6 +113,12 @@ async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
 
 
 async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
+    """Cancel immediately if no provider has claimed the run yet; otherwise ask the provider to stop.
+
+    A claimed run is marked "cancelling" (not "cancelled") and its `cancel_notify`
+    callback is invoked — souk asks the provider to stop, it does not decide the outcome
+    on its behalf.
+    """
     if run.claimed_by is None:
         async with souk.session() as session:
             await souk.mark_run_status(session, run.run_id, "cancelled")
@@ -112,6 +132,7 @@ async def _handle_cancel(souk: "Souk", run: Run, cmd: RequestCancel) -> None:
 
 
 async def _handle_fail(souk: "Souk", run: Run, cmd: Fail) -> None:
+    """Append a `RUN_ERROR` event carrying `cmd.reason` and mark the run failed with that reason."""
     event = {"type": "RUN_ERROR", "message": cmd.reason}
     run.seq += 1
     async with souk.session() as session:
@@ -121,6 +142,7 @@ async def _handle_fail(souk: "Souk", run: Run, cmd: Fail) -> None:
 
 
 def make_handlers(souk: "Souk") -> HandlerMap:
+    """Build the broker's command-type-to-handler map, bound to this `souk` instance."""
     return {
         Claim: partial(_handle_claim, souk),
         RelayEvent: partial(_handle_relay, souk),

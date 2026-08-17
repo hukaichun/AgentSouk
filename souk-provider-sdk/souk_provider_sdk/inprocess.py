@@ -15,6 +15,7 @@ _MESSAGES = TypeAdapter(list[Message])
 
 
 class InProcessLink(SoukLink):
+    """A `SoukLink` connecting a `ProviderRuntime` directly to an in-process souk instance, with no transport in between."""
 
     def __init__(self, souk: Any, runtime: "ProviderRuntime") -> None:
         self._souk = souk

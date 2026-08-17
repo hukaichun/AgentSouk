@@ -29,6 +29,14 @@ class LlmProviderNotFound(SoukError):
 
 
 class AgentInUse(SoukError):
+    """Raised when deleting an agent is refused because it's still in use.
+
+    `reason` is a machine-readable code distinct from the human-readable
+    message: "connected" (a provider is currently attached to it),
+    "active_run" (it has a run that hasn't reached a terminal status), or
+    "has_history" (it has prior conversation history) even after the
+    provider that served it has since detached.
+    """
 
     def __init__(self, message: str, *, reason: str) -> None:
         super().__init__(message)

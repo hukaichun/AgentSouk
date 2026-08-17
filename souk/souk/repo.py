@@ -36,7 +36,7 @@ def _upsert(session: AsyncSession, table):
 
 
 class ProviderFingerprintTaken(Exception):
-    pass
+    """A provider's public key hashes to a fingerprint another registered public key already holds."""
 
 
 class RunRowMissing(Exception):
@@ -61,6 +61,11 @@ async def get_schema_revision(session: AsyncSession) -> str | None:
 
 
 async def ensure_provider(session: AsyncSession, public_key: str) -> None:
+    """Inserts a `providers` row for `public_key` if one doesn't exist yet; a no-op if it does.
+
+    Raises `ProviderFingerprintTaken` if `public_key` hashes to the same
+    fingerprint as a different public key already on record.
+    """
     now = _utcnow()
     stmt = _upsert(session, providers).values(
         public_key=public_key,
@@ -91,6 +96,17 @@ async def register_agents(
     agents_batch: list[dict[str, Any]],
     provider_name: str | None = None,
 ) -> dict[str, AgentRef]:
+    """Registers or refreshes agents for `public_key`, and returns an `AgentRef` per name.
+
+    Re-registering an already-known (public_key, name) pair updates its
+    card/metadata and `last_seen_at` in place rather than creating a new
+    row, so its `joined_at` stays fixed across repeated calls. An agent
+    previously registered under this key but omitted from `agents_batch`
+    is left untouched, not removed. The same agent name under two
+    different public keys is two independent agents. If `provider_name`
+    is given it updates the provider's display name; otherwise the
+    existing display name (if any) is left as-is.
+    """
     await ensure_provider(session, public_key)
     if provider_name is not None:
         await set_provider_name(session, public_key, provider_name)
@@ -231,6 +247,11 @@ async def get_agent(session: AsyncSession, agent: AgentRef) -> AgentRecord | Non
 
 
 async def resolve_agent(session: AsyncSession, provider: str, name: str) -> AgentRecord | None:
+    """Looks up an agent by name under a provider identified by either its public key or fingerprint.
+
+    Matching is exact and case-sensitive — an uppercased fingerprint does
+    not match. Returns None if nothing matches, rather than raising.
+    """
     row = (
         await session.execute(
             select(
@@ -256,6 +277,11 @@ async def list_agents(
     *,
     stale_hidden_window_seconds: int,
 ) -> list[AgentSummary]:
+    """Lists registered agents, excluding any not seen within `stale_hidden_window_seconds`.
+
+    An agent whose `last_seen_at` falls outside that window is dropped
+    from the listing entirely (not just marked offline).
+    """
     stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_hidden_window_seconds)
     rows = (
         await session.execute(
@@ -368,6 +394,14 @@ async def ensure_thread(
     metadata: dict[str, Any] | None = None,
     create_if_missing: bool = False,
 ) -> str:
+    """Resolves a thread id for `agent`, creating a new thread when `thread_id` is None.
+
+    If `thread_id` is given and exists, it must belong to `agent` — raises
+    `ThreadOwnershipMismatch` otherwise — and its `last_activity_at` is
+    bumped. If `thread_id` is given but doesn't exist, raises
+    `ThreadNotFound` unless `create_if_missing` is set, in which case a
+    new thread is created instead.
+    """
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
         if existing is None:
@@ -492,6 +526,12 @@ async def reopen_run(
 async def mark_run_status(
     session: AsyncSession, run_id: str, status: str, metadata: dict[str, Any] | None = None
 ) -> None:
+    """Sets a run's status (any string, e.g. "input-required"), merging in `metadata` if given.
+
+    Setting "running", "completed", "failed", or "cancelled" also stamps
+    the matching `started_at`/`completed_at` column. Raises
+    `RunRowMissing` if `run_id` doesn't match any row.
+    """
     timestamp_col = {
         "running": "started_at",
         "completed": "completed_at",

@@ -14,6 +14,7 @@ class Provider(Protocol):
 
 @dataclass(frozen=True)
 class DeliveredRun:
+    """The run data handed to a `SoukLink`, translated from souk's internal claimed-run representation."""
 
     run_id: str
     agent_name: str
@@ -41,6 +42,7 @@ class AgentHandle:
 
 
 class HandleProvider:
+    """A `Provider` that dispatches `run_stream` by agent name to the matching `AgentHandle`'s callable."""
 
     def __init__(self, agents: list[AgentHandle]) -> None:
         self.agents = {agent.name: agent for agent in agents}

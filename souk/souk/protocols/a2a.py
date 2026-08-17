@@ -39,6 +39,8 @@ _A2A_METHODS = {method.name for method in pb.DESCRIPTOR.services_by_name["A2ASer
 
 
 def _method(name: str) -> str:
+    """Returns `name` if it is a current `A2AService` RPC method, else raises `RuntimeError` —
+    a guard against the dispatch tables below going stale relative to the installed A2A spec."""
     if name not in _A2A_METHODS:
         raise RuntimeError(
             f"A2AService has no method {name!r} — the spec moved and souk's dispatch is stale. "
@@ -69,6 +71,9 @@ _BINDINGS = frozenset(member.name for member in TransportProtocol)
 
 @dataclass(frozen=True)
 class ServedInterface:
+    """A URL where an agent's A2A endpoint is reachable, together with the A2A transport
+    binding it speaks (e.g. `"JSONRPC"`). Raises `ValueError` if `binding` is not a name A2A's
+    `TransportProtocol` defines."""
 
     url: str
     binding: str
@@ -88,6 +93,9 @@ class A2AAdapter:
     async def agent_card(
         self, agent: AgentRef, interfaces: "list[ServedInterface] | None" = None
     ) -> dict[str, Any]:
+        """Builds the A2A agent card for `agent` as wire JSON, listing `interfaces` as its
+        supported interfaces (omitted from the card entirely if none are given). Raises
+        `AgentNotFound` if `agent` isn't registered."""
         record = await self._souk.get_agent(agent)
         if record is None:
             raise AgentNotFound(f"agent '{agent}' is not registered")
@@ -113,6 +121,10 @@ class A2AAdapter:
         )
 
     async def handle_rpc(self, agent: AgentRef, payload: dict[str, Any]) -> dict[str, Any] | A2AStream:
+        """Dispatches a JSON-RPC A2A request to the matching operation, recognizing each method
+        under every name it has had across spec versions (current `A2AService` names as well as
+        `message/send`-style legacy names). Returns a JSON-RPC error envelope with code -32601
+        for an unrecognized method, or -32001 if the referenced task doesn't exist."""
         method = payload.get("method")
         params = payload.get("params", {})
         rpc_id = payload.get("id")
@@ -165,6 +177,9 @@ class A2AAdapter:
         actor_chain: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Sends `message` to `agent` as a new (or continuing, via `context_id`/`task_id`) A2A
+        task and blocks until it finishes, returning the resulting `Task` as wire JSON. This is
+        the semantic entry point behind the `SendMessage`/`message/send`/`tasks/send` RPC names."""
         run_id, thread_id, is_live = await self._start_run(
             agent, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
@@ -193,6 +208,10 @@ class A2AAdapter:
         actor_chain: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        """Like `send_task` but yields A2A status/artifact updates as the run progresses instead
+        of waiting for completion; behind `SendStreamingMessage`/`message/stream`/
+        `tasks/sendSubscribe`. If the run turns out not to be live (e.g. it was already
+        finished), yields a single status update reflecting its stored status."""
         run_id, thread_id, is_live = await self._start_run(
             agent, _params(message, context_id, task_id, reference_task_ids, actor_chain, metadata)
         )
@@ -214,6 +233,9 @@ class A2AAdapter:
         return results()
 
     async def resubscribe_task(self, agent: AgentRef, task_id: str) -> AsyncIterator[dict[str, Any]]:
+        """Reattaches to an existing task's update stream (`SubscribeToTask`/`tasks/resubscribe`).
+        If the task is no longer live, yields its final stored-status update instead of hanging.
+        Raises `RunNotFound` if `task_id` doesn't belong to `agent`."""
         run = await self._run_of(agent, task_id)
         thread_id = run.thread_id
         events = self._souk.broker.subscribe(task_id) if self._souk.broker.get(task_id) else None
@@ -231,6 +253,8 @@ class A2AAdapter:
         return results()
 
     async def get_task(self, agent: AgentRef, task_id: str) -> dict[str, Any]:
+        """Returns the current `Task` state for `task_id` as wire JSON. Raises `RunNotFound` if
+        `task_id` doesn't belong to `agent`."""
         run = await self._run_of(agent, task_id)
         return build_task(
             task_id,
@@ -241,6 +265,10 @@ class A2AAdapter:
         )
 
     async def cancel_task(self, agent: AgentRef, task_id: str) -> dict[str, Any]:
+        """Requests cancellation of the running task and returns its resulting `Task` state
+        (souk can only ask the provider to stop, not force it, so the returned status reflects
+        whatever the provider actually did). Raises `RunNotFound` if `task_id` doesn't belong to
+        `agent`."""
         run = await self._run_of(agent, task_id)
         self._souk.cancel_run(task_id)
         current = await self._souk.get_run(task_id) or run
@@ -254,6 +282,8 @@ class A2AAdapter:
 
 
     async def _run_of(self, agent: AgentRef, task_id: str) -> dict[str, Any]:
+        """Looks up the run for `task_id`, raising `RunNotFound` if it doesn't exist or belongs
+        to a different agent than `agent`."""
         run = await self._souk.get_run(task_id) if task_id else None
         if run is None or AgentRef(provider_key=run.provider_key, name=run.agent_name) != agent:
             raise RunNotFound(f"no task '{task_id}' for agent '{agent}'")
@@ -264,6 +294,13 @@ class A2AAdapter:
         return record.name if record else agent.name
 
     async def _start_run(self, agent: AgentRef, params: dict) -> tuple[str, str, bool]:
+        """Resolves `params` (a `contextId`/`taskId`/message envelope) to a thread and run,
+        creating or reopening whichever is needed, and returns `(run_id, thread_id, is_live)`.
+        `is_live` is False if an already-active run on the thread was returned as-is instead of
+        starting a new one, or if the agent isn't currently served (in which case the run is
+        recorded as failed). A `referenceTaskIds` entry both anchors thread lineage to the
+        referenced task's thread and, if that task carries a KYOK binding, inherits it for this
+        run."""
         souk = self._souk
         async with souk.session() as session:
             record = await repo.get_agent(session, agent)

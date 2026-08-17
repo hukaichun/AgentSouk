@@ -9,7 +9,8 @@ from souk_provider_sdk.provider import DeliveredRun
 
 
 class SoukLink(ABC):
-
+    """A transport connecting a provider to souk; subclasses must implement every abstract member below
+    (a subclass missing one, e.g. `max_concurrent_runs`, fails to construct with a TypeError)."""
 
     @property
     @abstractmethod
@@ -22,6 +23,7 @@ class SoukLink(ABC):
         pass
 
     async def deliver(self, run: Any) -> bool:
+        """Translates souk's internal claimed-run object into a `DeliveredRun` and hands it to `offer`."""
         return await self.offer(
             DeliveredRun(
                 run_id=run.run_id,

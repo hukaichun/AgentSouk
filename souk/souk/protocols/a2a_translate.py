@@ -28,14 +28,22 @@ def to_wire(message) -> dict[str, Any]:
 
 
 def state_for_run_status(run_status: str):
+    """Maps a souk run status to its A2A `TaskState`, or `TASK_STATE_UNSPECIFIED` for a status
+    (e.g. `"cancelling"`) with no A2A equivalent."""
     return RUN_STATUS_TO_A2A_STATE.get(run_status, pb.TaskState.TASK_STATE_UNSPECIFIED)
 
 
 def status_update_for_run_status(task_id: str, context_id: str, run_status: str) -> dict[str, Any]:
+    """Builds a `TaskStatusUpdateEvent` wire payload reflecting a run's persisted status, with
+    no message or metadata attached."""
     return _status_update(task_id, context_id, state_for_run_status(run_status))
 
 
 def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, Any]]:
+    """Converts one inbound A2A `Message` into a one-element list of AG-UI message dicts,
+    reading its text parts under any A2A spec version's part shape (`text`/`kind: text`/
+    `type: text`) and mapping an agent-authored message to an assistant role, otherwise user.
+    The returned message's id is a placeholder, not derived from the A2A message."""
     raw_role = str(a2a_message.get("role", "")).upper()
     text = "".join(
         part["text"] for part in a2a_message.get("parts", []) if isinstance(part.get("text"), str)
@@ -49,12 +57,19 @@ def a2a_message_to_agui_messages(a2a_message: dict[str, Any]) -> list[dict[str, 
 
 
 def text_delta_of(event: dict[str, Any]) -> tuple[str, str] | None:
+    """Returns `(messageId, text)` if `event` is a text-content AG-UI event, else None."""
     if event.get("type") not in ("TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CHUNK"):
         return None
     return event.get("messageId") or "text", event.get("delta") or event.get("content") or ""
 
 
 def agui_event_to_a2a_update(event: dict[str, Any], task_id: str, context_id: str) -> dict[str, Any]:
+    """Translates one AG-UI run event into an A2A `StreamResponse` wire payload: run lifecycle
+    events become status updates (`RUN_STARTED`->working, `RUN_FINISHED`->completed,
+    `RUN_ERROR`->failed with the error message attached), text-content events become appending
+    artifact updates keyed by message id, and anything else falls back to a working status
+    update carrying the raw AG-UI event under `metadata.agui_event` so it isn't silently
+    dropped."""
     event_type = event.get("type")
 
     if event_type == "RUN_STARTED":
@@ -111,6 +126,8 @@ def _status_update(
 def build_task(
     task_id: str, context_id: str, agent_name: str, run_status: str, run_events: list[dict[str, Any]]
 ) -> dict[str, Any]:
+    """Builds an A2A `Task` wire payload from a run's stored status and event history, merging
+    each message's text-content deltas (in event order) into one artifact per `messageId`."""
     merged: dict[str, list[str]] = {}
     for event in run_events:
         delta = text_delta_of(event)

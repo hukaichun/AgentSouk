@@ -48,6 +48,10 @@ Command = Claim | RelayEvent | FinishStream | RequestCancel | Fail
 
 @dataclass(frozen=True)
 class ProviderQuality:
+    """Per-provider counters of protocol violations observed while dispatching:
+    declining an offer after claiming to have room (misdeclared), taking a run
+    and never ending it (abandoned), not answering an offer within the delivery
+    timeout (unanswered), and acking after souk gave up waiting (answered_late)."""
 
     in_flight: int
     declared: int | None
@@ -59,6 +63,8 @@ class ProviderQuality:
 
 @dataclass
 class _Capacity:
+    """Tracks one provider's in-flight run count against its declared limit.
+    `declared=None` means the provider accepts unlimited concurrent runs."""
 
     declared: int | None
     in_flight: int = 0
@@ -86,6 +92,10 @@ class ConnectedProvider(Protocol):
 
 @dataclass
 class Run:
+    """A broker-side run's mutable dispatch state: its position in the pending
+    queue, which provider (if any) has claimed it, and the in/out queues that
+    feed its `_pipeline` task. Distinct from `ClaimedRun`, the read-only value
+    handed to a provider's `deliver`."""
 
     run_id: str
     agent: AgentRef
@@ -137,6 +147,8 @@ def _request_cancel(run: Run) -> None:
 
 
 async def _drain_run(run: Run) -> AsyncIterator[Any]:
+    """Yields items placed on `run.out_queue` until the END_OF_STREAM sentinel
+    (put there when the run's pipeline finishes), then returns."""
     while True:
         item = await run.out_queue.get()
         if item is END_OF_STREAM:
@@ -145,6 +157,7 @@ async def _drain_run(run: Run) -> AsyncIterator[Any]:
 
 
 async def _no_events() -> AsyncIterator[Any]:
+    """An empty async iterator, returned by `subscribe` for an unknown run_id."""
     return
     yield  # pragma: no cover - what makes this an async generator
 
@@ -152,6 +165,11 @@ async def _no_events() -> AsyncIterator[Any]:
 HandlerMap = dict[type, Callable[[Run, Any], Awaitable[None]]]
 
 async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
+    """Drains `run.in_queue`, dispatching each command to its registered handler
+    in order. Stops after a `FinishStream` or `Fail`, or after a `RequestCancel`
+    for a run nobody has claimed; a `RequestCancel` for a claimed run is handled
+    but the pipeline keeps running, waiting for the eventual terminal command.
+    On exit it signals END_OF_STREAM on `run.out_queue` and calls `owner.forget`."""
     while True:
         cmd = await run.in_queue.get()
         handler = handlers.get(type(cmd))
@@ -171,6 +189,12 @@ async def _pipeline(run: Run, handlers: HandlerMap, owner: "RunBroker") -> None:
 
 
 class RunBroker:
+    """Matches queued runs to connected providers, one agent's pending runs at
+    a time, respecting each provider's declared concurrency, and tracks
+    per-provider quality-of-service counters (`ProviderQuality`). Must be
+    `start()`-ed before `enqueue_run` will accept work; `start`/`stop` may be
+    called across separate event loops as long as they don't overlap."""
+
     def __init__(
         self,
         spawn=None,
@@ -198,6 +222,9 @@ class RunBroker:
 
 
     def start(self) -> None:
+        """Starts the sweep loop if it isn't already running. Recreates the
+        internal wakeup event each time, so a broker built outside a running
+        event loop can still be started and stopped in successive loops."""
         if not self.is_running:
             self._work_to_do = asyncio.Event()
             self._loop_task = self._spawn(self.run_forever(), name="broker-sweep")
@@ -212,6 +239,11 @@ class RunBroker:
             self._loop_task = None
 
     async def run_forever(self) -> None:
+        """Repeatedly expires timed-out queued runs and offers pending runs to
+        their providers, sleeping until new work arrives (`enqueue_run`,
+        `register_provider`) or the queued-run timeout elapses. Swallows and
+        logs any exception other than cancellation so one bad sweep doesn't
+        stop future ones."""
         while True:
             try:
                 self.expire_queued(self.queued_timeout_seconds)
@@ -242,6 +274,9 @@ class RunBroker:
         handlers: HandlerMap | None = None,
         seq: int = 0,
     ) -> Run:
+        """Queues a new run for `agent` and wakes the sweep loop to offer it.
+        Raises `RuntimeError` if the broker hasn't been `start()`-ed, since
+        nothing would ever pick the run up."""
         if not self.is_running:
             raise RuntimeError(
                 f"run {run_id}: this broker is not running, so nothing would ever be "
@@ -265,6 +300,10 @@ class RunBroker:
 
 
     def register_provider(self, mapping: dict[AgentRef, ConnectedProvider]) -> None:
+        """Registers (or replaces) the provider serving each given agent and
+        wakes the sweep loop. A provider re-registering under a key it already
+        has capacity tracking for keeps its existing in-flight count rather
+        than resetting it."""
         self._providers.update(mapping)
         for provider in mapping.values():
             self._capacity.setdefault(
@@ -283,6 +322,10 @@ class RunBroker:
             self._providers.pop(agent, None)
 
     async def _offer_pending(self, agent: AgentRef) -> bool:
+        """Offers `agent`'s queued runs, in order, to its provider until the
+        queue is empty, the provider has no room, or an offer isn't accepted.
+        Skips (and drops) runs that were cancelled while still queued. Returns
+        whether at least one run was placed."""
         placed = False
         while True:
             provider = self._providers.get(agent)
@@ -303,6 +346,11 @@ class RunBroker:
             placed = True
 
     async def _offer(self, run: Run, provider: ConnectedProvider) -> bool:
+        """Delivers `run` to `provider` within `deliver_timeout_seconds` and, if
+        accepted, claims it and starts its pipeline task. A timeout, an
+        exception, or a declined offer all count against the provider's
+        quality counters (unanswered or misdeclared) and return False without
+        claiming the run."""
         capacity = self._capacity.get(provider.public_key)
         try:
             async with asyncio.timeout(self.deliver_timeout_seconds):
@@ -363,6 +411,10 @@ class RunBroker:
         return _snapshot(run) if run is not None else None
 
     def push(self, run_id: str, command: Command) -> bool:
+        """Enqueues `command` on a claimed run's pipeline. Returns False if
+        `run_id` is unknown. Pushing a `Fail` for a run its provider had
+        claimed is recorded as an abandoned run in that provider's quality
+        counters."""
         run = self._runs.get(run_id)
         if run is None:
             return False
@@ -380,10 +432,18 @@ class RunBroker:
         return True
 
     def subscribe(self, run_id: str) -> AsyncIterator[Any]:
+        """Returns an async iterator of whatever is pushed to `run_id`'s
+        out_queue, ending when its pipeline finishes; an empty iterator if
+        `run_id` is unknown."""
         run = self._runs.get(run_id)
         return _drain_run(run) if run is not None else _no_events()
 
     def request_cancel(self, run_id: str) -> bool:
+        """Marks the run cancel-requested immediately, then either forwards a
+        `RequestCancel` into its pipeline (if a provider has claimed it) or, if
+        it is still only queued, runs the `RequestCancel` handler once directly
+        so it still gets recorded and the run ends without ever being offered.
+        Returns False if `run_id` is unknown."""
         run = self._runs.get(run_id)
         if run is None:
             return False
@@ -395,6 +455,9 @@ class RunBroker:
         return True
 
     def expire_queued(self, timeout_seconds: float) -> list[str]:
+        """Removes runs that have been queued (unclaimed) longer than
+        `timeout_seconds`, failing each with `Fail("no_provider_took_it")`, and
+        returns their run_ids."""
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
         expired: list[str] = []
         for queue in list(self._pending_by_agent.values()):
@@ -414,6 +477,10 @@ class RunBroker:
         await self._one_shot(run, RequestCancel())
 
     async def _one_shot(self, run: Run, command: Command) -> None:
+        """Runs a single command's handler directly (bypassing `_pipeline`) for
+        a run that was never claimed, then ends the run the same way the
+        pipeline would: signals END_OF_STREAM and forgets it. Used for expiring
+        queued runs and for cancelling a run before any provider claimed it."""
         handler = (self._handlers.get(run.run_id) or {}).get(type(command))
         if handler is not None:
             try:
@@ -429,6 +496,14 @@ class RunBroker:
         return list(self._runs)
 
     def accept_late_ack(self, run_id: str, claimed_by: str) -> bool:
+        """Lets a provider claim a run after souk already gave up waiting for
+        its answer (e.g. an unanswered offer timed out), as long as the run
+        hasn't already been claimed and `claimed_by` matches the provider
+        currently registered for that agent. On success, removes the run from
+        the pending queue if it's still sitting there, records an
+        `answered_late` quality event, and starts its pipeline. Returns False
+        (without changing anything) if the run is already claimed or
+        `claimed_by` doesn't match."""
         run = self._runs.get(run_id)
         if run is None or run.claimed_by is not None:
             return False
@@ -473,6 +548,10 @@ class RunBroker:
         }
 
     def forget(self, run_id: str) -> None:
+        """Drops a run's tracked state and handlers, frees the claimed
+        provider's in-flight capacity (if any, waking the sweep loop so its
+        freed place can be offered again), and notifies forget listeners.
+        Safe to call for a run that isn't tracked."""
         run = self._runs.pop(run_id, None)
         self._handlers.pop(run_id, None)
         if run is not None and run.claimed_by is not None:

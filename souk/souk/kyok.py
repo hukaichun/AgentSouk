@@ -24,6 +24,11 @@ class KyokToken:
 
 
 def issue_kyok_token(run_id: str, agent: AgentRef, signing_secret: str) -> str:
+    """Build a `body.signature` token binding `run_id` and `agent`, expiring after `KYOK_TOKEN_TTL_SECONDS`.
+
+    `body` is a base64url JSON object with exactly `runId`, `providerKey`, `agentName`,
+    and `exp`; `signature` is an HMAC-SHA256 of `body` keyed by `signing_secret`.
+    """
     body = base64.urlsafe_b64encode(
         json.dumps(
             {
@@ -39,6 +44,12 @@ def issue_kyok_token(run_id: str, agent: AgentRef, signing_secret: str) -> str:
 
 
 def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
+    """Return the decoded (run_id, agent) if `token` is well-formed, correctly signed, and unexpired.
+
+    Returns None for a token that doesn't split into `body.signature`, fails signature
+    verification, has expired (`exp` in the past), isn't valid JSON/base64, or is missing
+    any of `runId`/`providerKey`/`agentName` as strings.
+    """
     try:
         body, signature = token.split(".", 1)
     except ValueError:
@@ -64,6 +75,7 @@ def verify_kyok_token(token: str, signing_secret: str) -> KyokToken | None:
 
 
 class KyokOptIn(BaseModel):
+    """A run's opt-in into KYOK: which LLM offering to bind to, plus opaque caller context."""
 
     model_config = ConfigDict(frozen=True, extra="allow", populate_by_name=True)
 
@@ -72,6 +84,7 @@ class KyokOptIn(BaseModel):
 
 
 def parse_kyok_opt_in(metadata: dict) -> KyokOptIn | None:
+    """Parse `metadata["kyok"]` into a `KyokOptIn`, or None if absent or malformed (never raises)."""
     raw = metadata.get("kyok")
     if not isinstance(raw, dict):
         return None
@@ -85,6 +98,7 @@ def parse_kyok_opt_in(metadata: dict) -> KyokOptIn | None:
 
 
 def strip_kyok_context(metadata: dict) -> dict:
+    """Return a copy of `metadata` with `kyok.context` removed, leaving everything else untouched."""
     kyok = metadata.get("kyok")
     if isinstance(kyok, dict) and "context" in kyok:
         return {**metadata, "kyok": {k: v for k, v in kyok.items() if k != "context"}}
@@ -99,12 +113,14 @@ class KyokForwardedProps(BaseModel):
 
 
 def kyok_forwarded_props(run_id: str, agent: AgentRef, signing_secret: str) -> dict[str, Any]:
+    """Issue a KYOK token for the run and wrap it as the dict to send under the `kyok` forwarded prop."""
     return KyokForwardedProps(
         token=issue_kyok_token(run_id, agent, signing_secret)
     ).model_dump()
 
 
 def read_kyok_forwarded_props(forwarded_props: Any) -> KyokForwardedProps | None:
+    """Extract the `kyok` entry from `forwarded_props`, or None if missing, not a dict, or invalid."""
     if not isinstance(forwarded_props, dict):
         return None
     raw = forwarded_props.get("kyok")
@@ -143,6 +159,7 @@ class ConnectedLLMProvider(Protocol):
 
 
 class KyokRelay:
+    """Tracks which LLM offering each in-flight run is bound to, and which links serve each offering."""
 
     def __init__(self) -> None:
         self._bindings: dict[str, KyokBinding] = {}
@@ -156,6 +173,10 @@ class KyokRelay:
         return self._bindings.get(run_id)
 
     def inherit(self, parent_run_id: str, child_run_id: str, actor_chain: list[str] | None) -> bool:
+        """Bind `child_run_id` to the parent run's offering and context, with its own `actor_chain`.
+
+        Returns False (and binds nothing) if the parent run has no binding.
+        """
         parent = self._bindings.get(parent_run_id)
         if parent is None:
             return False
@@ -174,6 +195,7 @@ class KyokRelay:
         self._links.update(mapping)
 
     def detach(self, public_key: str) -> None:
+        """Remove every offering currently linked to `public_key`."""
         for ref in [r for r in self._links if r.provider_key == public_key]:
             del self._links[ref]
 
