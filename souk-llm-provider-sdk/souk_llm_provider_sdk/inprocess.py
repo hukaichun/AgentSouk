@@ -21,5 +21,8 @@ class InProcessLLMProvider(SoukLLMLink):
     def public_key(self) -> str:
         return self._identity.public_key
 
+    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
+        return self._identity.sign_connect(souk_nonce, provider_nonce, names)
+
     def serve(self, delivered: DeliveredCompletion) -> AsyncIterator[ChatCompletionChunk]:
         return self._llm(delivered)

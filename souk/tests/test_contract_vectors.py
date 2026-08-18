@@ -98,3 +98,20 @@ def test_the_published_wire_frames_are_what_the_ports_translate_to():
         DeliveredCompletion.from_request(request).model_dump(mode="json", by_alias=True)
         == completion_wire
     )
+
+
+def test_the_published_chain_verifies_and_names_exactly_the_published_actors():
+    from souk.identity import verify_actor_chain
+
+    (vector,) = [c for c in VECTORS["chains"] if c["kind"] == "actor-chain"]
+
+    result = verify_actor_chain(vector["chain"])
+
+    assert result.subject == vector["subject"]
+    assert result.actor_public_keys == vector["actor_public_keys"]
+
+
+def test_cross_party_formats_without_a_domain_tag_are_vectored_too():
+    """The tag scan can't see formats that aren't tagged strings — this pins the rest by name."""
+    assert {c["kind"] for c in VECTORS.get("chains", [])} == {"actor-chain"}
+    assert {w["kind"] for w in VECTORS.get("wire", [])} == {"delivered-run", "delivered-completion"}

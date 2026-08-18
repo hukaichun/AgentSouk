@@ -62,3 +62,30 @@ def test_the_delivered_run_frame_round_trips_through_the_declared_model():
     assert model.agent_name == frame["agentName"]
     assert model.run_input.thread_id == frame["runInput"]["threadId"]
     assert model.model_dump(mode="json", by_alias=True) == frame
+
+
+def test_the_published_chain_verifies_here_too_and_can_be_reproduced():
+    import jwt as _jwt
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey as _Key
+
+    from souk_provider_sdk import verify_chain
+
+    (vector,) = [c for c in VECTORS["chains"] if c["kind"] == "actor-chain"]
+
+    result = verify_chain(vector["chain"])
+    assert result.subject == vector["subject"]
+    assert result.actor_public_keys == vector["actor_public_keys"]
+
+    first_key = _Key.from_private_bytes(bytes.fromhex(vector["inputs"]["hop_private_keys_hex"][0]))
+    reproduced = _jwt.encode(
+        {
+            "subject": vector["inputs"]["subject"],
+            "actorPublicKey": vector["actor_public_keys"][0],
+            "prevHash": None,
+            "iat": vector["inputs"]["iat"],
+            "exp": vector["inputs"]["exp"],
+        },
+        first_key,
+        algorithm="EdDSA",
+    )
+    assert reproduced == vector["chain"][0]

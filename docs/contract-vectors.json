@@ -148,5 +148,35 @@
         "actorChain": null
       }
     }
+  ],
+  "chains": [
+    {
+      "kind": "actor-chain",
+      "note": "a two-hop actor chain both verifiers (souk.identity.verify_actor_chain and souk_provider_sdk.verify_chain) must accept, yielding exactly this subject and these actors in order. exp is far-future so the vector stays valid; iat is fixed; EdDSA is deterministic, so an implementation with the second key can reproduce the hops byte-for-byte. Hop keys: a5*32 (the test key) and b6*32.",
+      "inputs": {
+        "subject": {
+          "type": "user",
+          "id": "employee_x"
+        },
+        "hop_private_keys_hex": [
+          "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+          "b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6"
+        ],
+        "iat": 1755500000,
+        "exp": 9999999999
+      },
+      "chain": [
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWJqZWN0Ijp7InR5cGUiOiJ1c2VyIiwiaWQiOiJlbXBsb3llZV94In0sImFjdG9yUHVibGljS2V5IjoiMjllNTgzM2E5MTVhNjQyOWE0ZTNhNzk0ODQ3NWMzMzhlZjQzNmViODJiZTg5YzkyZjA1OTcwNDQwM2RiOWQ1NSIsInByZXZIYXNoIjpudWxsLCJpYXQiOjE3NTU1MDAwMDAsImV4cCI6OTk5OTk5OTk5OX0.9RjpRnlaZYkmZuL4JI0moVqpCPcgRKtwfCg8SKoN7KOZBpJqOOgYHl2hDw5gC9XLvBz_H5GIEK6Nj7E-TzE7Bg",
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWJqZWN0Ijp7InR5cGUiOiJ1c2VyIiwiaWQiOiJlbXBsb3llZV94In0sImFjdG9yUHVibGljS2V5IjoiODA1NDQwZWU0ODA1MWZjODJlYTY0ZDkwNWFjYWJmZjBkMjE3ODBmN2ZjYWJhNjkwMGUwZTQxMzg3YjFkNGE1NyIsInByZXZIYXNoIjoiZmFhMGEwOTY2NGZjMGJmNGZkYjAzMzdjZmVmMGM0ZTJjNmI2MjYwOTAxMGQzMThhY2VhNWFjMWM5YTU5MTlmMCIsImlhdCI6MTc1NTUwMDAwMCwiZXhwIjo5OTk5OTk5OTk5fQ.8sTKCVbiqc9tS02w7aB75PZ9xYOjAO2JJezsMoy5_SF2TIrxwAvDmqpQjx7xXkvLCRygA_ct3WAnRUvUltuyAQ"
+      ],
+      "subject": {
+        "type": "user",
+        "id": "employee_x"
+      },
+      "actor_public_keys": [
+        "29e5833a915a6429a4e3a7948475c338ef436eb82be89c92f059704403db9d55",
+        "805440ee48051fc82ea64d905acabff0d21780f7fcaba6900e0e41387b1d4a57"
+      ]
+    }
   ]
 }

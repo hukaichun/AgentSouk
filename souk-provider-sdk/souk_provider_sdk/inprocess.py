@@ -31,6 +31,9 @@ class InProcessLink(SoukLink):
     def max_concurrent_runs(self) -> int | None:
         return self._runtime.max_concurrent_runs
 
+    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
+        return self._runtime.identity.sign_connect(souk_nonce, provider_nonce, names)
+
     async def offer(self, run: "DeliveredRun") -> bool:
         return await self._runtime.deliver(run)
 
