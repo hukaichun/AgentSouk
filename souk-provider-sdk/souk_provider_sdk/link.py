@@ -11,7 +11,16 @@ from souk_provider_sdk.provider import DeliveredRun, Refusal
 
 class SoukLink(ABC):
     """A transport connecting a provider to souk; subclasses must implement every abstract member below
-    (a subclass missing one, e.g. `max_concurrent_runs`, fails to construct with a TypeError)."""
+    (a subclass missing one, e.g. `max_concurrent_runs`, fails to construct with a TypeError).
+
+    A link that crosses a process boundary must authenticate its open
+    against a challenge the verifier chose — sign
+    `provider_connect_payload` (and check souk's `souk_connect_payload`
+    answer against the souk key you pinned). A self-chosen timestamp is not
+    a challenge; a signature over one is replayable for its whole freshness
+    window. `InProcessLink` skips this only because there is no boundary to
+    cross.
+    """
 
     @property
     @abstractmethod

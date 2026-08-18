@@ -60,6 +60,30 @@
       },
       "payload_utf8": "souk-kyok-call:bearer-token-abc:1755500000:aafe81911c246dac10c95e15f6e50babce5f562d691953e0185c372e973940e1",
       "signature_hex": "e8d7f35d277f5fbd0ba2d631039c09cca3b9e3af479f29ea760be6b8188755fc4313766513f2669852227665217bd62655b55e69817f2cc63ad7105c32d58d0f"
+    },
+    {
+      "kind": "provider-connect",
+      "inputs": {
+        "souk_nonce": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7",
+        "provider_nonce": "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+        "names": [
+          "translator",
+          "summarizer"
+        ],
+        "note": "souk_nonce is chosen by the souk being connected to; names are sorted before joining"
+      },
+      "payload_utf8": "souk-connect-provider:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9:summarizer,translator",
+      "signature_hex": "ac86077777ea7fb30d513249c161dda812f50a1bc657b6e12424cec16c1b83052333c32c2ecc80181745d164249d3dec4d1b758fa4f1b413fbbb341e0102cb0d"
+    },
+    {
+      "kind": "souk-connect",
+      "inputs": {
+        "souk_nonce": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7",
+        "provider_nonce": "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+        "note": "signed by souk's own identity key; the test key stands in for it here"
+      },
+      "payload_utf8": "souk-connect-souk:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+      "signature_hex": "61cdcc66101b30e0a4587623fb63f54f10b05d21681e4dc151a79aa60838bb8637bbb993f1284ab6ee131ce0c794493ab30277e6ab324764fd3f337cc528be02"
     }
   ]
 }

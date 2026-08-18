@@ -40,6 +40,8 @@ _REGISTER_LLM = "souk-register-llm"
 _DELETE_AGENT = "souk-delete-agent"
 _DELETE_LLM = "souk-delete-llm"
 _KYOK_CALL = "souk-kyok-call"
+_CONNECT_PROVIDER = "souk-connect-provider"
+_CONNECT_SOUK = "souk-connect-souk"
 
 
 def _roster_registration_payload(tag: str, names: list[str], timestamp: int) -> bytes:
@@ -86,6 +88,39 @@ def llm_deletion_signing_payload(name: str, timestamp: int) -> bytes:
     must agree byte-for-byte.
     """
     return f"{_DELETE_LLM}:{name}:{timestamp}".encode()
+
+
+def provider_connect_signing_payload(
+    souk_nonce: str, provider_nonce: str, names: list[str]
+) -> bytes:
+    """Builds the canonical bytes a provider signs to authenticate opening a link.
+
+    Freshness is the verifier's: `souk_nonce` is chosen by the souk being
+    connected to, so a recorded exchange is worthless to whoever recorded
+    it. `provider_nonce` is the provider's own challenge for souk's answering
+    proof, and the names the provider intends to serve are bound in (sorted,
+    order-independent) so they cannot be altered in flight. The role in the
+    domain tag keeps this proof and souk's from ever being the same bytes,
+    and the tag keeps it unmistakable for a registration or deletion.
+    `souk_provider_sdk.identity.provider_connect_payload` computes this same
+    payload independently on the provider side and both must agree
+    byte-for-byte.
+    """
+    return f"{_CONNECT_PROVIDER}:{souk_nonce}:{provider_nonce}:{','.join(sorted(names))}".encode()
+
+
+def souk_connect_signing_payload(souk_nonce: str, provider_nonce: str) -> bytes:
+    """Builds the canonical bytes souk signs (with `SoukIdentity`) to prove itself to a connecting provider.
+
+    Covers the provider's nonce (the provider chose the freshness) and
+    souk's own, under a role tag distinct from the provider's proof so
+    neither can be reflected as the other. This is the payload behind
+    "letting a provider pin souk by its public key": a provider verifies it
+    against the souk key it pinned before producing anything worth
+    stealing. `souk_provider_sdk.identity.souk_connect_payload` computes
+    this same payload independently and both must agree byte-for-byte.
+    """
+    return f"{_CONNECT_SOUK}:{souk_nonce}:{provider_nonce}".encode()
 
 
 def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
