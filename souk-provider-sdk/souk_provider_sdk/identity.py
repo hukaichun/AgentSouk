@@ -29,9 +29,31 @@ def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) ->
         return False
 
 
+def roster_registration_payload(tag: str, names: list[str], timestamp: int) -> bytes:
+    """One payload shape for registering any roster of served names: sorted (order-independent), joined with `timestamp`, under a domain `tag`.
+
+    Both rosters sign these bytes — agents under `souk-register`, LLM
+    offerings under `souk-register-llm` — and the tag is what keeps a
+    signature for one roster unreplayable as the other.
+    """
+    return f"{tag}:{','.join(sorted(names))}:{timestamp}".encode()
+
+
+def sign_roster_registration(
+    identity: "ProviderIdentity", tag: str, names: list[str], timestamp: int | None = None
+) -> tuple[str, int]:
+    """Signs a roster registration payload, defaulting the timestamp to now.
+
+    Returns the `(signature, timestamp)` pair actually signed over, so callers
+    can send both to the verifier.
+    """
+    timestamp = int(time.time()) if timestamp is None else timestamp
+    return identity.sign(roster_registration_payload(tag, names, timestamp)), timestamp
+
+
 def registration_payload(agent_names: list[str], timestamp: int) -> bytes:
-    """Builds the canonical bytes signed for registration: names sorted (order-independent) and joined with `timestamp`."""
-    return f"{_REGISTER}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+    """Builds the canonical bytes signed for registering agents: `roster_registration_payload` under the agent tag."""
+    return roster_registration_payload(_REGISTER, agent_names, timestamp)
 
 
 def deletion_payload(agent_name: str, timestamp: int) -> bytes:
@@ -77,8 +99,7 @@ class ProviderIdentity:
 
     def sign_registration(self, agent_names: list[str], timestamp: int | None = None) -> tuple[str, int]:
         """Signs `registration_payload(agent_names, timestamp)` (current time if `timestamp` is None) and returns (signature_hex, timestamp)."""
-        timestamp = int(time.time()) if timestamp is None else timestamp
-        return self._private_key.sign(registration_payload(agent_names, timestamp)).hex(), timestamp
+        return sign_roster_registration(self, _REGISTER, agent_names, timestamp)
 
     def sign_deletion(self, agent_name: str, timestamp: int | None = None) -> tuple[str, int]:
         timestamp = int(time.time()) if timestamp is None else timestamp

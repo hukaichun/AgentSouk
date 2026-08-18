@@ -41,27 +41,30 @@ _DELETE_AGENT = "souk-delete-agent"
 _KYOK_CALL = "souk-kyok-call"
 
 
-def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
-    """Builds the canonical bytes a provider must sign to prove it holds the key it registers with.
+def _roster_registration_payload(tag: str, names: list[str], timestamp: int) -> bytes:
+    """One payload shape for registering a roster of served names: sorted (order-independent), joined with `timestamp`, under a domain `tag`.
 
-    Names are sorted so the payload doesn't depend on list order. The
-    domain tag keeps this payload from colliding with a deletion payload
-    for the same names/timestamp — a registration signature must not be
-    replayable as a deletion order.
+    The tag is what keeps the payload spaces apart — a signature for one
+    roster (or a deletion order) must not be replayable as another.
+    `souk_provider_sdk.identity.roster_registration_payload` computes this
+    same shape independently on the provider side and both must agree
+    byte-for-byte.
     """
-    return f"{_REGISTER}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+    return f"{tag}:{','.join(sorted(names))}:{timestamp}".encode()
+
+
+def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
+    """Builds the canonical bytes a provider must sign to prove it holds the key it registers with: `_roster_registration_payload` under the agent tag."""
+    return _roster_registration_payload(_REGISTER, agent_names, timestamp)
 
 
 def llm_registration_signing_payload(names: list[str], timestamp: int) -> bytes:
-    """Builds the canonical bytes an LLM provider must sign to register `names`.
+    """Builds the canonical bytes an LLM provider must sign to register `names`: `_roster_registration_payload` under the LLM tag.
 
-    Uses a distinct domain tag from `registration_signing_payload` (agent
-    providers), and sorts names the same way, so the two payload spaces
-    never collide even for identical names/timestamp. `souk_llm_provider_sdk`
-    computes this same payload independently on the provider side and
-    both must agree byte-for-byte.
+    `souk_llm_provider_sdk` computes this same payload independently on the
+    provider side and both must agree byte-for-byte.
     """
-    return f"{_REGISTER_LLM}:{','.join(sorted(names))}:{timestamp}".encode()
+    return _roster_registration_payload(_REGISTER_LLM, names, timestamp)
 
 
 def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:

@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import time
-
-from souk_provider_sdk.identity import ProviderIdentity
+from souk_provider_sdk.identity import (
+    ProviderIdentity,
+    roster_registration_payload,
+    sign_roster_registration,
+)
 
 _REGISTER_LLM = "souk-register-llm"
 
 
 def llm_registration_payload(names: list[str], timestamp: int) -> bytes:
-    """Builds the bytes to sign for registering as an LLM provider under `names`.
-
-    Names are sorted before joining, so registration order does not affect the
-    payload or its signature.
-    """
-    return f"{_REGISTER_LLM}:{','.join(sorted(names))}:{timestamp}".encode()
+    """Builds the bytes to sign for registering as an LLM provider under `names`: `roster_registration_payload` under the LLM tag."""
+    return roster_registration_payload(_REGISTER_LLM, names, timestamp)
 
 
 def sign_llm_registration(
@@ -24,5 +22,4 @@ def sign_llm_registration(
     Returns the `(signature, timestamp)` pair actually signed over, so callers
     can send both to the verifier.
     """
-    timestamp = int(time.time()) if timestamp is None else timestamp
-    return identity.sign(llm_registration_payload(names, timestamp)), timestamp
+    return sign_roster_registration(identity, _REGISTER_LLM, names, timestamp)
