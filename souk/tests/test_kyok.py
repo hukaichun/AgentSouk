@@ -232,13 +232,14 @@ def test_inherit_copies_offering_and_context_with_the_childs_own_chain():
     assert relay.binding_for("run_x") is None
 
 
-def test_detach_removes_every_offering_of_that_identity():
+def test_withdrawing_everything_served_by_an_identity_empties_its_offerings():
     relay = KyokRelay()
     link = _Link()
     fast = LlmRef(provider_key=link.public_key, name="fast")
     relay.attach({_GPT4: link, fast: link})
     assert relay.serving(_GPT4) is link
-    relay.detach(link.public_key)
+    assert sorted(r.name for r in relay.served_by(link.public_key)) == ["fast", "gpt4"]
+    relay.withdraw(relay.served_by(link.public_key))
     assert relay.serving(_GPT4) is None
     assert relay.serving(fast) is None
     assert relay._links == {}

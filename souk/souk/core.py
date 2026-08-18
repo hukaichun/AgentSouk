@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Callable
@@ -106,6 +107,169 @@ def _complete_run_agent_input(thread_id: str, run_id: str, run_input: dict[str, 
     )
 
 
+class _Roster(abc.ABC):
+    """One live roster of served names, stated once for both vocabularies.
+
+    The agent roster and the LLM-offering roster share these semantics:
+    registration is signed and fresh, and re-registering a subset withdraws
+    the omitted names from live serving; attaching requires prior
+    registration, touches, and announces; detaching is a silent no-op when
+    nothing is served. The steps live here because two hand-kept copies
+    drifted twice — a member-by-member fix first, then a probe catching the
+    withdraw step missing on the LLM side — and a copy of a base can't
+    drop a step.
+    """
+
+    party: str
+    served: str
+
+    def __init__(self, souk: "Souk") -> None:
+        self._souk = souk
+
+    @abc.abstractmethod
+    def signing_payload(self, names: list[str], timestamp: int) -> bytes: ...
+
+    @abc.abstractmethod
+    async def registered_names(self, session: AsyncSession, public_key: str) -> set[str]: ...
+
+    @abc.abstractmethod
+    async def touch(self, session: AsyncSession, public_key: str, names: list[str]) -> None: ...
+
+    @abc.abstractmethod
+    def ref(self, public_key: str, name: str) -> Any: ...
+
+    @abc.abstractmethod
+    def served_by(self, public_key: str) -> list[Any]: ...
+
+    @abc.abstractmethod
+    def write_live(self, mapping: dict[Any, Any]) -> None: ...
+
+    @abc.abstractmethod
+    def withdraw(self, refs: list[Any]) -> None: ...
+
+    @abc.abstractmethod
+    def not_found(self, message: str) -> Exception: ...
+
+    @abc.abstractmethod
+    def changed(self) -> ChangeEvent: ...
+
+    async def register(
+        self,
+        public_key: str,
+        signature: str,
+        timestamp: int,
+        names: list[str],
+        store: Callable[[AsyncSession], Any],
+    ) -> Any:
+        """Verify the signed registration, run `store`, withdraw omitted live names, announce."""
+        if not is_timestamp_fresh(timestamp):
+            raise InvalidRegistration("registration timestamp too far from souk's clock")
+        if not verify_signature(public_key, signature, self.signing_payload(names, timestamp)):
+            raise InvalidRegistration(f"invalid {self.party} registration signature")
+        async with self._souk.session() as session:
+            registered = await store(session)
+        withdrawn = [r for r in self.served_by(public_key) if r.name not in registered]
+        if withdrawn:
+            self.withdraw(withdrawn)
+        self._souk._notify_change(self.changed())
+        return registered
+
+    async def attach(self, connection: Any, names: list[str]) -> None:
+        """Connect `connection` as the live server for its already-registered `names`."""
+        if not names:
+            raise ValueError(
+                f"{self.party} '{connection.public_key}' attached with no {self.served} — "
+                "there would be nothing to serve"
+            )
+        async with self._souk.session() as session:
+            registered = await self.registered_names(session, connection.public_key)
+        unknown = sorted(set(names) - registered)
+        if unknown:
+            raise self.not_found(
+                f"{self.party} '{connection.public_key}' has not registered {unknown} — "
+                "register before attaching, in-process or not"
+            )
+        self.write_live({self.ref(connection.public_key, n): connection for n in names})
+        async with self._souk.session() as session:
+            await self.touch(session, connection.public_key, names)
+            await session.commit()
+        self._souk._notify_change(self.changed())
+
+    def detach(self, public_key: str) -> None:
+        """Take everything served by `public_key` offline; a no-op (no change event) if nothing is."""
+        attached = self.served_by(public_key)
+        if not attached:
+            return
+        self.withdraw(attached)
+        self._souk._notify_change(self.changed())
+
+
+class _AgentRoster(_Roster):
+
+    party = "provider"
+    served = "agent names"
+
+    def signing_payload(self, names: list[str], timestamp: int) -> bytes:
+        return registration_signing_payload(names, timestamp)
+
+    async def registered_names(self, session: AsyncSession, public_key: str) -> set[str]:
+        return await repo.get_agent_names_for_provider(session, public_key)
+
+    async def touch(self, session: AsyncSession, public_key: str, names: list[str]) -> None:
+        await repo.touch_agents(session, public_key, names)
+
+    def ref(self, public_key: str, name: str) -> AgentRef:
+        return AgentRef(provider_key=public_key, name=name)
+
+    def served_by(self, public_key: str) -> list[AgentRef]:
+        return self._souk.broker.agents_served_by(public_key)
+
+    def write_live(self, mapping: dict[Any, Any]) -> None:
+        self._souk.broker.register_provider(mapping)
+
+    def withdraw(self, refs: list[Any]) -> None:
+        self._souk.broker.unregister_provider(refs)
+
+    def not_found(self, message: str) -> Exception:
+        return AgentNotFound(message)
+
+    def changed(self) -> ChangeEvent:
+        return RosterChanged()
+
+
+class _LlmRoster(_Roster):
+
+    party = "LLM provider"
+    served = "model names"
+
+    def signing_payload(self, names: list[str], timestamp: int) -> bytes:
+        return llm_registration_signing_payload(names, timestamp)
+
+    async def registered_names(self, session: AsyncSession, public_key: str) -> set[str]:
+        return await repo.get_llm_names_for_key(session, public_key)
+
+    async def touch(self, session: AsyncSession, public_key: str, names: list[str]) -> None:
+        await repo.touch_llm_providers(session, public_key, names)
+
+    def ref(self, public_key: str, name: str) -> LlmRef:
+        return LlmRef(provider_key=public_key, name=name)
+
+    def served_by(self, public_key: str) -> list[LlmRef]:
+        return self._souk.kyok_relay.served_by(public_key)
+
+    def write_live(self, mapping: dict[Any, Any]) -> None:
+        self._souk.kyok_relay.attach(mapping)
+
+    def withdraw(self, refs: list[Any]) -> None:
+        self._souk.kyok_relay.withdraw(refs)
+
+    def not_found(self, message: str) -> Exception:
+        return LlmProviderNotFound(message)
+
+    def changed(self) -> ChangeEvent:
+        return LlmRosterChanged()
+
+
 class Souk:
     """The network-free facade: agent/LLM-provider rosters, threads, runs, and dispatch."""
 
@@ -121,6 +285,8 @@ class Souk:
         self.broker = broker or RunBroker(spawn=self.spawn)
         self.kyok_relay = KyokRelay()
         self.broker.add_forget_listener(self.kyok_relay.discard)
+        self._agent_roster = _AgentRoster(self)
+        self._llm_roster = _LlmRoster(self)
         self._tasks: set[asyncio.Task] = set()
         self._started = False
         self._change_subscribers: set[Callable[[ChangeEvent], None]] = set()
@@ -228,25 +394,15 @@ class Souk:
 
         Raises `InvalidRegistration` if the timestamp is stale or the signature doesn't verify.
         """
-        if not is_timestamp_fresh(timestamp):
-            raise InvalidRegistration("registration timestamp too far from souk's clock")
-        payload = registration_signing_payload([a["name"] for a in agents], timestamp)
-        if not verify_signature(public_key, signature, payload):
-            raise InvalidRegistration("invalid registration signature")
-
-        async with self.session() as session:
-            registered = await repo.register_agents(
-                session,
-                public_key,
-                agents,
-                provider_name=provider_name,
-            )
-        withdrawn = [
-            a for a in self.broker.agents_served_by(public_key) if a.name not in registered
-        ]
-        if withdrawn:
-            self.broker.unregister_provider(withdrawn)
-        self._notify_change(RosterChanged())
+        registered = await self._agent_roster.register(
+            public_key,
+            signature,
+            timestamp,
+            [a["name"] for a in agents],
+            store=lambda session: repo.register_agents(
+                session, public_key, agents, provider_name=provider_name
+            ),
+        )
         return Registration(agents=registered)
 
     async def delete_agent(
@@ -344,32 +500,7 @@ class Souk:
         Raises `ValueError` for an empty list and `AgentNotFound` if any name was never
         registered under this provider's key — attaching does not implicitly register.
         """
-        if not agent_names:
-            raise ValueError(
-                f"provider '{provider.public_key}' attached with no agent names — "
-                "there would be nothing to serve"
-            )
-        async with self.session() as session:
-            registered = await repo.get_agent_names_for_provider(
-                session, provider.public_key
-            )
-        unknown = sorted(set(agent_names) - registered)
-        if unknown:
-            raise AgentNotFound(
-                f"provider '{provider.public_key}' has not registered {unknown} — "
-                "register before attaching, in-process or not"
-            )
-
-        self.broker.register_provider(
-            {
-                AgentRef(provider_key=provider.public_key, name=name): provider
-                for name in agent_names
-            }
-        )
-        async with self.session() as session:
-            await repo.touch_agents(session, provider.public_key, agent_names)
-            await session.commit()
-        self._notify_change(RosterChanged())
+        await self._agent_roster.attach(provider, agent_names)
 
     async def register_llm_providers(
         self,
@@ -379,18 +510,20 @@ class Souk:
         names: list[str],
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, LlmRef]:
-        """Verify the signed registration and store `names` as LLM offerings for this key."""
-        if not is_timestamp_fresh(timestamp):
-            raise InvalidRegistration("registration timestamp too far from souk's clock")
-        payload = llm_registration_signing_payload(names, timestamp)
-        if not verify_signature(public_key, signature, payload):
-            raise InvalidRegistration("invalid LLM provider registration signature")
-        async with self.session() as session:
-            registered = await repo.register_llm_providers(
+        """Verify the signed registration and store `names` as LLM offerings for this key.
+
+        An attached offering omitted from this batch is withdrawn from live
+        serving (it stays registered in the database), same as agents.
+        """
+        return await self._llm_roster.register(
+            public_key,
+            signature,
+            timestamp,
+            names,
+            store=lambda session: repo.register_llm_providers(
                 session, public_key, names, metadata
-            )
-        self._notify_change(LlmRosterChanged())
-        return registered
+            ),
+        )
 
     async def attach_llm_provider(
         self, link: ConnectedLLMProvider, model_names: list[str]
@@ -400,44 +533,15 @@ class Souk:
         Raises `ValueError` for an empty list and `LlmProviderNotFound` if any name was
         never registered under this key.
         """
-        if not model_names:
-            raise ValueError(
-                f"LLM provider '{link.public_key}' attached with no model names — "
-                "there would be nothing to serve"
-            )
-        async with self.session() as session:
-            registered = await repo.get_llm_names_for_key(session, link.public_key)
-        unknown = sorted(set(model_names) - registered)
-        if unknown:
-            raise LlmProviderNotFound(
-                f"LLM provider '{link.public_key}' has not registered {unknown} — "
-                "register before attaching, in-process or not"
-            )
-        self.kyok_relay.attach(
-            {
-                LlmRef(provider_key=link.public_key, name=name): link
-                for name in model_names
-            }
-        )
-        async with self.session() as session:
-            await repo.touch_llm_providers(session, link.public_key, model_names)
-            await session.commit()
-        self._notify_change(LlmRosterChanged())
+        await self._llm_roster.attach(link, model_names)
 
     def detach_llm_provider(self, public_key: str) -> None:
         """Remove every model offering served by `public_key`; a no-op (no change event) if none."""
-        if not self.kyok_relay.serving_any(public_key):
-            return
-        self.kyok_relay.detach(public_key)
-        self._notify_change(LlmRosterChanged())
+        self._llm_roster.detach(public_key)
 
     async def detach_provider(self, provider_public_key: str) -> None:
         """Take every agent served by `provider_public_key` offline; a no-op if it's serving nothing."""
-        attached = self.broker.agents_served_by(provider_public_key)
-        if not attached:
-            return
-        self.broker.unregister_provider(attached)
-        self._notify_change(RosterChanged())
+        self._agent_roster.detach(provider_public_key)
 
 
     def on_change(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:

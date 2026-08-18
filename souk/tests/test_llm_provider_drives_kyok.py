@@ -398,6 +398,27 @@ async def test_attach_touches_and_announces_like_attach_provider(souk):
         unsubscribe()
 
 
+async def test_reregistering_a_subset_withdraws_the_omitted_offering(souk):
+    identity = ProviderIdentity.generate()
+    signature, timestamp = sign_llm_registration(identity, ["gpt4", "gpt5"])
+    await souk.register_llm_providers(
+        identity.public_key, signature, timestamp, ["gpt4", "gpt5"]
+    )
+    await souk.attach_llm_provider(
+        InProcessLLMProvider(identity, StubLLM()), ["gpt4", "gpt5"]
+    )
+
+    signature, timestamp = sign_llm_registration(identity, ["gpt4"])
+    await souk.register_llm_providers(identity.public_key, signature, timestamp, ["gpt4"])
+
+    kept = LlmRef(provider_key=identity.public_key, name="gpt4")
+    dropped = LlmRef(provider_key=identity.public_key, name="gpt5")
+    assert souk.kyok_relay.serving(kept) is not None
+    assert souk.kyok_relay.serving(dropped) is None
+    async with souk.session() as session:
+        assert await repo.get_llm_provider(session, dropped) is not None
+
+
 async def test_an_unregistered_llm_provider_cannot_attach(souk):
     lurker = InProcessLLMProvider(ProviderIdentity.generate(), StubLLM())
     with pytest.raises(LlmProviderNotFound):

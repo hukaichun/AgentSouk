@@ -194,13 +194,12 @@ class KyokRelay:
     def attach(self, mapping: dict[LlmRef, ConnectedLLMProvider]) -> None:
         self._links.update(mapping)
 
-    def detach(self, public_key: str) -> None:
-        """Remove every offering currently linked to `public_key`."""
-        for ref in [r for r in self._links if r.provider_key == public_key]:
-            del self._links[ref]
+    def withdraw(self, refs: list[LlmRef]) -> None:
+        for ref in refs:
+            self._links.pop(ref, None)
 
     def serving(self, ref: LlmRef) -> ConnectedLLMProvider | None:
         return self._links.get(ref)
 
-    def serving_any(self, public_key: str) -> bool:
-        return any(ref.provider_key == public_key for ref in self._links)
+    def served_by(self, public_key: str) -> list[LlmRef]:
+        return [ref for ref in self._links if ref.provider_key == public_key]
