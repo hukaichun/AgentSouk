@@ -398,6 +398,22 @@ async def test_attach_touches_and_announces_like_attach_provider(souk):
         unsubscribe()
 
 
+async def test_list_llm_providers_mirrors_list_agents(souk):
+    identity = ProviderIdentity.generate()
+    signature, timestamp = sign_llm_registration(identity, ["served", "idle"])
+    await souk.register_llm_providers(
+        identity.public_key, signature, timestamp, ["served", "idle"], {"tier": "gold"}
+    )
+    await souk.attach_llm_provider(InProcessLLMProvider(identity, StubLLM()), ["served"])
+
+    roster = {s.name: s for s in await souk.list_llm_providers()}
+
+    assert roster["served"].online is True
+    assert roster["idle"].online is False
+    assert roster["served"].provider_key == identity.public_key
+    assert roster["served"].metadata == {"tier": "gold"}
+
+
 async def test_reregistering_a_subset_withdraws_the_omitted_offering(souk):
     identity = ProviderIdentity.generate()
     signature, timestamp = sign_llm_registration(identity, ["gpt4", "gpt5"])

@@ -38,6 +38,19 @@ class ClaimedRun(BaseModel):
     run_input: dict[str, Any]
 
 
+class LlmSummary(BaseModel):
+    """A roster-list view of a registered LLM offering: enough to display and
+    pick one (including online status), the mirror of `AgentSummary`."""
+
+    provider_key: str
+    name: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    joined_at: datetime
+    last_seen_at: datetime
+    online: bool = False
+    provider_name: str | None = None
+
+
 class AgentSummary(BaseModel):
     """A roster-list view of a registered agent: enough to display and pick an
     agent (including online status), but without its full agent_card or

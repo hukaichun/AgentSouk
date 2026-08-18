@@ -37,7 +37,7 @@ from souk.identity import (
 )
 from souk.ids import new_id
 from souk.kyok import ConnectedLLMProvider, KyokRelay
-from souk.models import AgentRecord, AgentRef, AgentSummary, LlmRef, RunRecord
+from souk.models import AgentRecord, AgentRef, AgentSummary, LlmRef, LlmSummary, RunRecord
 
 logger = logging.getLogger("souk.core")
 
@@ -579,8 +579,25 @@ class Souk:
             for summary in stored
         ]
 
+    async def list_llm_providers(self) -> list[LlmSummary]:
+        """List registered LLM offerings with `online` set to whether a provider is currently serving each — the mirror of `list_agents`."""
+        async with self.session() as session:
+            stored = await repo.list_llm_providers(
+                session,
+                stale_hidden_window_seconds=self.settings.stale_hidden_window_seconds,
+            )
+        return [
+            summary.model_copy(update={"online": self.is_serving_llm(
+                LlmRef(provider_key=summary.provider_key, name=summary.name)
+            )})
+            for summary in stored
+        ]
+
     def is_serving(self, agent: AgentRef) -> bool:
         return self.broker.serving(agent) is not None
+
+    def is_serving_llm(self, ref: LlmRef) -> bool:
+        return self.kyok_relay.serving(ref) is not None
 
     async def get_agent(self, agent: AgentRef) -> AgentRecord | None:
         async with self.session() as session:
