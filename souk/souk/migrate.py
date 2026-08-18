@@ -14,6 +14,10 @@ def migrate(database_url: str | None = None, db_schema: str | None = None) -> No
     packaged under `souk/alembic`. There is deliberately no second,
     create-tables-directly path for anything to drift against. Defaults to
     `SOUK_DATABASE_URL` / `SOUK_DB_SCHEMA` when the arguments are None.
+
+    Deployments that manage the schema themselves — own credentials and
+    timing, DBA-reviewed SQL, or no Alembic at all — are supported and
+    documented in `docs/managing-the-schema-yourself.md`.
     """
     cfg = Config()
     cfg.set_main_option("script_location", "souk:alembic")
