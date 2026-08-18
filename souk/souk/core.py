@@ -3,6 +3,8 @@ from __future__ import annotations
 import abc
 import asyncio
 import logging
+import secrets
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -36,9 +38,11 @@ from souk.health import run_health_sweeps_forever
 from souk.identity import (
     SoukIdentity,
     agent_deletion_signing_payload,
+    SIGNATURE_FRESHNESS_WINDOW_SECONDS,
     is_timestamp_fresh,
     llm_deletion_signing_payload,
     llm_registration_signing_payload,
+    provider_connect_signing_payload,
     registration_signing_payload,
     verify_signature,
 )
@@ -181,12 +185,54 @@ class _Roster(abc.ABC):
         self._souk._notify_change(self.changed())
         return registered
 
-    async def attach(self, connection: Any, names: list[str]) -> None:
-        """Connect `connection` as the live server for its already-registered `names`."""
+    async def attach(
+        self,
+        connection: Any,
+        names: list[str],
+        *,
+        challenge: str | None = None,
+        provider_nonce: str | None = None,
+        proof: str | None = None,
+    ) -> None:
+        """Connect `connection` as the live server for its already-registered `names`.
+
+        Attaching is where runs change hands, so it authenticates like
+        everything else: `proof` is a signature over
+        `provider_connect_signing_payload(challenge, provider_nonce, names)`
+        where `challenge` came from `Souk.issue_connect_challenge` — souk
+        chose the freshness, so a recording is worthless. A connection that
+        can sign (it exposes `sign_connect`, as the in-process links do) is
+        challenged and verified automatically; in-process is not trusted
+        either. A connection that offers a proof has it verified; one that
+        offers none is admitted only while `require_connect_proof` is off —
+        the migration switch for transports that still authenticate at
+        their own edge.
+        """
         if not names:
             raise ValueError(
                 f"{self.party} '{connection.public_key}' attached with no {self.served} — "
                 "there would be nothing to serve"
+            )
+        signer = getattr(connection, "sign_connect", None)
+        if proof is None and callable(signer):
+            challenge = self._souk.issue_connect_challenge()
+            provider_nonce = secrets.token_hex(16)
+            proof = signer(challenge, provider_nonce, names)
+        if proof is not None:
+            if challenge is None or not self._souk._consume_connect_challenge(challenge):
+                raise InvalidRegistration(
+                    f"connect proof for {self.party} '{connection.public_key}' does not "
+                    "answer a live challenge souk issued"
+                )
+            payload = provider_connect_signing_payload(challenge, provider_nonce or "", names)
+            if not verify_signature(connection.public_key, proof, payload):
+                raise InvalidRegistration(
+                    f"invalid connect proof for {self.party} '{connection.public_key}'"
+                )
+        elif self._souk.settings.require_connect_proof:
+            raise InvalidRegistration(
+                f"{self.party} '{connection.public_key}' attached without a connect proof, "
+                "and this souk requires one"
             )
         async with self._souk.session() as session:
             registered = await self.registered_names(session, connection.public_key)
@@ -313,6 +359,7 @@ class Souk:
         self.broker.add_forget_listener(self.kyok_relay.discard)
         self._agent_roster = _AgentRoster(self)
         self._llm_roster = _LlmRoster(self)
+        self._connect_challenges: dict[str, float] = {}
         self._tasks: set[asyncio.Task] = set()
         self._started = False
         self._change_subscribers: set[Callable[[ChangeEvent], None]] = set()
@@ -326,6 +373,28 @@ class Souk:
     @property
     def identity_public_key(self) -> str | None:
         return self.identity.public_key if self.identity is not None else None
+
+    def issue_connect_challenge(self) -> str:
+        """Mint a single-use nonce a connecting provider must sign over to attach.
+
+        souk chose it, so a recorded proof is worthless; it expires with the
+        signature freshness window and is consumed by the attach that answers
+        it. A serving layer relays it to the far side of its transport before
+        calling attach with the returned proof.
+        """
+        now = time.time()
+        self._connect_challenges = {
+            nonce: issued
+            for nonce, issued in self._connect_challenges.items()
+            if now - issued <= SIGNATURE_FRESHNESS_WINDOW_SECONDS
+        }
+        nonce = secrets.token_hex(16)
+        self._connect_challenges[nonce] = now
+        return nonce
+
+    def _consume_connect_challenge(self, nonce: str) -> bool:
+        issued = self._connect_challenges.pop(nonce, None)
+        return issued is not None and time.time() - issued <= SIGNATURE_FRESHNESS_WINDOW_SECONDS
 
     def sign(self, payload: bytes) -> str:
         """Sign `payload` with this souk's identity key, or raise if none is configured."""
@@ -553,14 +622,25 @@ class Souk:
         return self.broker.push(run_id, FinishStream())
 
     async def attach_provider(
-        self, provider: ConnectedProvider, agent_names: list[str]
+        self,
+        provider: ConnectedProvider,
+        agent_names: list[str],
+        *,
+        challenge: str | None = None,
+        provider_nonce: str | None = None,
+        proof: str | None = None,
     ) -> None:
         """Connect `provider` as the live server for its already-registered `agent_names`.
 
         Raises `ValueError` for an empty list and `AgentNotFound` if any name was never
         registered under this provider's key — attaching does not implicitly register.
+        A connection exposing `sign_connect` is challenged and verified automatically;
+        a transport passes the `challenge` it relayed (from `issue_connect_challenge`),
+        the provider's `provider_nonce`, and the returned `proof`. See `_Roster.attach`.
         """
-        await self._agent_roster.attach(provider, agent_names)
+        await self._agent_roster.attach(
+            provider, agent_names, challenge=challenge, provider_nonce=provider_nonce, proof=proof
+        )
 
     async def register_llm_providers(
         self,
@@ -586,14 +666,23 @@ class Souk:
         )
 
     async def attach_llm_provider(
-        self, link: ConnectedLLMProvider, model_names: list[str]
+        self,
+        link: ConnectedLLMProvider,
+        model_names: list[str],
+        *,
+        challenge: str | None = None,
+        provider_nonce: str | None = None,
+        proof: str | None = None,
     ) -> None:
         """Connect `link` as the live server for its already-registered `model_names`.
 
         Raises `ValueError` for an empty list and `LlmProviderNotFound` if any name was
-        never registered under this key.
+        never registered under this key. Connect authentication works exactly as in
+        `attach_provider`.
         """
-        await self._llm_roster.attach(link, model_names)
+        await self._llm_roster.attach(
+            link, model_names, challenge=challenge, provider_nonce=provider_nonce, proof=proof
+        )
 
     def detach_llm_provider(self, public_key: str, connection: Any = None) -> None:
         """Remove every model offering served by `public_key`; a no-op (no change event) if none.
