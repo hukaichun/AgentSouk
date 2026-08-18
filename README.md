@@ -1,40 +1,38 @@
-# Agent Souk 🕌⚡
+# Agent Souk
 
 [![CI](https://github.com/hukaichun/AgentSouk/actions/workflows/ci.yml/badge.svg)](https://github.com/hukaichun/AgentSouk/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Protocol: AG-UI & A2A](https://img.shields.io/badge/Protocols-AG--UI%20%7C%20A2A-blue.svg)](docs/library-architecture.md)
 
-> **The Open Agent Relay: a network-free core library, and the SDKs that speak to it.**  
-> Instantly expose AI agents running anywhere — locally, behind NAT, or in private VPCs — over **AG-UI** (human streaming) and **A2A** (agent-to-agent JSON-RPC) **without public IPs, open ports, tunneling setups (ngrok), or cloud vendor lock-in.**
+**A network-free core library, and the SDKs that speak to it, for making AI agents callable by standard [AG-UI](https://docs.ag-ui.com/) and [A2A](https://a2a-protocol.org/) clients — wherever the agents run.** An agent on a laptop, behind NAT, or in a private VPC connects *outbound* to a souk gateway and becomes reachable; no public IP, no open ingress port, no tunnel service.
 
 ---
 
-## 💡 What is Agent Souk?
+## What it is
 
-A **souk** (Arabic: سوق) is an open marketplace — a shared rendezvous point where independent vendors set up stalls and anyone can walk in to discover and interact with them.
+A *souk* is an open market: the operator provides the space and the footfall; vendors keep their own stall, face, and reputation. The name marks the design stance, which is load-bearing throughout the code: **souk provides mechanism; whoever hosts an instance decides policy.** An operator who wants an invite-only or allowlisted registry puts their own logic in front of souk's `/agents/register` endpoint rather than souk deciding on their behalf (see [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md)). Souk itself never takes a side between "open" and "curated" — the same gateway serves an enterprise-internal deployment and a public one.
 
-Traditional souks are famously not curated. The market operator provides the physical space and the footfall; it does not vouch for the quality of every vendor. You recognize a particular stall because it is always in the same spot, run by the same face — but trust in the goods is earned through reputation and direct experience, not through a central authority's seal of approval.
+Concretely, a souk gateway gives you:
 
-**Agent Souk deliberately follows this model.** It provides:
-- **Reachability**: any agent, running anywhere, can connect outbound and become accessible.
-- **Verifiable identity**: each provider's Ed25519 keypair is the equivalent of "always the same stall." A caller can cryptographically confirm they are talking to the same key as last time — but Souk itself does not vouch for what that agent *does*.
-- **Open access**: any caller can discover and interact with any registered agent without going through an approval gate.
-
-What Souk explicitly does *not* provide is a central reputation layer or quality certification. That is not an oversight — it is the same philosophical choice the souk metaphor implies. Decentralized trust scales; centralized gatekeeping creates the monopoly you were trying to escape.
-
-**Souk provides mechanism; whoever hosts an instance decides policy.** Open-by-default is Souk's own stance, not a constraint it imposes on every deployment — an operator who wants an invite-only or allowlisted registry puts their own logic in front of Souk's `/agents/register` endpoint rather than Souk deciding on their behalf (see [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md)). Souk itself never takes a side between "open" and "curated" — it stays out of that decision either way.
+- **Reachability without ingress.** Providers hold a persistent outbound stream to the gateway; work is relayed over it. Nothing on the agent's side listens.
+- **Two protocols on one HTTP surface.** AG-UI for human-facing event streaming (SSE) and A2A v1.0 for agent-to-agent JSON-RPC. Both wire vocabularies come from the official packages (`ag-ui-protocol`, `a2a-sdk`) — no field name, enum value, or method name is hand-written, so a spec rename fails at import instead of rotting silently.
+- **Keypair identity, no accounts.** Each provider generates a local Ed25519 keypair; registration verifies ownership of the key and issues short-lived session tokens. A caller can confirm it is talking to the same key as last time. There is no user database and no central authority vouching for what an agent *does*.
+- **Signed delegation chains.** When agents delegate to agents, each hop carries an EdDSA-signed JWT bound to the previous hop's hash — the delegation path is tamper-evident and auditable.
+- **Durable threads, runs, and human-in-the-loop.** Persistent conversation state with native `input-required` pause and resume. SQLite by default with zero configuration; one `SOUK_DATABASE_URL` switch moves the same code path to Postgres for multi-writer deployments.
+- **Keep Your Own Key** *(experimental)*: a relay that lets callers fund LLM inference with their own API keys without handing the raw credential to agent hosts. See [`docs/keep-your-own-key.md`](docs/keep-your-own-key.md).
+- **A static directory UI** (`souk-directory`, in AgentSoukServer) to browse registered agents and chat with them live.
 
 ---
 
-## 🧭 Two Repositories, One Boundary
+## Two repositories, one boundary
 
-The same mechanism/policy split runs through the codebase itself, as a hard line between two repos:
+The mechanism/policy split runs through the codebase itself, as a hard line between two repos:
 
 | | **AgentSouk** (this repo) | **[AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)** |
 |---|---|---|
 | **Owns** | The domain: agents, threads, runs, identity, persistence, protocol *translation* | The network: ports, transports, TLS, CORS, endpoints, wire framing, admin surface |
 | **Ships** | `souk` (the network-free core library) + [`souk-provider-sdk`](souk-provider-sdk/) (the provider-side contract, also transport-free) | The reference gateway, the transport SDKs (`souk-agent-sdk`, `souk-client-sdk`) and the reference providers |
-| **May it bind a socket?** | ❌ Never. `souk` cannot even *import* a transport — enforced by packaging and by `souk/tests/test_core_is_network_free.py` | ✅ That is its entire job |
+| **May it bind a socket?** | Never. `souk` cannot even *import* a transport — enforced by packaging and by `souk/tests/test_core_is_network_free.py` | Yes — that is its entire job |
 
 Three consequences, recorded in [AgentSouk#27](https://github.com/hukaichun/AgentSouk/issues/27) and load-bearing:
 
@@ -61,19 +59,11 @@ That is precisely the runtime architecture:
  └─────────────┘   └───────────────┘   └──────────────┘   └────────────────────┘
 ```
 
-### Key Value Propositions
-
-- 🌐 **Zero-Config Ingress & NAT Traversal**: Agents connect *out* to a souk. Zero open ingress ports, static public IPs, or third-party tunnels needed.
-- 🔄 **Unified Dual-Protocol Gateway**: One HTTP surface bridging human event streaming (**AG-UI**) and machine RPC task delegation (**A2A v1.0**, shapes taken from the official `a2a-sdk` rather than hand-written).
-- 🔐 **Cryptographic Self-Sovereign Identity**: Agents own their identity via local **Ed25519 keypairs**. Zero centralized accounts, user databases, or API key friction.
-- 🔗 **Auditable Multi-Hop Actor Chains**: Multi-agent delegation embeds tamper-evident, signed JWT EdDSA provenance chains to prevent privilege escalation and trace delegation lineages.
-- 💾 **Durable State & Human-in-the-Loop (HITL)**: Persistent threads, execution logs, and native `input-required` async pause & resume flows — on a zero-config local **SQLite** file by default, or **Postgres / ParadeDB** for a concurrent multi-writer deployment (one `SOUK_DATABASE_URL` switch, no code change).
-- 🔑 **Keep Your Own Key (KYOK)** *(experimental)*: Privacy relay allowing callers to pay for LLM inference with their own API keys without handing raw credentials to agent hosts.
-- 🖥️ **Zero-Backend Directory UI**: Pure static browser client (`souk-directory`, in AgentSoukServer) to browse active agents, inspect capabilities, and chat live.
+The relay channel's contract is core's worker port — `claim_work` / `report_event` / `finish_run` plus a cancel notification — and is deliberately transport-neutral. Today's carrier is a gRPC stream; the base server mode moves it to a WebSocket on the gateway's one HTTP port (spec: AgentSoukServer's `docs/server-mode.md`). Core is untouched by that change, which is the test of whether this boundary is real.
 
 ---
 
-## ⚡ Quick Start
+## Quick start
 
 **Running anything is [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)'s quick start, not this repo's** — the gateway, the provider and caller SDKs, the reference providers (`agent-template`, `providers/*`), deployment, Docker, TLS, and configuration guidance all live there; it owns both ends of every wire it defines. What lives *here* is the library those wires carry: the domain, its persistence, and the protocol translation.
 
@@ -87,7 +77,19 @@ The full local demo stack (gateway + database + example agents + directory UI) l
 
 ---
 
-## 🏛️ System Architecture
+## Where it sits
+
+We know of nothing that occupies this exact intersection — outbound-only reachability, AG-UI and A2A on one gateway, keypair identity with signed delegation, durable state with pause/resume. But each neighbor does its own thing better than souk does:
+
+- **a2a-relay** is a much smaller outbound-WebSocket forwarder. If all you need is A2A passthrough with a shared relay token and no state, it is the simpler tool.
+- **[agentgateway.dev](https://agentgateway.dev/)** is a serious ingress data plane — Cedar-based RBAC, observability, MCP support, Kubernetes-grade deployment. Souk has none of that. The trade is that it assumes your backends are already reachable; souk exists for when they are not.
+- **Cloudflare AI Gateway** and the cloud agent platforms (**AWS Bedrock AgentCore**, **Google Vertex / Agent Marketplace**) give you managed operations, billing, and SLAs that a self-hosted gateway never will. The trade is that your agents live inside their cloud and their identity model.
+
+The full comparison, including DID standards and MCP tunnels, is in [`docs/prior-art.md`](docs/prior-art.md).
+
+---
+
+## System architecture
 
 ```mermaid
 graph TD
@@ -107,27 +109,9 @@ graph TD
     SDK --> AgentB["Enterprise VPC Agent B<br/>(Private Subnet)"]
 ```
 
-The relay channel's contract is core's worker port — `claim_work` / `report_event` / `finish_run` plus a cancel notification — and is deliberately transport-neutral. Today's carrier is a gRPC stream; the base server mode moves it to a WebSocket on the gateway's one HTTP port (spec: AgentSoukServer's `docs/server-mode.md`). Core is untouched by that change, which is the test of whether this boundary is real.
-
 ---
 
-## 📊 Competitive Landscape & Positioning
-
-| Feature / Dimension | **Agent Souk** | **a2a-relay** | **agentgateway.dev** | **Cloudflare AI Gateway** | **Google Bedrock / Vertex** |
-|---|---|---|---|---|---|
-| **NAT Traversal / No Public IP** | ✅ Outbound persistent stream | ✅ Outbound WebSocket | ❌ Requires reachable backends | ❌ Edge proxy only | ❌ Cloud-hosted backends |
-| **Protocol Support** | ✅ Dual AG-UI + A2A | ❌ A2A only | ✅ MCP + A2A + HTTP | ❌ LLM proxy only | ❌ Proprietary / A2A |
-| **Identity Model** | 🔐 Ed25519 Keypair | ⚠️ Relay-wide secret token | 🔑 Central OAuth / Cedar RBAC | 🔑 API keys / JWT | 🔒 Cloud IAM / ARNs |
-| **Multi-Agent Provenance** | 🔗 Auditable EdDSA Actor Chains | ❌ None | ❌ None | ❌ None | ⚠️ Cloud Audit Logs |
-| **State & HITL** | 💾 ParadeDB (Thread DAG & Pause/Resume) | ❌ Stateless forwarder | ❌ Stateless proxy | ❌ Caching only | ⚠️ Managed State |
-| **Monetization / Privacy** | 🔑 KYOK (Keep Your Own Key) | ❌ None | ❌ None | 💰 Central billing | 💰 Vendor lock-in |
-| **Deployment** | 🐳 Self-hosted / Shared Marketplace | 🐳 Self-hosted | ☸️ K8s / Rust binary | ☁️ Managed SaaS | ☁️ Managed SaaS |
-
-> 📌 **Detailed Comparative Study**: See [`docs/prior-art.md`](docs/prior-art.md) for an in-depth breakdown comparing Agent Souk with adjacent ecosystem projects (A2A relays, agent gateways, DID identity standards, and commercial cloud platforms).
-
----
-
-## 📦 Repository Structure
+## Repository structure
 
 Modular, independent distributions — no shared workspace, each stands alone:
 
@@ -141,7 +125,7 @@ Three names circulate and they are different packages: **`souk-provider-sdk` is 
 
 ---
 
-## 🛠️ Local Development & Testing
+## Local development and testing
 
 Library development needs no gateway at all — `souk`'s suite runs against the core directly:
 
@@ -163,7 +147,7 @@ To see code running against a real gateway, use a checkout of [AgentSoukServer](
 
 ---
 
-## 🧪 API Usage Examples
+## API usage examples
 
 Against any running souk gateway:
 
@@ -188,21 +172,21 @@ curl -N -X POST http://localhost:8000/a2a/translator/rpc \
 
 ---
 
-## 🔐 Security & Identity Architecture
+## Security and identity
 
-- **Self-Sovereign Identity**: Agent identity is bound to an **Ed25519 keypair** generated automatically by the provider SDK (in AgentSoukServer). `/agents/register` verifies cryptographic ownership before issuing short-lived HMAC session bearer tokens.
-- **Actor Chain Provenance**: Delegation across multiple agents embeds an **EdDSA signed JWT chain**. Each hop cryptographically binds to the previous hop's SHA-256 hash, preventing token splicing, replay attacks, or impersonation.
+- **Keypair identity**: agent identity is bound to an Ed25519 keypair generated locally by the provider SDK (in AgentSoukServer). `/agents/register` verifies cryptographic ownership before issuing short-lived HMAC session bearer tokens. No accounts, no central user database.
+- **Actor chain provenance**: delegation across multiple agents embeds an EdDSA-signed JWT chain; each hop cryptographically binds to the previous hop's SHA-256 hash, preventing token splicing, replay, or impersonation.
 - **Transport security is the gateway's job**: what core guarantees is signing and verification (registration signatures, session tokens, actor chains, KYOK's two-part authorization) — all bounded by a 60s freshness window that only helps on an encrypted path. TLS termination, and why it is mandatory off localhost, is documented in AgentSoukServer's README.
 
 ---
 
-## 🔮 Roadmap
+## Roadmap
 
-- 🔌 **WebSocket relay base mode**: one gateway port for callers *and* providers — landed. Spec, serving implementation and the SDK transports all live in AgentSoukServer ([`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)); the gRPC carrier and its `proto/souk.proto` are retired.
-- 🌐 **Cross-Souk Discovery**: `@souk` addressing (`agent@souk.example.com`) with client-side resolution and a `.well-known/souk-federation.json` discovery document — no inter-souk server-to-server proxying needed. See [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md).
-- 💳 **Native Monetization & Payments**: Integration with micro-payment rails like [x402](https://www.x402.org/) for agent-to-agent transactions and directory-listing economics.
-- 📈 **Horizontal Gateway Scaling**: Distributing broker state via Redis / Postgres LISTEN-NOTIFY for multi-replica deployments — see `docs/library-architecture.md`'s "What this leaves open" for what two replicas actually do today.
-- 🔑 **Public Key Revocation**: A `revoked_keys` blocklist checked at registration and actor-chain verification, so a leaked provider/caller Ed25519 key can be shut out immediately instead of waiting for its holder to stop using it. Written to only by whoever already has direct DB access — no new admin/auth surface inside souk itself, consistent with souk having no account system at all.
+- **WebSocket relay base mode**: one gateway port for callers *and* providers — landed. Spec, serving implementation and the SDK transports all live in AgentSoukServer ([`docs/server-mode.md`](https://github.com/hukaichun/AgentSoukServer/blob/main/docs/server-mode.md)); the gRPC carrier and its `proto/souk.proto` are retired.
+- **Cross-souk discovery**: `@souk` addressing (`agent@souk.example.com`) with client-side resolution and a `.well-known/souk-federation.json` discovery document — no inter-souk server-to-server proxying needed. See [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md).
+- **Native monetization and payments**: integration with micro-payment rails like [x402](https://www.x402.org/) for agent-to-agent transactions and directory-listing economics.
+- **Horizontal gateway scaling**: distributing broker state via Redis / Postgres LISTEN-NOTIFY for multi-replica deployments — see `docs/library-architecture.md`'s "What this leaves open" for what two replicas actually do today.
+- **Public key revocation**: a `revoked_keys` blocklist checked at registration and actor-chain verification, so a leaked provider/caller Ed25519 key can be shut out immediately instead of waiting for its holder to stop using it. Written to only by whoever already has direct DB access — no new admin/auth surface inside souk itself, consistent with souk having no account system at all.
 
 *Directions, not commitments — the federation/anti-abuse items above are
 design proposals only (see that doc's own header), not implemented and
@@ -211,8 +195,8 @@ assuming it's already underway.*
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-We welcome community contributions, suggestions, and pull requests! Please check out [CONTRIBUTING.md](CONTRIBUTING.md) for details on codebase organization and PR workflows.
+Suggestions, issues, and pull requests are welcome — [CONTRIBUTING.md](CONTRIBUTING.md) covers codebase organization and the PR workflow.
 
 **License**: [Apache 2.0](LICENSE)
