@@ -103,7 +103,7 @@ graph TD
 
     Gateway --> DB[(SQLite / Postgres<br/>Roster, Threads, Run History)]
 
-    Relay <== "claim work / report events / finish<br/>+ cancel back the other way" ==> SDK[souk-agent-sdk<br/>(in AgentSoukServer)]
+    Relay <== "claim work / report events / finish<br/>+ cancel back the other way" ==> SDK["souk-agent-sdk<br/>(in AgentSoukServer)"]
 
     SDK --> AgentA["Local Agent A<br/>(Laptop / Behind NAT)"]
     SDK --> AgentB["Enterprise VPC Agent B<br/>(Private Subnet)"]
