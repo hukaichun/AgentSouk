@@ -9,17 +9,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from alembic import command
-from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import CoreSettings
 from souk.core import Souk
+from souk.migrate import migrate as souk_migrate
 from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
 
-ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 TEST_SIGNING_SECRET = "test-signing-secret"
 
@@ -55,7 +53,7 @@ def _schema(settings: CoreSettings) -> None:
         for suffix in ("", "-wal", "-shm"):
             Path(url.database + suffix).unlink(missing_ok=True)
     os.environ["SOUK_DATABASE_URL"] = settings.database_url
-    command.upgrade(Config(str(ALEMBIC_INI)), "head")
+    souk_migrate(settings.database_url)
 
 
 @pytest.fixture(autouse=True)

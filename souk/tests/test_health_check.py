@@ -11,11 +11,12 @@ from souk.config import CoreSettings
 from souk.core import Souk
 from souk.db_schema import EXPECTED_SCHEMA_REVISION
 
-ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 
 def test_the_expected_revision_matches_the_migrations_actual_head() -> None:
-    head = ScriptDirectory.from_config(Config(str(ALEMBIC_INI))).get_current_head()
+    cfg = Config()
+    cfg.set_main_option("script_location", "souk:alembic")
+    head = ScriptDirectory.from_config(cfg).get_current_head()
 
     assert EXPECTED_SCHEMA_REVISION == head, (
         f"souk expects schema revision {EXPECTED_SCHEMA_REVISION} but the migrations' head is "

@@ -17,7 +17,9 @@ if config.config_file_name is not None:
 
 target_metadata = souk_metadata
 
-database_url = os.environ.get("SOUK_DATABASE_URL", DEFAULT_DATABASE_URL)
+database_url = config.attributes.get("souk_database_url") or os.environ.get(
+    "SOUK_DATABASE_URL", DEFAULT_DATABASE_URL
+)
 
 _url = make_url(database_url)
 if _url.get_backend_name() == "sqlite" and _url.get_driver_name() == "aiosqlite":
@@ -25,7 +27,9 @@ if _url.get_backend_name() == "sqlite" and _url.get_driver_name() == "aiosqlite"
 
 config.set_main_option("sqlalchemy.url", database_url)
 
-db_schema = os.environ.get("SOUK_DB_SCHEMA", DEFAULT_DB_SCHEMA)
+db_schema = config.attributes.get("souk_db_schema") or os.environ.get(
+    "SOUK_DB_SCHEMA", DEFAULT_DB_SCHEMA
+)
 
 if make_url(database_url).get_backend_name() != "postgresql":
     db_schema = DEFAULT_DB_SCHEMA
