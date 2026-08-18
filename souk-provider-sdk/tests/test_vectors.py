@@ -89,3 +89,23 @@ def test_the_published_chain_verifies_here_too_and_can_be_reproduced():
         algorithm="EdDSA",
     )
     assert reproduced == vector["chain"][0]
+
+
+def test_every_souk_invented_wire_structure_validates_with_this_packages_models():
+    """The SDK-side dual of the tag-scan guard: souk puts nothing on the wire this package cannot validate.
+
+    A hand-restated copy of these shapes drifted once on one field's
+    nullability and silently dropped verified caller identities; the twins
+    plus this frame are what make restating unnecessary.
+    """
+    from souk_provider_sdk import CallerProps, KyokForwardedProps
+
+    (frame,) = [w["frame"] for w in VECTORS["wire"] if w["kind"] == "delivered-run"]
+    props = frame["runInput"]["forwardedProps"]
+    souk_keys = {"caller": CallerProps, "kyok": KyokForwardedProps}
+
+    assert souk_keys.keys() <= props.keys(), "the published frame must carry every declared key"
+    for key, model in souk_keys.items():
+        parsed = model.model_validate(props[key])
+        assert parsed.model_dump(mode="json", by_alias=True) == props[key], key
+    assert CallerProps.model_validate(props["caller"]).chain is None
