@@ -148,6 +148,11 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
     hops may have expired since they were signed. Raises
     `InvalidActorChain` on any of these failures, including an empty chain
     or an unparseable/forged token.
+
+    Hops also arrive from out-of-process providers:
+    `souk_provider_sdk.identity.ProviderIdentity.sign_hop` builds the same
+    JWT claim format independently, and any change here must keep verifying
+    what it signs.
     """
     if not chain:
         raise InvalidActorChain("empty actor chain")

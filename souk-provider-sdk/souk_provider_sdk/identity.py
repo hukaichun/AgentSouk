@@ -88,7 +88,12 @@ class ProviderIdentity:
     def sign_hop(
         self, subject: dict, prev_token: str | None = None, ttl: int = ACTOR_CHAIN_TTL_SECONDS
     ) -> str:
-        """Issues a JWT (EdDSA) hop binding `subject` to this identity's public key, optionally chained to `prev_token` via its sha256 in `prevHash`, expiring after `ttl` seconds."""
+        """Issues a JWT (EdDSA) hop binding `subject` to this identity's public key, optionally chained to `prev_token` via its sha256 in `prevHash`, expiring after `ttl` seconds.
+
+        `souk.identity.verify_actor_chain` is the verifier these hops must
+        satisfy; it builds the same claim format independently, and any
+        change here must stay verifiable by it.
+        """
         now = int(time.time())
         return jwt.encode(
             {
