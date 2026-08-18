@@ -13,7 +13,8 @@ from google.protobuf.json_format import ParseDict, ParseError
 from souk import repo
 from souk.agui import build_run_agent_input
 from souk.errors import AgentNotFound, InvalidRunInput, RunNotFound
-from souk.kyok import kyok_forwarded_props, strip_kyok_context
+from souk.kyok import strip_kyok_context
+from souk.props import build_forwarded_props
 from souk.models import AgentRef
 from souk.pause import is_resuming
 from souk.protocols.a2a_translate import (
@@ -348,23 +349,20 @@ class A2AAdapter:
                 await session.commit()
                 return run_id, thread_id, False
 
-            forwarded_props: dict[str, Any] | None = (
-                {"caller": {"subject": verified_subject, "actors": verified_actors, "chain": actor_chain}}
-                if verified_subject is not None
-                else None
-            )
-
             reference_task_ids = params.get("message", {}).get("referenceTaskIds") or []
             inherited = bool(reference_task_ids) and souk.kyok_relay.inherit(
                 reference_task_ids[0], run_id, actor_chain
             )
-            if inherited:
-                forwarded_props = {
-                    **(forwarded_props or {}),
-                    "kyok": kyok_forwarded_props(
-                        run_id, agent, souk.settings.token_signing_secret
-                    ),
-                }
+            forwarded_props = build_forwarded_props(
+                souk.settings.token_signing_secret,
+                run_id,
+                agent,
+                inherited,
+                None,
+                verified_subject,
+                verified_actors,
+                actor_chain,
+            )
 
             try:
                 agui_input = build_run_agent_input(

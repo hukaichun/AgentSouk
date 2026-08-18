@@ -14,10 +14,10 @@ from souk.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound
 from souk.identity import verify_actor_chain
 from souk.kyok import (
     KyokBinding,
-    kyok_forwarded_props,
     parse_kyok_opt_in,
     strip_kyok_context,
 )
+from souk.props import build_forwarded_props
 from souk.pause import is_resuming
 
 if TYPE_CHECKING:
@@ -182,30 +182,3 @@ async def verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict],
     return metadata, result.subject, verified_actors, actor_chain
 
 
-def build_forwarded_props(
-    signing_secret: str,
-    run_id: str,
-    agent: AgentRef,
-    kyok_enabled: bool,
-    caller_forwarded_props: Any,
-    verified_subject: Any = None,
-    verified_actors: list[dict] | None = None,
-    actor_chain: Any = None,
-) -> Any:
-    """Merges souk-added forwarded-props extras (a KYOK grant if `kyok_enabled`, verified caller
-    identity if present) into the caller-supplied `forwarded_props`, returning the caller's value
-    unchanged if there is nothing to add."""
-    extra: dict[str, Any] = {}
-    if kyok_enabled:
-        extra["kyok"] = kyok_forwarded_props(run_id, agent, signing_secret)
-    if verified_subject is not None:
-        extra["caller"] = {
-            "subject": verified_subject,
-            "actors": verified_actors or [],
-            "chain": actor_chain,
-        }
-    if not extra:
-        return caller_forwarded_props
-    if isinstance(caller_forwarded_props, dict):
-        return {**caller_forwarded_props, **extra}
-    return extra

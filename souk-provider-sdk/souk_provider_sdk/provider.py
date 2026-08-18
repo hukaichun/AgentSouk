@@ -14,7 +14,14 @@ class Provider(Protocol):
 
 @dataclass(frozen=True)
 class DeliveredRun:
-    """The run data handed to a `SoukLink`, translated from souk's internal claimed-run representation."""
+    """The run data handed to a `SoukLink`, translated from souk's internal claimed-run representation.
+
+    `run_input.forwarded_props` is the caller's free-form slot, plus the two
+    keys souk itself adds — `caller` and `kyok` — whose shapes are declared
+    by `souk.props` (`CallerProps`) and `souk.kyok` (`KyokForwardedProps`);
+    validate against those instead of re-deriving the shape from souk's
+    source.
+    """
 
     run_id: str
     agent_name: str
