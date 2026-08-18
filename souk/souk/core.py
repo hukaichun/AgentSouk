@@ -195,9 +195,22 @@ class _Roster(abc.ABC):
             await session.commit()
         self._souk._notify_change(self.changed())
 
-    def detach(self, public_key: str) -> None:
-        """Take everything served by `public_key` offline; a no-op (no change event) if nothing is."""
+    @abc.abstractmethod
+    def live(self, ref: Any) -> Any: ...
+
+    def detach(self, public_key: str, connection: Any = None) -> None:
+        """Take everything served by `public_key` offline; a no-op (no change event) if nothing is.
+
+        souk holds one connection per role: a re-attach under the same key
+        replaces the old connection, and replicas are the provider's own
+        concern behind its single connection. `connection` is how a caller
+        cleaning up a *replaced* connection avoids taking the replacement
+        down with it: when given, only names whose current connection is
+        that object (by identity) are withdrawn.
+        """
         attached = self.served_by(public_key)
+        if connection is not None:
+            attached = [r for r in attached if self.live(r) is connection]
         if not attached:
             return
         self.withdraw(attached)
@@ -223,6 +236,9 @@ class _AgentRoster(_Roster):
 
     def served_by(self, public_key: str) -> list[AgentRef]:
         return self._souk.broker.agents_served_by(public_key)
+
+    def live(self, ref: AgentRef) -> Any:
+        return self._souk.broker.serving(ref)
 
     def write_live(self, mapping: dict[Any, Any]) -> None:
         self._souk.broker.register_provider(mapping)
@@ -256,6 +272,9 @@ class _LlmRoster(_Roster):
 
     def served_by(self, public_key: str) -> list[LlmRef]:
         return self._souk.kyok_relay.served_by(public_key)
+
+    def live(self, ref: LlmRef) -> Any:
+        return self._souk.kyok_relay.serving(ref)
 
     def write_live(self, mapping: dict[Any, Any]) -> None:
         self._souk.kyok_relay.attach(mapping)
@@ -535,13 +554,23 @@ class Souk:
         """
         await self._llm_roster.attach(link, model_names)
 
-    def detach_llm_provider(self, public_key: str) -> None:
-        """Remove every model offering served by `public_key`; a no-op (no change event) if none."""
-        self._llm_roster.detach(public_key)
+    def detach_llm_provider(self, public_key: str, connection: Any = None) -> None:
+        """Remove every model offering served by `public_key`; a no-op (no change event) if none.
 
-    async def detach_provider(self, provider_public_key: str) -> None:
-        """Take every agent served by `provider_public_key` offline; a no-op if it's serving nothing."""
-        self._agent_roster.detach(provider_public_key)
+        Pass `connection` when cleaning up after a specific link (a closed
+        socket): a replaced connection's cleanup then leaves its replacement
+        serving. See `_Roster.detach`.
+        """
+        self._llm_roster.detach(public_key, connection)
+
+    async def detach_provider(self, provider_public_key: str, connection: Any = None) -> None:
+        """Take every agent served by `provider_public_key` offline; a no-op if it's serving nothing.
+
+        Pass `connection` when cleaning up after a specific link (a closed
+        socket): a replaced connection's cleanup then leaves its replacement
+        serving. See `_Roster.detach`.
+        """
+        self._agent_roster.detach(provider_public_key, connection)
 
 
     def on_change(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:
