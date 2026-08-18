@@ -10,11 +10,12 @@ from souk_llm_provider_sdk.identity import (
     llm_registration_payload,
     sign_llm_registration,
 )
+from souk_llm_provider_sdk.inprocess import InProcessLLMProvider
+from souk_llm_provider_sdk.link import SoukLLMLink
 from souk_llm_provider_sdk.provider import (
     CompletionHandler,
     CompletionRefused,
     DeliveredCompletion,
-    InProcessLLMProvider,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "CompletionRefused",
     "DeliveredCompletion",
     "InProcessLLMProvider",
+    "SoukLLMLink",
     "ProviderIdentity",
     "llm_registration_payload",
     "sign_llm_registration",
