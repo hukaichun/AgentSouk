@@ -16,7 +16,7 @@ from souk_llm_provider_sdk import (
 
 
 def test_delivered_completion_fields_match_contract():
-    assert set(DeliveredCompletion.__dataclass_fields__) == DELIVERED_COMPLETION_FIELDS
+    assert set(DeliveredCompletion.model_fields) == DELIVERED_COMPLETION_FIELDS
 
 
 def test_llm_registration_payload_states_its_operation_and_sorts_names():

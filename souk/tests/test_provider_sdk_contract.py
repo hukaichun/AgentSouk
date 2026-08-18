@@ -26,9 +26,9 @@ from souk.models import ClaimedRun
 
 
 def test_the_adapter_can_fill_every_field_the_sdk_declares():
-    assert set(DeliveredRun.__dataclass_fields__) == DELIVERED_RUN_FIELDS
+    assert set(DeliveredRun.model_fields) == DELIVERED_RUN_FIELDS
 
-    source = inspect.getsource(InProcessLink.deliver)
+    source = inspect.getsource(DeliveredRun.from_claimed)
     for field in ("run_id", "agent_name", "run_input", "thread_id"):
         assert f"{field}=" in source, f"the adapter never fills {field}"
 

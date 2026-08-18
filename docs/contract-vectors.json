@@ -85,5 +85,68 @@
       "payload_utf8": "souk-connect-souk:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
       "signature_hex": "61cdcc66101b30e0a4587623fb63f54f10b05d21681e4dc151a79aa60838bb8637bbb993f1284ab6ee131ce0c794493ab30277e6ab324764fd3f337cc528be02"
     }
+  ],
+  "wire": [
+    {
+      "kind": "delivered-run",
+      "note": "the frame a transport carries for an offered run: DeliveredRun.model_dump(by_alias=True); rebuild with model_validate",
+      "frame": {
+        "runId": "run-1",
+        "agentName": "translator",
+        "runInput": {
+          "threadId": "t-1",
+          "runId": "run-1",
+          "parentRunId": null,
+          "state": {},
+          "messages": [
+            {
+              "id": "m1",
+              "role": "user",
+              "content": "hi",
+              "name": null,
+              "encryptedValue": null
+            }
+          ],
+          "tools": [],
+          "context": [],
+          "forwardedProps": {
+            "caller": {
+              "subject": {
+                "type": "user",
+                "id": "employee_x"
+              },
+              "actors": [],
+              "chain": null
+            }
+          },
+          "resume": null
+        },
+        "threadId": "t-1",
+        "metadata": {}
+      }
+    },
+    {
+      "kind": "delivered-completion",
+      "note": "the frame a transport carries for a KYOK completion: DeliveredCompletion.model_dump(by_alias=True); rebuild with model_validate",
+      "frame": {
+        "runId": "run-1",
+        "providerKey": "abababababababababababababababababababababababababababababababab",
+        "agentName": "translator",
+        "body": {
+          "model": "gpt-4",
+          "messages": [
+            {
+              "role": "user",
+              "content": "hi"
+            }
+          ]
+        },
+        "llmName": "gpt-4",
+        "context": {
+          "voucher": "v-1"
+        },
+        "actorChain": null
+      }
+    }
   ]
 }

@@ -28,17 +28,7 @@ class SoukLLMLink(ABC):
 
     def complete(self, request: Any) -> AsyncIterator[ChatCompletionChunk]:
         """Repackages a completion request's fields into a `DeliveredCompletion` and hands it to `serve`."""
-        return self.serve(
-            DeliveredCompletion(
-                run_id=request.run_id,
-                provider_key=request.agent.provider_key,
-                agent_name=request.agent.name,
-                body=request.body,
-                llm_name=request.llm_name,
-                context=request.context,
-                actor_chain=request.actor_chain,
-            )
-        )
+        return self.serve(DeliveredCompletion.from_request(request))
 
     @abstractmethod
     def serve(self, delivered: DeliveredCompletion) -> AsyncIterator[ChatCompletionChunk]:
