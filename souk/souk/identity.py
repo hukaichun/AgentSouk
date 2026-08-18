@@ -74,7 +74,7 @@ def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:
 
 
 def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
-    """Builds the canonical bytes an LLM provider signs to prove it made a given KYOK completion call.
+    """Builds the canonical bytes the agent provider signs to prove it made a given KYOK completion call.
 
     Binds the payload to the bearer token, timestamp, and a hash of the
     request body, so a captured signature can't be replayed for a

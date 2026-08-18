@@ -220,7 +220,11 @@ class Souk:
         agents: list[dict[str, Any]],
         provider_name: str | None = None,
     ) -> Registration:
-        """Verify the signed registration, store the agents, and drop any attached agent no longer registered.
+        """Verify the signed registration, store the agents, and withdraw any attached agent omitted from this batch.
+
+        Withdrawal is from the broker only: an omitted agent stays registered
+        in the database (see `repo.register_agents`) but goes offline until it
+        is registered again, so re-register the full roster while attached.
 
         Raises `InvalidRegistration` if the timestamp is stale or the signature doesn't verify.
         """

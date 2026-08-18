@@ -48,11 +48,13 @@ class InvalidRegistration(SoukError):
 
 
 class KyokRejected(SoukError):
-    """A KYOK completion call was refused; `status` is the HTTP status the caller should see.
+    """A KYOK completion call was refused; `status` is the status code a caller should be told.
 
-    The reasons differ in kind, so `status` varies with them: an
-    unusable bearer token or call signature is 401, a run that is no
-    longer bound or an unregistered agent is 403, a detached LLM
+    Mapping it onto a transport is the serving layer's job. The reasons
+    differ in kind, so `status` varies with them: an unusable bearer
+    token or call signature is 401, a request body that isn't valid
+    JSON is 400, a run that isn't currently active or an unregistered
+    agent is 403, a run whose KYOK binding is gone or a detached LLM
     provider is 503, and the provider's own completion call failing is
     502.
     """

@@ -72,7 +72,7 @@ async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
 
 
 async def _handle_finish(souk: "Souk", run: Run, cmd: FinishStream) -> None:
-    """Settle the run's final status and, on success, fold its events into thread messages.
+    """Settle the run's final status and, when it completed or paused, fold its events into thread messages.
 
     Status is "input-required" if the run paused, "completed" if it saw `RUN_FINISHED`,
     "cancelled" if a cancel was requested, else "failed". A run that ends failed without
