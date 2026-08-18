@@ -465,3 +465,72 @@ async def test_an_unregistered_llm_provider_cannot_attach(souk):
     lurker = InProcessLLMProvider(ProviderIdentity.generate(), StubLLM())
     with pytest.raises(LlmProviderNotFound):
         await souk.attach_llm_provider(lurker, ["gpt4"])
+
+
+async def test_deleting_an_offering_mirrors_delete_agent(souk):
+    from souk_llm_provider_sdk import sign_llm_deletion
+
+    from souk.errors import InvalidRegistration, LlmOfferingInUse
+    from souk.kyok import KyokBinding
+
+    identity = ProviderIdentity.generate()
+    signature, timestamp = sign_llm_registration(identity, ["gone"])
+    await souk.register_llm_providers(identity.public_key, signature, timestamp, ["gone"])
+    ref = LlmRef(provider_key=identity.public_key, name="gone")
+
+    signature, timestamp = sign_llm_deletion(identity, "never-registered")
+    with pytest.raises(LlmProviderNotFound):
+        await souk.delete_llm_offering(identity.public_key, "never-registered", signature, timestamp)
+
+    signature, timestamp = sign_llm_deletion(identity, "something-else")
+    with pytest.raises(InvalidRegistration):
+        await souk.delete_llm_offering(identity.public_key, "gone", signature, timestamp)
+
+    await souk.attach_llm_provider(InProcessLLMProvider(identity, StubLLM()), ["gone"])
+    signature, timestamp = sign_llm_deletion(identity, "gone")
+    with pytest.raises(LlmOfferingInUse) as exc:
+        await souk.delete_llm_offering(identity.public_key, "gone", signature, timestamp)
+    assert exc.value.reason == "connected"
+
+    souk.detach_llm_provider(identity.public_key)
+    souk.kyok_relay.bind_run("run-x", KyokBinding(llm_provider=ref))
+    with pytest.raises(LlmOfferingInUse) as exc:
+        await souk.delete_llm_offering(identity.public_key, "gone", signature, timestamp)
+    assert exc.value.reason == "active_run"
+
+    souk.kyok_relay.discard("run-x")
+    await souk.delete_llm_offering(identity.public_key, "gone", signature, timestamp)
+    async with souk.session() as session:
+        assert await repo.get_llm_provider(session, ref) is None
+
+
+async def test_souk_counts_what_it_observed_while_relaying(souk, serve, llm):
+    from souk_llm_provider_sdk import CompletionRefused
+
+    stub, identity, ref = llm
+    agent = KyokTokenAgent()
+    served, stream = await _run_with_token(souk, serve, agent, ref)
+    body = _completion_body()
+
+    relay = await KyokAdapter(souk).complete(
+        agent.token, body, **_signed_call(served.identity, agent.token, body)
+    )
+    await relay.collapsed()
+
+    stub.refuse = CompletionRefused({"kind": "budget-ceiling"})
+    relay = await KyokAdapter(souk).complete(
+        agent.token, body, **_signed_call(served.identity, agent.token, body)
+    )
+    with pytest.raises(KyokRejected):
+        await relay.collapsed()
+
+    stub.refuse = PermissionError("nope")
+    relay = await KyokAdapter(souk).complete(
+        agent.token, body, **_signed_call(served.identity, agent.token, body)
+    )
+    with pytest.raises(KyokRejected):
+        await relay.collapsed()
+
+    quality = souk.kyok_relay.quality()[identity.public_key]
+    assert (quality.completions, quality.refused, quality.failed) == (1, 1, 1)
+    await _finish(agent, stream)

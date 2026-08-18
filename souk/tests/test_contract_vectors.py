@@ -5,6 +5,7 @@ from pathlib import Path
 
 from souk.identity import (
     agent_deletion_signing_payload,
+    llm_deletion_signing_payload,
     kyok_call_signing_payload,
     llm_registration_signing_payload,
     registration_signing_payload,
@@ -17,6 +18,7 @@ BUILDERS = {
     "agent-registration": lambda i: registration_signing_payload(i["names"], i["timestamp"]),
     "llm-registration": lambda i: llm_registration_signing_payload(i["names"], i["timestamp"]),
     "agent-deletion": lambda i: agent_deletion_signing_payload(i["agent_name"], i["timestamp"]),
+    "llm-deletion": lambda i: llm_deletion_signing_payload(i["name"], i["timestamp"]),
     "kyok-call": lambda i: kyok_call_signing_payload(
         i["bearer"], i["timestamp"], i["body_sha256_hex"]
     ),

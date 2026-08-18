@@ -38,6 +38,7 @@ def is_timestamp_fresh(timestamp: int) -> bool:
 _REGISTER = "souk-register"
 _REGISTER_LLM = "souk-register-llm"
 _DELETE_AGENT = "souk-delete-agent"
+_DELETE_LLM = "souk-delete-llm"
 _KYOK_CALL = "souk-kyok-call"
 
 
@@ -74,6 +75,17 @@ def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:
     captured registration signature can't be replayed to delete the agent.
     """
     return f"{_DELETE_AGENT}:{agent_name}:{timestamp}".encode()
+
+
+def llm_deletion_signing_payload(name: str, timestamp: int) -> bytes:
+    """Builds the canonical bytes an LLM provider must sign to authorize deleting one of its offerings.
+
+    The LLM mirror of `agent_deletion_signing_payload`, under its own domain
+    tag for the same reason. `souk_llm_provider_sdk.llm_deletion_payload`
+    computes this same payload independently on the provider side and both
+    must agree byte-for-byte.
+    """
+    return f"{_DELETE_LLM}:{name}:{timestamp}".encode()
 
 
 def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:

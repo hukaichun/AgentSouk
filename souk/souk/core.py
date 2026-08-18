@@ -24,13 +24,20 @@ from souk.broker import (
 from souk.changes import ChangeEvent, LlmRosterChanged, RosterChanged, RunStatusChanged
 from souk.config import CoreSettings
 from souk.db_schema import DEFAULT_DB_SCHEMA, EXPECTED_SCHEMA_REVISION, quoted_schema
-from souk.errors import AgentInUse, AgentNotFound, InvalidRegistration, LlmProviderNotFound
+from souk.errors import (
+    AgentInUse,
+    AgentNotFound,
+    InvalidRegistration,
+    LlmOfferingInUse,
+    LlmProviderNotFound,
+)
 from souk.handlers import make_handlers
 from souk.health import run_health_sweeps_forever
 from souk.identity import (
     SoukIdentity,
     agent_deletion_signing_payload,
     is_timestamp_fresh,
+    llm_deletion_signing_payload,
     llm_registration_signing_payload,
     registration_signing_payload,
     verify_signature,
@@ -469,6 +476,40 @@ class Souk:
 
             await repo.delete_agent(session, agent)
         self._notify_change(RosterChanged())
+
+    async def delete_llm_offering(
+        self, public_key: str, name: str, signature: str, timestamp: int
+    ) -> None:
+        """Delete an LLM offering's record after verifying the signature and that it's safe to remove — the mirror of `delete_agent`.
+
+        Raises `LlmProviderNotFound` if unregistered, or `LlmOfferingInUse` if a
+        provider is currently serving it or a live run is bound to it. Offerings
+        carry no conversation history, so there is no `has_history` refusal.
+        """
+        if not is_timestamp_fresh(timestamp):
+            raise InvalidRegistration("deletion timestamp too far from souk's clock")
+        if not verify_signature(
+            public_key, signature, llm_deletion_signing_payload(name, timestamp)
+        ):
+            raise InvalidRegistration("invalid deletion signature")
+
+        ref = LlmRef(provider_key=public_key, name=name)
+        async with self.session() as session:
+            record = await repo.get_llm_provider(session, ref)
+            if record is None:
+                raise LlmProviderNotFound(f"LLM offering '{ref}' is not registered")
+            if self.kyok_relay.serving(ref) is not None:
+                raise LlmOfferingInUse(
+                    f"LLM offering '{ref}' has a provider serving it", reason="connected"
+                )
+            bound = self.kyok_relay.bound_runs(ref)
+            if bound:
+                raise LlmOfferingInUse(
+                    f"LLM offering '{ref}' has {bound} live run(s) bound to it",
+                    reason="active_run",
+                )
+            await repo.delete_llm_provider(session, ref)
+        self._notify_change(LlmRosterChanged())
 
     def report_event(self, run_id: str, event: Any, *, claimed_by: str) -> bool:
         """Relay `event` into the run's stream if `claimed_by` holds the run (or can late-claim it).

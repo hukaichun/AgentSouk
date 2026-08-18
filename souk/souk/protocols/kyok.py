@@ -118,17 +118,34 @@ class KyokAdapter:
 
         return CompletionRelay(
             stream_requested=bool(payload.get("stream")),
-            chunks=link.complete(
-                CompletionRequest(
-                    run_id=token.run_id,
-                    agent=token.agent,
-                    body=payload,
-                    llm_name=binding.llm_provider.name,
-                    context=binding.context,
-                    actor_chain=binding.actor_chain,
-                )
+            chunks=self._counted(
+                binding.llm_provider.provider_key,
+                link.complete(
+                    CompletionRequest(
+                        run_id=token.run_id,
+                        agent=token.agent,
+                        body=payload,
+                        llm_name=binding.llm_provider.name,
+                        context=binding.context,
+                        actor_chain=binding.actor_chain,
+                    )
+                ),
             ),
         )
+
+    async def _counted(
+        self, public_key: str, chunks: AsyncIterator[ChatCompletionChunk]
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Passes `chunks` through while recording what souk observed into the relay's quality counters."""
+        try:
+            async for chunk in chunks:
+                yield chunk
+        except Exception as e:
+            self._souk.kyok_relay.note_outcome(
+                public_key, "refused" if _refusal_of(e) is not None else "failed"
+            )
+            raise
+        self._souk.kyok_relay.note_outcome(public_key, "completions")
 
     async def _verify_caller(
         self, token: KyokToken, bearer: str, body: bytes, timestamp: str, signature: str

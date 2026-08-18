@@ -42,6 +42,15 @@
       "signature_hex": "d83f85c4c85b9ee8674bd929da745d2bdcf7075071c073b0a1c223e9560e1c729f39278d1b1913f34670cd66d79b10afb168708e402269e99b0b54330379b602"
     },
     {
+      "kind": "llm-deletion",
+      "inputs": {
+        "name": "gpt-4",
+        "timestamp": 1755500000
+      },
+      "payload_utf8": "souk-delete-llm:gpt-4:1755500000",
+      "signature_hex": "172d618169c0c699a66139e52c5efc90bda814844d3e1656ea5d308bd40f454c8d0ae3626a67d776111d51cee050c06fe9db0bc4aaccf091563625c4aa0ac200"
+    },
+    {
       "kind": "kyok-call",
       "inputs": {
         "bearer": "bearer-token-abc",
