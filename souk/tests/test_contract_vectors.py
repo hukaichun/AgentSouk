@@ -115,3 +115,22 @@ def test_cross_party_formats_without_a_domain_tag_are_vectored_too():
     """The tag scan can't see formats that aren't tagged strings — this pins the rest by name."""
     assert {c["kind"] for c in VECTORS.get("chains", [])} == {"actor-chain"}
     assert {w["kind"] for w in VECTORS.get("wire", [])} == {"delivered-run", "delivered-completion"}
+
+
+def test_both_sides_props_twins_validate_the_same_frame():
+    from souk_provider_sdk import CallerProps as SdkCaller
+    from souk_provider_sdk import KyokForwardedProps as SdkKyok
+
+    from souk.kyok import KyokForwardedProps
+    from souk.props import CallerProps
+
+    (frame,) = [w["frame"] for w in VECTORS["wire"] if w["kind"] == "delivered-run"]
+    props = frame["runInput"]["forwardedProps"]
+
+    for model, twin, key in (
+        (CallerProps, SdkCaller, "caller"),
+        (KyokForwardedProps, SdkKyok, "kyok"),
+    ):
+        ours = model.model_validate(props[key]).model_dump(mode="json", by_alias=True)
+        theirs = twin.model_validate(props[key]).model_dump(mode="json", by_alias=True)
+        assert ours == theirs == props[key], key

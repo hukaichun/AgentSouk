@@ -106,6 +106,12 @@ def strip_kyok_context(metadata: dict) -> dict:
 
 
 class KyokForwardedProps(BaseModel):
+    """souk's `forwardedProps.kyok` entry: the grant a KYOK-bound run's agent presents when calling for completions.
+
+    `souk_provider_sdk.props.KyokForwardedProps` is the independent twin the
+    agent provider validates with; the delivered-run frame in
+    `docs/contract-vectors.json` pins the two.
+    """
 
     model_config = ConfigDict(frozen=True)
 

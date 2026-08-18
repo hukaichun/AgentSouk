@@ -35,10 +35,11 @@ class DeliveredRun(BaseModel):
     `docs/contract-vectors.json`, so no transport hand-writes the mapping.
     `metadata` is part of the wire contract, defaulting to empty.
     `run_input.forwarded_props` is the caller's free-form slot, plus the two
-    keys souk itself adds — `caller` and `kyok` — whose shapes are declared
-    by `souk.props` (`CallerProps`) and `souk.kyok` (`KyokForwardedProps`);
-    validate against those instead of re-deriving the shape from souk's
-    source.
+    keys souk itself adds — `caller` and `kyok` — declared by this package's
+    own `CallerProps` and `KyokForwardedProps` (`souk_provider_sdk.props`);
+    validate with those rather than restating them. They are independent
+    twins of souk's models, pinned to them by the delivered-run frame in
+    `docs/contract-vectors.json`.
     """
 
     model_config = ConfigDict(frozen=True, populate_by_name=True)

@@ -89,7 +89,7 @@
   "wire": [
     {
       "kind": "delivered-run",
-      "note": "the frame a transport carries for an offered run: DeliveredRun.model_dump(by_alias=True); rebuild with model_validate",
+      "note": "the frame a transport carries for an offered run: DeliveredRun.model_dump(by_alias=True); rebuild with model_validate. forwardedProps carries both souk-invented keys \u2014 caller (CallerProps; note chain may be null) and kyok (KyokForwardedProps; the token here is a fixed opaque example, real ones are minted per run) \u2014 each side's twin must validate them.",
       "frame": {
         "runId": "run-1",
         "agentName": "translator",
@@ -117,6 +117,9 @@
               },
               "actors": [],
               "chain": null
+            },
+            "kyok": {
+              "token": "a2t0LXZlY3Rvci1ib2R5.0000000000000000000000000000000000000000000000000000000000000000"
             }
           },
           "resume": null

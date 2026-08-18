@@ -20,10 +20,14 @@ from souk_provider_sdk.identity import (
     verify_chain,
     verify_signature,
 )
+from souk_provider_sdk.props import CallerProps, KyokForwardedProps, VerifiedActor
 from souk_provider_sdk.provider import AgentHandle, DeliveredRun, HandleProvider, Provider, Refusal
 from souk_provider_sdk.runtime import ProviderRuntime
 
 __all__ = [
+    "CallerProps",
+    "KyokForwardedProps",
+    "VerifiedActor",
     "InvalidChain",
     "VerifiedChain",
     "verify_chain",

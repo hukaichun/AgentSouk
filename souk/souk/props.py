@@ -22,9 +22,11 @@ class CallerProps(BaseModel):
 
     AG-UI leaves `forwardedProps` free-form for the caller; `caller` and
     `kyok` (`souk.kyok.KyokForwardedProps`) are the two keys souk itself
-    adds, and this model is their declaration — a provider or serving
-    layer validates against it instead of re-deriving the shape from
-    souk's source. `subject` and each hop come from
+    adds, and this model is their declaration on souk's side.
+    `souk_provider_sdk.props.CallerProps` is the independent twin a
+    provider validates with — neither package imports the other, and the
+    delivered-run frame in `docs/contract-vectors.json` pins the two
+    byte-for-byte. `subject` and each hop come from
     `verify_actor_chain`; `chain` is the raw hop JWTs so the provider
     can re-verify without trusting souk's summary.
     """
