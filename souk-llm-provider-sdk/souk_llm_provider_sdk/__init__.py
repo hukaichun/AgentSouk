@@ -7,7 +7,9 @@ from souk_llm_provider_sdk.contract import (
     KYOK_FORWARDED_PROPS_KEY,
 )
 from souk_llm_provider_sdk.identity import (
+    llm_deletion_payload,
     llm_registration_payload,
+    sign_llm_deletion,
     sign_llm_registration,
 )
 from souk_llm_provider_sdk.inprocess import InProcessLLMProvider
@@ -29,6 +31,8 @@ __all__ = [
     "InProcessLLMProvider",
     "SoukLLMLink",
     "ProviderIdentity",
+    "llm_deletion_payload",
     "llm_registration_payload",
+    "sign_llm_deletion",
     "sign_llm_registration",
 ]

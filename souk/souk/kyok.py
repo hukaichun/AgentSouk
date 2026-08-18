@@ -158,12 +158,27 @@ class ConnectedLLMProvider(Protocol):
     def complete(self, request: CompletionRequest) -> AsyncIterator[ChatCompletionChunk]: ...
 
 
+@dataclass(frozen=True)
+class LlmProviderQuality:
+    """Per-LLM-provider counters of what souk observed while relaying completions — the mirror of the broker's `ProviderQuality`.
+
+    `completions` streamed to the end; `refused` ended in a structured
+    refusal; `failed` died with anything else. souk counts what it saw and
+    judges nothing.
+    """
+
+    completions: int = 0
+    refused: int = 0
+    failed: int = 0
+
+
 class KyokRelay:
     """Tracks which LLM offering each in-flight run is bound to, and which links serve each offering."""
 
     def __init__(self) -> None:
         self._bindings: dict[str, KyokBinding] = {}
         self._links: dict[LlmRef, ConnectedLLMProvider] = {}
+        self._quality: dict[str, dict[str, int]] = {}
 
 
     def bind_run(self, run_id: str, binding: KyokBinding) -> None:
@@ -203,3 +218,15 @@ class KyokRelay:
 
     def served_by(self, public_key: str) -> list[LlmRef]:
         return [ref for ref in self._links if ref.provider_key == public_key]
+
+    def bound_runs(self, ref: LlmRef) -> int:
+        return sum(1 for b in self._bindings.values() if b.llm_provider == ref)
+
+    def note_outcome(self, public_key: str, outcome: str) -> None:
+        counters = self._quality.setdefault(
+            public_key, {"completions": 0, "refused": 0, "failed": 0}
+        )
+        counters[outcome] += 1
+
+    def quality(self) -> dict[str, LlmProviderQuality]:
+        return {key: LlmProviderQuality(**counters) for key, counters in self._quality.items()}

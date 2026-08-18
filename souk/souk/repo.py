@@ -375,6 +375,16 @@ async def count_runs_for_agent(session: AsyncSession, agent: AgentRef, statuses:
     ).scalar_one()
 
 
+async def delete_llm_provider(session: AsyncSession, ref: LlmRef) -> bool:
+    result = await session.execute(
+        delete(llm_providers).where(
+            llm_providers.c.provider_key == ref.provider_key, llm_providers.c.name == ref.name
+        )
+    )
+    await session.commit()
+    return result.rowcount > 0
+
+
 async def delete_agent(session: AsyncSession, agent: AgentRef) -> bool:
     result = await session.execute(
         delete(agents).where(

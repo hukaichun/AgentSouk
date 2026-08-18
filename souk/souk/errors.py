@@ -28,6 +28,19 @@ class LlmProviderNotFound(SoukError):
     pass
 
 
+class LlmOfferingInUse(SoukError):
+    """Raised when deleting an LLM offering is refused because it's still in use — the mirror of `AgentInUse`.
+
+    `reason` is a machine-readable code distinct from the human-readable
+    message: "connected" (a provider is currently serving it) or
+    "active_run" (a live run is bound to it).
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
 class AgentInUse(SoukError):
     """Raised when deleting an agent is refused because it's still in use.
 
