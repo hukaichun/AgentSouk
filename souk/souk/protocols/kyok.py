@@ -5,7 +5,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from openai.types.chat import ChatCompletion, ChatCompletionChunk, CompletionCreateParams
 from openai.types.chat.chat_completion import Choice
@@ -32,7 +32,15 @@ class CompletionRelay:
     consumed in one shot as an OpenAI `ChatCompletion` (`collapsed`) or streamed out as
     server-sent chunks (`encode`). Any error raised while draining `chunks` is surfaced as
     `KyokRejected` (status 502) from `collapsed`, or as an inline `{"error": ...}` payload
-    followed by end-of-stream from `encode`."""
+    followed by end-of-stream from `encode`.
+
+    An error carrying a `refusal` dict (the LLM provider's structured
+    refusal — `souk_llm_provider_sdk.CompletionRefused` builds these; the
+    attribute name is the contract, read duck-typed) travels intact: it
+    becomes the `{"error": ...}` payload in-stream, or rides `KyokRejected.
+    refusal`, instead of being flattened to prose. souk relays the payload
+    and never interprets it — its vocabulary belongs to the LLM provider
+    and its callers."""
 
     stream_requested: bool
     chunks: AsyncIterator[ChatCompletionChunk]
@@ -41,7 +49,11 @@ class CompletionRelay:
         try:
             collected = [chunk async for chunk in self.chunks]
         except Exception as e:
-            raise KyokRejected(f"KYOK bridge failed to complete: {e}", status=502) from e
+            raise KyokRejected(
+                f"KYOK bridge failed to complete: {e}",
+                status=502,
+                refusal=_refusal_of(e),
+            ) from e
         return collapse_stream(collected)
 
     async def encode(self) -> AsyncIterator[str]:
@@ -50,9 +62,15 @@ class CompletionRelay:
                 yield chunk.model_dump_json()
         except Exception as e:
             logger.warning("KYOK bridge failed mid-stream: %s", e)
-            yield json.dumps({"error": {"message": str(e)}})
+            refusal = _refusal_of(e)
+            yield json.dumps({"error": refusal if refusal is not None else {"message": str(e)}})
             return
         yield "[DONE]"
+
+
+def _refusal_of(e: Exception) -> dict[str, Any] | None:
+    refusal = getattr(e, "refusal", None)
+    return refusal if isinstance(refusal, dict) else None
 
 
 class KyokAdapter:

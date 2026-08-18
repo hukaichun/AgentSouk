@@ -24,6 +24,22 @@ class DeliveredCompletion:
 CompletionHandler = Callable[[DeliveredCompletion], AsyncIterator[ChatCompletionChunk]]
 
 
+class CompletionRefused(Exception):
+    """Raise from a `CompletionHandler` to answer with a structured refusal instead of an opaque failure.
+
+    `refusal` travels intact through souk's relay to the calling agent — the
+    library defines only this envelope, never the vocabulary inside it; what
+    the payload means is between this provider and its callers. The attribute
+    name is the contract souk reads duck-typed (any exception carrying a
+    `refusal` dict), so neither package imports the other. Any other
+    exception still collapses to an unstructured failure.
+    """
+
+    def __init__(self, refusal: dict[str, Any]) -> None:
+        super().__init__(str(refusal))
+        self.refusal = refusal
+
+
 class InProcessLLMProvider:
     """Adapts a `CompletionHandler` to the shape KYOK expects of an attached LLM provider."""
 

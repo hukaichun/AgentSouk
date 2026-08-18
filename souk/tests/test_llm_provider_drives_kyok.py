@@ -287,6 +287,32 @@ async def test_a_policy_refusal_reaches_the_agent_as_a_502(souk, serve, llm):
     await _finish(agent, stream)
 
 
+async def test_a_structured_refusal_travels_intact_not_as_prose(souk, serve, llm):
+    from souk_llm_provider_sdk import CompletionRefused
+
+    stub, _, ref = llm
+    payload = {"kind": "budget-ceiling", "retryAfter": 5, "spent": {"runs": 3}}
+    stub.refuse = CompletionRefused(payload)
+    agent = KyokTokenAgent()
+    served, stream = await _run_with_token(souk, serve, agent, ref)
+
+    body = _completion_body()
+    relay = await KyokAdapter(souk).complete(
+        agent.token, body, **_signed_call(served.identity, agent.token, body)
+    )
+    with pytest.raises(KyokRejected) as exc:
+        await relay.collapsed()
+    assert exc.value.status == 502
+    assert exc.value.refusal == payload
+
+    relay = await KyokAdapter(souk).complete(
+        agent.token, body, **_signed_call(served.identity, agent.token, body)
+    )
+    frames = [json.loads(f) async for f in relay.encode() if f != "[DONE]"]
+    assert frames[-1] == {"error": payload}
+    await _finish(agent, stream)
+
+
 async def test_a_detached_llm_provider_is_a_503_not_a_hang(souk, serve, llm):
     _, identity, ref = llm
     agent = KyokTokenAgent()
@@ -396,6 +422,22 @@ async def test_attach_touches_and_announces_like_attach_provider(souk):
         assert [type(e) for e in events].count(LlmRosterChanged) == 3
     finally:
         unsubscribe()
+
+
+async def test_list_llm_providers_mirrors_list_agents(souk):
+    identity = ProviderIdentity.generate()
+    signature, timestamp = sign_llm_registration(identity, ["served", "idle"])
+    await souk.register_llm_providers(
+        identity.public_key, signature, timestamp, ["served", "idle"], {"tier": "gold"}
+    )
+    await souk.attach_llm_provider(InProcessLLMProvider(identity, StubLLM()), ["served"])
+
+    roster = {s.name: s for s in await souk.list_llm_providers()}
+
+    assert roster["served"].online is True
+    assert roster["idle"].online is False
+    assert roster["served"].provider_key == identity.public_key
+    assert roster["served"].metadata == {"tier": "gold"}
 
 
 async def test_reregistering_a_subset_withdraws_the_omitted_offering(souk):

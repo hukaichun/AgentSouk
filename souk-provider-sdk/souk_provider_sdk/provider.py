@@ -13,6 +13,19 @@ class Provider(Protocol):
 
 
 @dataclass(frozen=True)
+class Refusal:
+    """A permanent decline of an offered run: this provider will never accept it, so souk should stop re-offering and fail the run.
+
+    `reason` is this provider's own words; souk records it verbatim on the
+    run's failure record. Return one from `SoukLink.offer` instead of `False`
+    (which means "full right now, offer again later"). souk reads the refusal
+    duck-typed by its `reason` attribute — the attribute name is the
+    contract."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
 class DeliveredRun:
     """The run data handed to a `SoukLink`, translated from souk's internal claimed-run representation.
 

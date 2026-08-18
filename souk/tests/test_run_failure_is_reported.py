@@ -74,6 +74,42 @@ async def test_a_provider_that_raises_reaches_the_caller_as_run_error(brisk):
     assert [e["type"] for e in persisted] == ["RUN_ERROR"]
 
 
+async def test_a_permanent_refusal_fails_the_run_with_the_providers_reason(brisk):
+    from souk_provider_sdk import Refusal
+
+    registration, identity = await _register(brisk, "retired")
+    agent_id = registration.agents["retired"]
+
+    class Refuses:
+        max_concurrent_runs = None
+
+        def __init__(self) -> None:
+            self.public_key = identity.public_key
+            self.offers = 0
+
+        async def deliver(self, run):
+            self.offers += 1
+            return Refusal("this agent was retired, run something newer")
+
+        def cancel(self, run_id: str) -> None:
+            pass
+
+    link = Refuses()
+    await brisk.attach_provider(link, [agent_id.name])
+    handle = await brisk.start_run(agent_id, {"messages": []})
+
+    events = [e async for e in handle.events()]
+    assert [e["type"] for e in events] == ["RUN_ERROR"]
+    assert events[0]["message"] == "this agent was retired, run something newer"
+
+    await _until(lambda: handle.run_id not in brisk.active_runs())
+    async with brisk.session() as session:
+        stored = await repo.get_run(session, handle.run_id)
+    assert stored.status == "failed"
+    assert stored.metadata["failureReason"] == "this agent was retired, run something newer"
+    assert link.offers == 1
+
+
 async def test_a_malformed_event_fails_the_run_instead_of_relaying_garbage(brisk):
     registration, identity = await _register(brisk, "malformed")
     agent_id = registration.agents["malformed"]

@@ -57,11 +57,15 @@ class KyokRejected(SoukError):
     agent is 403, a run whose KYOK binding is gone or a detached LLM
     provider is 503, and the provider's own completion call failing is
     502.
+
+    `refusal` carries the LLM provider's structured refusal payload when
+    it raised one (else None); souk relays it without interpreting it.
     """
 
-    def __init__(self, message: str, *, status: int) -> None:
+    def __init__(self, message: str, *, status: int, refusal: dict | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.refusal = refusal
 
 
 class RunNotFound(SoukError):

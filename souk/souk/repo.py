@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.identity import provider_fingerprint
 from souk.ids import new_id
-from souk.models import AgentRecord, AgentRef, AgentSummary, LlmRef, RunRecord
+from souk.models import AgentRecord, AgentRef, AgentSummary, LlmRef, LlmSummary, RunRecord
 from souk.schema import (
     agents,
     llm_providers,
@@ -270,6 +270,45 @@ async def resolve_agent(session: AsyncSession, provider: str, name: str) -> Agen
         )
     ).mappings().first()
     return AgentRecord(**row) if row else None
+
+
+async def list_llm_providers(
+    session: AsyncSession,
+    *,
+    stale_hidden_window_seconds: int,
+) -> list[LlmSummary]:
+    """Lists registered LLM offerings, excluding any not seen within `stale_hidden_window_seconds` — the mirror of `list_agents`."""
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_hidden_window_seconds)
+    rows = (
+        await session.execute(
+            select(
+                llm_providers.c.provider_key,
+                llm_providers.c.name,
+                llm_providers.c.metadata,
+                llm_providers.c.joined_at,
+                llm_providers.c.last_seen_at,
+                providers.c.display_name.label("provider_name"),
+            )
+            .select_from(
+                llm_providers.outerjoin(
+                    providers, providers.c.public_key == llm_providers.c.provider_key
+                )
+            )
+            .where(llm_providers.c.last_seen_at >= stale_cutoff)
+            .order_by(llm_providers.c.name)
+        )
+    ).mappings().all()
+    return [
+        LlmSummary(
+            provider_key=row["provider_key"],
+            name=row["name"],
+            metadata=row["metadata"],
+            joined_at=row["joined_at"],
+            last_seen_at=row["last_seen_at"],
+            provider_name=row["provider_name"],
+        )
+        for row in rows
+    ]
 
 
 async def list_agents(

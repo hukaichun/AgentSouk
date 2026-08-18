@@ -14,7 +14,7 @@ from souk_provider_sdk.identity import (
     registration_payload,
     verify_signature,
 )
-from souk_provider_sdk.provider import AgentHandle, DeliveredRun, HandleProvider, Provider
+from souk_provider_sdk.provider import AgentHandle, DeliveredRun, HandleProvider, Provider, Refusal
 from souk_provider_sdk.runtime import ProviderRuntime
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     "LINK_REPORT_METHODS",
     "AgentHandle",
     "DeliveredRun",
+    "Refusal",
     "HandleProvider",
     "Provider",
     "ProviderIdentity",
