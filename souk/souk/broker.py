@@ -78,12 +78,22 @@ class _Capacity:
         return self.declared is None or self.in_flight < self.declared
 
 
+class Refusal(Protocol):
+    """A permanent decline of an offer, read duck-typed off `deliver`'s return: any object with a `reason` string.
+
+    The attribute name is the contract with `souk_provider_sdk.provider.Refusal`,
+    which builds these on the provider side — neither package imports the other.
+    """
+
+    reason: str
+
+
 class ConnectedProvider(Protocol):
 
     public_key: str
     max_concurrent_runs: int | None
 
-    async def deliver(self, run: ClaimedRun) -> bool:
+    async def deliver(self, run: ClaimedRun) -> bool | Refusal:
         ...
 
     def cancel(self, run_id: str) -> None:
@@ -340,17 +350,24 @@ class RunBroker:
             capacity = self._capacity.get(provider.public_key)
             if capacity is not None and not capacity.has_room:
                 return placed
-            if not await self._offer(run, provider):
+            outcome = await self._offer(run, provider)
+            if outcome == "refused":
+                queue.popleft()
+                continue
+            if not outcome:
                 return placed
             queue.popleft()
             placed = True
 
-    async def _offer(self, run: Run, provider: ConnectedProvider) -> bool:
+    async def _offer(self, run: Run, provider: ConnectedProvider) -> bool | str:
         """Delivers `run` to `provider` within `deliver_timeout_seconds` and, if
         accepted, claims it and starts its pipeline task. A timeout, an
         exception, or a declined offer all count against the provider's
         quality counters (unanswered or misdeclared) and return False without
-        claiming the run."""
+        claiming the run. A permanent refusal (a result carrying a `reason`)
+        fails the run with the provider's reason recorded verbatim and
+        returns "refused" so the caller drops it from the queue instead of
+        re-offering forever."""
         capacity = self._capacity.get(provider.public_key)
         try:
             async with asyncio.timeout(self.deliver_timeout_seconds):
@@ -378,6 +395,16 @@ class RunBroker:
                 capacity.unanswered += 1
             logger.exception("run %s: delivering to its provider failed", run.run_id)
             return False
+        reason = getattr(accepted, "reason", None)
+        if isinstance(reason, str):
+            logger.warning(
+                "provider %s permanently refused run %s: %s",
+                provider.public_key[:16],
+                run.run_id,
+                reason,
+            )
+            self._spawn(self._one_shot(run, Fail(reason)), name=f"refused:{run.run_id}")
+            return "refused"
         if not accepted:
             if capacity is not None and capacity.has_room:
                 capacity.misdeclared += 1

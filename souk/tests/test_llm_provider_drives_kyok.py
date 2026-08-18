@@ -287,6 +287,32 @@ async def test_a_policy_refusal_reaches_the_agent_as_a_502(souk, serve, llm):
     await _finish(agent, stream)
 
 
+async def test_a_structured_refusal_travels_intact_not_as_prose(souk, serve, llm):
+    from souk_llm_provider_sdk import CompletionRefused
+
+    stub, _, ref = llm
+    payload = {"kind": "budget-ceiling", "retryAfter": 5, "spent": {"runs": 3}}
+    stub.refuse = CompletionRefused(payload)
+    agent = KyokTokenAgent()
+    served, stream = await _run_with_token(souk, serve, agent, ref)
+
+    body = _completion_body()
+    relay = await KyokAdapter(souk).complete(
+        agent.token, body, **_signed_call(served.identity, agent.token, body)
+    )
+    with pytest.raises(KyokRejected) as exc:
+        await relay.collapsed()
+    assert exc.value.status == 502
+    assert exc.value.refusal == payload
+
+    relay = await KyokAdapter(souk).complete(
+        agent.token, body, **_signed_call(served.identity, agent.token, body)
+    )
+    frames = [json.loads(f) async for f in relay.encode() if f != "[DONE]"]
+    assert frames[-1] == {"error": payload}
+    await _finish(agent, stream)
+
+
 async def test_a_detached_llm_provider_is_a_503_not_a_hang(souk, serve, llm):
     _, identity, ref = llm
     agent = KyokTokenAgent()

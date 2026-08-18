@@ -4,8 +4,9 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from ag_ui.core import Message, RunAgentInput
+from pydantic import ValidationError
 
-from souk_provider_sdk.provider import DeliveredRun
+from souk_provider_sdk.provider import DeliveredRun, Refusal
 
 
 class SoukLink(ABC):
@@ -22,19 +23,28 @@ class SoukLink(ABC):
     def max_concurrent_runs(self) -> int | None:
         pass
 
-    async def deliver(self, run: Any) -> bool:
-        """Translates souk's internal claimed-run object into a `DeliveredRun` and hands it to `offer`."""
+    async def deliver(self, run: Any) -> bool | Refusal:
+        """Translates souk's internal claimed-run object into a `DeliveredRun` and hands it to `offer`.
+
+        An input that doesn't validate as `RunAgentInput` is a permanent
+        refusal, not a transient decline — re-offering the same bytes can
+        never succeed."""
+        try:
+            validated = RunAgentInput.model_validate(run.run_input)
+        except ValidationError as e:
+            return Refusal(f"input does not validate as RunAgentInput: {e}")
         return await self.offer(
             DeliveredRun(
                 run_id=run.run_id,
                 agent_name=run.agent.name,
-                run_input=RunAgentInput.model_validate(run.run_input),
+                run_input=validated,
                 thread_id=run.thread_id,
             )
         )
 
     @abstractmethod
-    async def offer(self, run: DeliveredRun) -> bool:
+    async def offer(self, run: DeliveredRun) -> bool | Refusal:
+        """Accept (`True`), decline transiently (`False` — full right now), or refuse permanently (`Refusal`)."""
         pass
 
     @abstractmethod

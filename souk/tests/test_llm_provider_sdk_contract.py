@@ -3,7 +3,9 @@ from __future__ import annotations
 import inspect
 
 from souk_llm_provider_sdk import (
+    COMPLETION_REFUSAL_ATTR,
     CONNECTED_LLM_PROVIDER_ATTRS,
+    CompletionRefused,
     DELIVERED_COMPLETION_FIELDS,
     KYOK_FORWARDED_PROPS_KEY,
     InProcessLLMProvider,
@@ -13,6 +15,7 @@ from souk_llm_provider_sdk.provider import DeliveredCompletion
 
 from souk.kyok import CompletionRequest, ConnectedLLMProvider
 from souk.protocols import agui as agui_module
+from souk.protocols import kyok as kyok_module
 
 
 def test_souk_asks_exactly_what_the_contract_says():
@@ -50,3 +53,10 @@ def test_the_token_travels_under_the_key_the_contract_names():
     assert KYOK_FORWARDED_PROPS_KEY == "kyok"
     source = inspect.getsource(agui_module.build_forwarded_props)
     assert f'extra["{KYOK_FORWARDED_PROPS_KEY}"]' in source
+
+
+def test_a_refusal_travels_under_the_attribute_the_contract_names():
+    assert COMPLETION_REFUSAL_ATTR == "refusal"
+    assert getattr(CompletionRefused({"kind": "x"}), COMPLETION_REFUSAL_ATTR) == {"kind": "x"}
+    source = inspect.getsource(kyok_module._refusal_of)
+    assert f'getattr(e, "{COMPLETION_REFUSAL_ATTR}"' in source

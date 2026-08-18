@@ -90,6 +90,20 @@ async def test_declining_is_carried_through_unchanged():
     assert await provider.deliver(_ClaimedRun("r-2", "a", _run_agent_input(), "t")) is False
 
 
+async def test_an_invalid_input_is_a_refusal_not_a_transient_decline():
+    from souk_provider_sdk import Refusal
+
+    provider = QueuedLink("abc123")
+
+    answer = await provider.deliver(
+        _ClaimedRun("r-bad", "a", {"not": "a RunAgentInput"}, "t")
+    )
+
+    assert isinstance(answer, Refusal)
+    assert "RunAgentInput" in answer.reason
+    assert provider.outbound.empty()
+
+
 async def test_cancel_reaches_the_transport():
     provider = QueuedLink("abc123")
     provider.cancel("r-3")

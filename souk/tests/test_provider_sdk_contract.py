@@ -7,6 +7,7 @@ import pytest
 
 from souk_provider_sdk import (
     CONNECTED_PROVIDER_ATTRS,
+    Refusal,
     DELIVERED_RUN_FIELDS,
     REGISTRATION_FIELDS,
     LINK_QUERY_METHODS,
@@ -20,7 +21,7 @@ from souk_provider_sdk import (
 )
 
 from souk import repo
-from souk.broker import ConnectedProvider
+from souk.broker import ConnectedProvider, RunBroker
 from souk.models import ClaimedRun
 
 
@@ -138,3 +139,9 @@ def test_the_handle_actually_carries_those_fields():
     assert REGISTRATION_FIELDS <= declared, (
         f"AgentHandle cannot express {sorted(REGISTRATION_FIELDS - declared)}"
     )
+
+
+def test_a_refusal_is_read_by_the_attribute_the_sdk_declares():
+    assert getattr(Refusal("gone"), "reason") == "gone"
+    source = inspect.getsource(RunBroker._offer)
+    assert 'getattr(accepted, "reason"' in source
