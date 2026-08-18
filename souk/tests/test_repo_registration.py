@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -13,9 +12,6 @@ from souk.schema import agents, providers
 
 
 async def _listed(session, souk):
-    """The stored half of the roster. `online` is left False here and filled
-    in by `Souk.list_agents` from who the broker can actually reach — this
-    layer has no way to know, and used to guess from `last_seen_at`."""
     return await repo.list_agents(
         session, stale_hidden_window_seconds=souk.settings.stale_hidden_window_seconds
     )
@@ -53,23 +49,12 @@ async def test_the_same_name_under_two_identities_is_two_agents(session, new_ide
     assert result_a["greeter"] != result_b["greeter"]
     assert result_a["greeter"].name == result_b["greeter"].name == "greeter"
 
-    # And each is reachable under its own key, which is the only way to
-    # reach either: the shared name addresses neither on its own.
     for identity, registered in ((a, result_a), (b, result_b)):
         row = await repo.resolve_agent(session, identity.public_key, "greeter")
         assert AgentRef(provider_key=row.provider_key, name=row.name) == registered["greeter"]
 
 
 async def test_omitting_an_agent_keeps_it_rather_than_removing_it(session, souk, new_identity):
-    """Absence from a batch is a withdrawal, not a deletion. It used to
-    de-list, which made re-registering the whole removal UX and turned a
-    partial batch — a config error, a flag off, half a deploy — into silent
-    data loss.
-
-    What *stops* is being served, and that is `Souk.register_agents`' half of
-    the job: it unregisters the withdrawn names from the broker, which is
-    where reachability lives. This layer only has to not destroy anything.
-    """
     identity = new_identity()
     both = [{"name": "greeter"}, {"name": "translator"}]
 
@@ -86,9 +71,6 @@ async def test_omitting_an_agent_keeps_it_rather_than_removing_it(session, souk,
 async def test_list_agents_excludes_an_agent_nothing_has_heard_from_in_weeks(
     session, souk, new_identity
 ):
-    """A different question from `online`, and the one this table can answer:
-    not "is anybody serving it" but "has it been away so long that listing it
-    is noise". Read-time filter only — it reappears the moment it registers."""
     identity = new_identity()
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
 

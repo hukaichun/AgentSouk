@@ -1,8 +1,3 @@
-"""The package's own pure tests — no souk anywhere. The cross-repo
-comparisons (payload builder vs souk.identity, protocol attrs vs souk's
-ConnectedLLMProvider) live in souk's suite, which imports both sides.
-"""
-
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
@@ -36,9 +31,6 @@ def test_sign_llm_registration_returns_signature_over_its_own_timestamp():
     assert isinstance(signature, str) and len(signature) == 128
 
 
-# The adapter seam: complete() reads souk's CompletionRequest by attribute.
-# This stub states the fields it reads, which is exactly what souk's
-# contract test asserts souk still sends.
 @dataclass(frozen=True)
 class _AgentRefLike:
     provider_key: str

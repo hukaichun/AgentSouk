@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import time
@@ -30,6 +29,39 @@ async def test_delegate_without_building_a_json_rpc_envelope(souk, serve):
 
     assert task["status"]["state"] == "TASK_STATE_COMPLETED"
     assert task["id"].startswith("run_")
+
+
+async def test_the_caller_is_the_declared_shape_on_both_roads(souk, serve):
+    from ag_ui.core import RunAgentInput, UserMessage
+
+    from souk.props import CallerProps
+    from souk.protocols.agui import AGUIAdapter
+
+    agui_served = await serve(EchoAgent(), "agui-callee")
+    a2a_served = await serve(EchoAgent(), "a2a-callee")
+    chain = new_actor_chain(Ed25519PrivateKey.generate(), USER)
+
+    stream = await AGUIAdapter(souk).run(
+        agui_served.agents["agui-callee"],
+        RunAgentInput(
+            thread_id="t-props",
+            run_id="r",
+            state={},
+            messages=[UserMessage(id="m1", role="user", content="hi")],
+            tools=[],
+            context=[],
+            forwarded_props={},
+            metadata={"actorChain": chain},
+        ),
+    )
+    async for _ in stream.events:
+        pass
+    await A2AAdapter(souk).send_task(a2a_served.agents["a2a-callee"], _message("hi"), actor_chain=chain)
+
+    caller = agui_served.provider.seen_caller
+    assert caller is not None
+    assert a2a_served.provider.seen_caller == caller
+    assert CallerProps.model_validate(caller).model_dump(mode="json", by_alias=True) == caller
 
 
 async def test_identity_is_carried_through_an_in_process_hop(souk, serve):

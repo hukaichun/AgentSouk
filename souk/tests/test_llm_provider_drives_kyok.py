@@ -1,17 +1,3 @@
-"""The whole KYOK loop, in process, with nothing stubbed but the model:
-a registered LLM provider attaches serving its models, a caller binds a
-run to one offering by (providerKey, name) pair — presenting its own
-credential for that provider — the agent provider spends the run's token
-on real signed completion calls, and the LLM provider's policy seam sees
-exactly who is asking and along which delegation path.
-
-This closes the gap test_kyok.py used to admit to ("nothing in core's
-suite plays the KYOK caller yet") — and it goes through the SDK on both
-sides, so the shapes each package states are exercised against souk's
-own on every run, the same second-opinion arrangement the provider SDK
-has.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -60,7 +46,6 @@ def _chunk(text: str, *, role: bool = False, finish: str | None = None) -> ChatC
 
 
 class StubLLM:
-    """The policy seam, remembering what it was shown."""
 
     def __init__(self, answer: str = "hello world") -> None:
         self.answer = answer
@@ -79,9 +64,6 @@ class StubLLM:
 
 @pytest.fixture
 async def llm(souk):
-    """A registered, attached LLM provider serving 'gpt4', stub model
-    behind it. Detached at test end so the session-scoped souk doesn't
-    carry it into the next test."""
     identity = ProviderIdentity.generate()
     signature, timestamp = sign_llm_registration(identity, ["gpt4"])
     await souk.register_llm_providers(identity.public_key, signature, timestamp, ["gpt4"])
@@ -93,9 +75,6 @@ async def llm(souk):
 
 
 class KyokTokenAgent:
-    """An agent that surfaces its run's KYOK token to the test and holds
-    the run open until released — so the test drives the completion calls
-    itself, exactly as the provider's own model client would."""
 
     def __init__(self) -> None:
         self.token: str | None = None
@@ -185,9 +164,6 @@ async def test_a_non_streaming_call_gets_the_collapsed_answer(souk, serve, llm):
 
 
 async def test_the_policy_seam_is_shown_who_is_asking(souk, serve, llm):
-    """The whole point of the redesign: the LLM provider gets the run, the
-    proven agent identity, which of its own models was addressed, and the
-    caller's credential — everything real policy keys on."""
     stub, _, ref = llm
     agent = KyokTokenAgent()
     served, stream = await _run_with_token(
@@ -212,12 +188,6 @@ async def test_the_policy_seam_is_shown_who_is_asking(souk, serve, llm):
 
 
 async def test_the_callers_context_is_never_persisted(souk, serve, llm):
-    """The credential the caller presents to its LLM provider must not be
-    readable by the agent provider — and the agent provider holds a
-    thread_id, which opens the deliberately-unauthenticated thread
-    snapshot. So the whole persisted picture of the thread must be free
-    of it. Same failure shape as the session-id disclosure this design
-    replaced; probed here rather than assumed."""
     _, _, ref = llm
     agent = KyokTokenAgent()
     _, stream = await _run_with_token(
@@ -235,10 +205,6 @@ async def test_the_callers_context_is_never_persisted(souk, serve, llm):
 
 
 async def test_a_delegated_run_inherits_binding_and_shows_its_chain(souk, serve, llm):
-    """A delegates to B inside a KYOK run: B's run spends against the same
-    offering and the same caller context — copied by souk, never through
-    A's hands — and the LLM provider sees the hop-signed chain that
-    reached B, which is what lets it police the delegation tree."""
     stub, _, ref = llm
     parent = KyokTokenAgent()
     served, stream = await _run_with_token(
@@ -246,7 +212,6 @@ async def test_a_delegated_run_inherits_binding_and_shows_its_chain(souk, serve,
     )
 
     class CalleeLLMCaller:
-        """B: reads its own run's token, spends it once, finishes."""
 
         def __init__(self) -> None:
             self.identity: Identity | None = None
@@ -306,8 +271,6 @@ async def test_a_streaming_call_streams(souk, serve, llm):
 
 
 async def test_a_policy_refusal_reaches_the_agent_as_a_502(souk, serve, llm):
-    """Refusing is the LLM provider's right and its exception is the
-    mechanism — souk relays the failure, it does not overrule it."""
     stub, _, ref = llm
     stub.refuse = PermissionError("quota exhausted for this agent")
     agent = KyokTokenAgent()
@@ -355,8 +318,6 @@ async def test_a_finished_run_stops_spending_at_once(souk, serve, llm):
 
 
 async def test_the_binding_dies_with_the_run(souk, serve, llm):
-    """The forget funnel end to end: no manual cleanup call anywhere, and
-    the relay entry is gone once the run is."""
     _, _, ref = llm
     agent = KyokTokenAgent()
     _, stream = await _run_with_token(souk, serve, agent, ref)
@@ -384,8 +345,6 @@ async def test_a_run_without_the_opt_in_gets_no_token(souk, serve):
 
 
 async def test_two_providers_may_both_offer_gpt4(souk, serve, llm):
-    """The reason addressing is the pair: names carry no ownership, and a
-    run bound to one provider's gpt4 is untouched by another's."""
     stub_a, _, ref_a = llm
     other = ProviderIdentity.generate()
     signature, timestamp = sign_llm_registration(other, ["gpt4"])
@@ -412,9 +371,6 @@ async def test_two_providers_may_both_offer_gpt4(souk, serve, llm):
 
 
 async def test_attach_touches_and_announces_like_attach_provider(souk):
-    """The attach mirror, checked member by member: attaching marks the
-    offerings seen (online from attach, not from first work) and announces
-    the change; detaching announces too, and a no-op detach stays silent."""
     from souk.changes import LlmRosterChanged
 
     events: list = []
@@ -436,17 +392,34 @@ async def test_attach_touches_and_announces_like_attach_provider(souk):
         assert after >= before
 
         souk.detach_llm_provider(identity.public_key)
-        souk.detach_llm_provider(identity.public_key)  # no-op: nothing attached
-        assert [type(e) for e in events].count(LlmRosterChanged) == 3  # register, attach, one detach
+        souk.detach_llm_provider(identity.public_key)
+        assert [type(e) for e in events].count(LlmRosterChanged) == 3
     finally:
         unsubscribe()
 
 
+async def test_reregistering_a_subset_withdraws_the_omitted_offering(souk):
+    identity = ProviderIdentity.generate()
+    signature, timestamp = sign_llm_registration(identity, ["gpt4", "gpt5"])
+    await souk.register_llm_providers(
+        identity.public_key, signature, timestamp, ["gpt4", "gpt5"]
+    )
+    await souk.attach_llm_provider(
+        InProcessLLMProvider(identity, StubLLM()), ["gpt4", "gpt5"]
+    )
+
+    signature, timestamp = sign_llm_registration(identity, ["gpt4"])
+    await souk.register_llm_providers(identity.public_key, signature, timestamp, ["gpt4"])
+
+    kept = LlmRef(provider_key=identity.public_key, name="gpt4")
+    dropped = LlmRef(provider_key=identity.public_key, name="gpt5")
+    assert souk.kyok_relay.serving(kept) is not None
+    assert souk.kyok_relay.serving(dropped) is None
+    async with souk.session() as session:
+        assert await repo.get_llm_provider(session, dropped) is not None
+
+
 async def test_an_unregistered_llm_provider_cannot_attach(souk):
-    """In-process is not trusted: sharing the process is not a reason to
-    skip registration, for this roster exactly as for the other — and the
-    error is the mirror of attach_provider's AgentNotFound, not a
-    registration-signature complaint."""
     lurker = InProcessLLMProvider(ProviderIdentity.generate(), StubLLM())
     with pytest.raises(LlmProviderNotFound):
         await souk.attach_llm_provider(lurker, ["gpt4"])

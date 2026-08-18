@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import base64
@@ -29,12 +28,6 @@ _AGENT = AgentRef(provider_key="ab" * 32, name="translator")
 
 
 def test_a_kyok_call_signs_what_it_is_for():
-    """Every signed payload in this system starts with the operation it
-    authorises, so a signature captured for one cannot be presented as
-    another (see souk.identity). This one did not, and the only thing
-    stopping a collision with a registration was that it would have needed a
-    bearer equal to the literal string `souk-register`.
-    """
     payload = kyok_call_signing_payload("some-token", 1755300000, "ab" * 32).decode()
 
     assert payload.startswith("souk-kyok-call:")
@@ -42,21 +35,12 @@ def test_a_kyok_call_signs_what_it_is_for():
 
 
 def test_both_sides_state_the_kyok_signing_payload_the_same_way():
-    """souk and souk_provider_sdk each write this payload out themselves and
-    neither imports the other, which is the point (see that package's
-    identity.py): a copy derived from souk agrees with souk by construction
-    and therefore checks nothing. Two independent statements only check each
-    other if something compares them, and this is that something.
-    """
     assert kyok_call_payload("tok", 1755300000, "cafe") == kyok_call_signing_payload(
         "tok", 1755300000, "cafe"
     )
 
 
 def test_both_sides_state_the_llm_registration_payload_the_same_way():
-    """Same device for the LLM provider's registration: souk_llm_provider_sdk
-    states the payload without importing souk, and this comparison is what
-    makes the two statements check each other."""
     assert llm_registration_payload(["smart", "fast"], 1755300000) == (
         llm_registration_signing_payload(["fast", "smart"], 1755300000)
     )
@@ -71,18 +55,6 @@ def test_kyok_token_roundtrip():
 
 
 def test_a_token_carries_exactly_the_run_the_agent_and_its_expiry():
-    """The token is signed, not sealed, and its reader is the agent
-    provider — the one party KYOK exists to keep away from the caller's
-    key. Anything in here is disclosed to it.
-
-    Asserted over the whole decoded body, not one field: the session
-    routing key this token used to carry was abused exactly once before
-    the whole rendezvous concept was removed (a provider decoded its own
-    token, connected as the caller's bridge, and was handed another
-    provider's completion), and "not more than these four" is what keeps
-    a later addition from quietly reintroducing a caller-side secret
-    under any name.
-    """
     token = issue_kyok_token("run_1", _AGENT, "test-signing-secret")
     body = json.loads(base64.urlsafe_b64decode(token.split(".", 1)[0].encode()))
 
@@ -115,9 +87,6 @@ def test_malformed_kyok_token_rejected(malformed):
     assert verify_kyok_token(malformed, "test-signing-secret") is None
 
 
-# ---- the typed metadata.kyok read
-
-
 def test_a_well_formed_opt_in_parses_to_the_pair_and_context():
     opt_in = parse_kyok_opt_in(
         {"kyok": {"llmProvider": {"providerKey": "ab" * 32, "name": "gpt4"}, "context": {"v": 1}}}
@@ -136,9 +105,6 @@ def test_a_well_formed_opt_in_parses_to_the_pair_and_context():
     ],
 )
 def test_anything_else_is_no_opt_in_not_an_error(metadata):
-    """Metadata is free-form by contract; only souk's own well-formed
-    corner of it opts in. A bare name is deliberately in this list — the
-    pair is the address."""
     opt_in = parse_kyok_opt_in(metadata)
     assert opt_in is None or opt_in.llm_provider is None
 
@@ -149,12 +115,10 @@ def test_strip_removes_exactly_the_context():
     assert "context" not in stripped["kyok"]
     assert stripped["kyok"]["llmProvider"] == {"providerKey": "k", "name": "m"}
     assert stripped["other"] == 1
-    assert metadata["kyok"]["context"] == "secret"  # input not mutated
+    assert metadata["kyok"]["context"] == "secret"
 
 
 def test_forwarded_props_roundtrip_through_the_model():
-    """Writer and reader are the same model, so what one plants the other
-    finds — and a run without the grant reads as None, not as {}."""
     entry = kyok_forwarded_props("run_1", _AGENT, "test-signing-secret")
     grant = read_kyok_forwarded_props({"kyok": entry})
     assert grant is not None
@@ -162,9 +126,6 @@ def test_forwarded_props_roundtrip_through_the_model():
     assert decoded.run_id == "run_1" and decoded.agent == _AGENT
     assert read_kyok_forwarded_props({}) is None
     assert read_kyok_forwarded_props(None) is None
-
-
-# ---- collapse_stream
 
 
 def _chunk(
@@ -231,14 +192,6 @@ def test_collapse_keeps_choices_apart_by_index():
     assert completion.choices[1].finish_reason == "length"
 
 
-# ---- KyokRelay lifetimes
-#
-# The registry this class replaced had no enforced lifetime and it was
-# measured, not theorised: 100k entries nothing would ever reclaim retained
-# 81 MiB. Every test here is about an entry dying when its reason to exist
-# does.
-
-
 class _Link:
     public_key = "cd" * 32
 
@@ -259,14 +212,10 @@ def test_a_binding_lives_until_its_run_is_discarded():
 
 
 def test_discard_of_a_run_that_never_bound_is_a_no_op():
-    """The forget funnel calls discard for every run ending, KYOK or not."""
     KyokRelay().discard("never-seen")
 
 
 def test_inherit_copies_offering_and_context_with_the_childs_own_chain():
-    """Delegation: the child spends against the same offering and caller
-    context, but the chain in a binding describes the path to *that* run —
-    the parent's chain would claim provenance the child does not have."""
     relay = KyokRelay()
     relay.bind_run(
         "run_parent",
@@ -283,21 +232,20 @@ def test_inherit_copies_offering_and_context_with_the_childs_own_chain():
     assert relay.binding_for("run_x") is None
 
 
-def test_detach_removes_every_offering_of_that_identity():
+def test_withdrawing_everything_served_by_an_identity_empties_its_offerings():
     relay = KyokRelay()
     link = _Link()
     fast = LlmRef(provider_key=link.public_key, name="fast")
     relay.attach({_GPT4: link, fast: link})
     assert relay.serving(_GPT4) is link
-    relay.detach(link.public_key)
+    assert sorted(r.name for r in relay.served_by(link.public_key)) == ["fast", "gpt4"]
+    relay.withdraw(relay.served_by(link.public_key))
     assert relay.serving(_GPT4) is None
     assert relay.serving(fast) is None
     assert relay._links == {}
 
 
 def test_reattach_replaces_the_connection_under_the_same_offering():
-    """A reconnect is a replacement: bindings name an offering, so the next
-    completion resolves to whatever connection that identity has now."""
     relay = KyokRelay()
     old, new = _Link(), _Link()
     relay.attach({_GPT4: old})
@@ -306,11 +254,6 @@ def test_reattach_replaces_the_connection_under_the_same_offering():
 
 
 def test_broker_forget_funnel_discards_the_binding():
-    """The wiring itself: Souk.__init__ hooks kyok_relay.discard onto
-    RunBroker's forget listeners, so a run ending — any ending — takes its
-    binding with it. Asserted against a bare RunBroker to keep this a unit
-    test; the full path is covered by the drives-kyok suite.
-    """
     from souk.broker import RunBroker
 
     relay = KyokRelay()

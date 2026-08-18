@@ -1,31 +1,3 @@
-"""KYOK translation: relaying a provider's LLM call to whoever is paying.
-
-KYOK is structurally a second broker — an agent provider submits work
-(a completion), an LLM provider answers it — so it splits the same way
-runs do: the mechanism and its checks live in core, the agent-facing
-endpoint is serving. The answering side is not an endpoint at all any
-more: a completion is delivered to the `ConnectedLLMProvider` the run
-was bound to at start (souk.kyok.KyokRelay), so the poll/respond
-surface this module used to carry is gone, and with it the rendezvous
-state it existed to serve.
-
-What this deliberately holds rather than leaving to a route: the two-part
-authorization. A KYOK token proves souk minted it and names a run; it does
-not prove who is presenting it. The call-time signature is the other half,
-and getting either wrong means someone else spending the caller's real LLM
-budget — not the kind of check to reimplement per transport.
-
-No claim timeout, and none is needed: there is no claim step. The old
-30s constant was applied to every inter-chunk gap and killed any model
-slower than that to its next token, while reporting "no bridge claimed
-this" — a message that was false in both halves. A bridge that hangs
-mid-stream is now the same problem as any hung upstream call, and it
-belongs to whoever is doing the waiting: the provider's own HTTP client
-timeout, or the serving layer cancelling the relay when the provider
-disconnects. Core inventing a number here would just be the old defect
-with a new name.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -56,25 +28,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class CompletionRelay:
-    """A completion being answered by the run's own bridge.
-
-    The bridge signals failure by raising (see souk.kyok.LLMBridge); what
-    that looks like to the provider depends on which shape it asked for,
-    which is why the two consumers below differ:
-
-    - `collapsed` (non-streaming): no bytes have been sent yet, so a
-      failure can still be an honest status — it becomes KyokRejected 502.
-    - `encode` (streaming): the 200 is long gone, so the failure goes
-      in-band as a final `{"error": ...}` payload, the shape OpenAI's own
-      streaming API uses mid-stream, and the stream ends without [DONE].
-    """
+    """A completion in flight from an attached LLM provider back to the KYOK caller, either
+    consumed in one shot as an OpenAI `ChatCompletion` (`collapsed`) or streamed out as
+    server-sent chunks (`encode`). Any error raised while draining `chunks` is surfaced as
+    `KyokRejected` (status 502) from `collapsed`, or as an inline `{"error": ...}` payload
+    followed by end-of-stream from `encode`."""
 
     stream_requested: bool
     chunks: AsyncIterator[ChatCompletionChunk]
 
     async def collapsed(self) -> ChatCompletion:
-        """Every chunk reassembled into one non-streaming response, for a
-        provider that didn't ask to stream."""
         try:
             collected = [chunk async for chunk in self.chunks]
         except Exception as e:
@@ -82,7 +45,6 @@ class CompletionRelay:
         return collapse_stream(collected)
 
     async def encode(self) -> AsyncIterator[str]:
-        """The chunks as OpenAI-style SSE payloads, terminator included."""
         try:
             async for chunk in self.chunks:
                 yield chunk.model_dump_json()
@@ -94,7 +56,6 @@ class CompletionRelay:
 
 
 class KyokAdapter:
-    """KYOK semantics over a Souk."""
 
     def __init__(self, souk: "Souk") -> None:
         self._souk = souk
@@ -107,27 +68,12 @@ class KyokAdapter:
         timestamp: str,
         signature: str,
     ) -> CompletionRelay:
-        """A provider's OpenAI-shaped call, authorized and relayed.
-
-        Three checks, all here rather than in a route:
-
-        1. the KYOK token is souk's own and unexpired,
-        2. the run it names is *still genuinely in flight* for that agent —
-           which caps a leaked token's usable window to the life of that run,
-           rather than leaving the token's own hour-long TTL as the only thing
-           between a finished run and someone spending the caller's budget,
-        3. the call is signed by the agent's own key, over this
-           exact token + timestamp + body, so a signature can't be replayed
-           onto another request.
-
-        Then the run's LLM provider answers it — the one the caller named
-        at run start, resolved by run_id (which only souk ever mints) to a
-        name, and by name to whichever connection that identity has
-        attached *right now*. Offline is 503: the run may well still be
-        going, but its LLM is unreachable, and that is exactly what the
-        agent provider is told — the same fast-fail shape as an offline
-        agent, nothing invented.
-        """
+        """Authenticates a KYOK completion call and forwards it to the bound LLM provider.
+        `bearer` must be a valid, unexpired KYOK token for a run that is still active (not
+        cancelled) for the agent named in the token, and `timestamp`/`signature` must be a
+        fresh, correctly signed proof that the calling agent itself made this call — else raises
+        `KyokRejected` with 401 or 403. Raises `KyokRejected` (400) if `body` isn't valid JSON,
+        and (503) if the run's bound LLM provider is no longer attached."""
         token = verify_kyok_token(bearer, self._souk.settings.token_signing_secret)
         if token is None:
             raise KyokRejected("invalid or expired KYOK token", status=401)
@@ -141,16 +87,10 @@ class KyokAdapter:
         try:
             payload = cast(CompletionCreateParams, json.loads(body))
         except json.JSONDecodeError as e:
-            # After the authorization checks, not before: what a caller may
-            # learn about its own malformed request is a different question
-            # from whether it was allowed to ask at all.
             raise KyokRejected("KYOK completion body is not valid JSON", status=400) from e
 
         binding = self._souk.kyok_relay.binding_for(token.run_id)
         if binding is None:
-            # The binding dies with the run (broker's forget funnel), so a
-            # token that passed the live-run check a moment ago can still
-            # land here in the narrow window where the run just ended.
             raise KyokRejected("run has no KYOK binding any more", status=503)
         link = self._souk.kyok_relay.serving(binding.llm_provider)
         if link is None:
@@ -175,13 +115,9 @@ class KyokAdapter:
     async def _verify_caller(
         self, token: KyokToken, bearer: str, body: bytes, timestamp: str, signature: str
     ) -> None:
-        """The half the token can't cover: souk_agent_sdk.KyokSigningAuth
-        signs every call with the calling provider's registration identity, so
-        the key is the token's own — souk being the
-        one source of truth for that — and checks the signature really came
-        from it. Reuses souk.identity's freshness window rather than a second
-        constant; no reason KYOK's should ever diverge.
-        """
+        """Raises `KyokRejected` unless `signature` is a fresh, valid signature — by the agent
+        named in `token`, using its registered public key — over the bearer token, timestamp,
+        and a hash of the request body."""
         if not timestamp or not signature:
             raise KyokRejected("missing KYOK call-time signature", status=401)
         try:
@@ -191,12 +127,6 @@ class KyokAdapter:
         if not fresh:
             raise KyokRejected("KYOK signature timestamp is stale", status=401)
 
-        # Still asked, because a de-listed agent must not keep spending a
-        # caller's key — but no longer asked in order to *learn* the key.
-        # The token carries it: an agent is `(provider_key, name)`, souk
-        # signed the token itself, and there used to be a whole lookup here
-        # (`repo.get_agent_public_key`) whose only job was turning an id back
-        # into the identity it always stood for.
         async with self._souk.session() as session:
             registered = await repo.get_agent(session, token.agent)
         if registered is None:
@@ -210,16 +140,10 @@ class KyokAdapter:
 
 
 def collapse_stream(chunks: list[ChatCompletionChunk]) -> ChatCompletion:
-    """Reassembles streaming chunks into one non-streaming response, for a
-    provider that called with `stream` unset or false. A bridge always
-    produces streaming-shaped chunks (see souk.kyok.LLMBridge) regardless
-    of what the provider asked for — this is where a non-streaming caller
-    gets that collapsed back down instead of needing its own merge logic.
-
-    Field names come from the `openai` package on both sides of this
-    function, so a rename there fails here at type-check and construction
-    time rather than silently producing a shape no client parses.
-    """
+    """Merges a sequence of `ChatCompletionChunk`s into a single `ChatCompletion`, concatenating
+    each choice index's content deltas and taking that index's last non-empty finish reason
+    (defaulting to `"stop"`). An empty chunk list collapses to one empty assistant message with
+    finish reason `"stop"`."""
     if not chunks:
         return ChatCompletion(
             id="",

@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import time
@@ -54,8 +53,6 @@ async def test_registration_refuses_a_stale_timestamp(souk):
 
 
 async def test_attaching_an_unregistered_agent_is_refused(souk, attach):
-    """Sharing souk's process is not a reason to be trusted, and not a reason
-    to take a different path: the names have to be ones this key registered."""
     with pytest.raises(AgentNotFound):
         await attach(ProviderIdentity.generate(), LocalProvider(), ["agent_never_registered"])
 
@@ -74,8 +71,6 @@ async def test_an_attached_provider_is_actually_online_and_reachable(souk, attac
 
 
 async def test_detaching_marks_it_offline_immediately(souk, attach):
-    """A departure souk witnessed, so it takes effect at once rather than
-    being inferred from silence later."""
     _registration, identity, agent_id = await _register(souk)
     await attach(identity, LocalProvider(), [agent_id.name])
     assert (await souk.list_agents())[0].online is True

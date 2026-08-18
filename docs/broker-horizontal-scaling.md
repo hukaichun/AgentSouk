@@ -130,6 +130,54 @@ optimisation on top, never a correctness requirement — SQLite has nothing
 equivalent, and one path that works on both is worth more than two that
 diverge.
 
+## KYOK moves with the same shape
+
+`KyokRelay` holds the same two kinds of fact `RunBroker` does, and they move
+the same way:
+
+3. **Which run is bound to which LLM offering.** `KyokRelay._bindings`, made
+   shared. Written at bind time (and by delegation's `inherit`), read by the
+   completion call on whatever node it lands — which is the failure this
+   fixes: the binding is written on the node that delivered the run, and a
+   load balancer with no affinity will land the agent provider's completion
+   call somewhere else, which today answers 503 "run has no KYOK binding any
+   more".
+4. **Which node holds which LLM-provider connection.** `KyokRelay._links` —
+   fact (1) again with a different roster, same lease, same expiry.
+
+Given (3) and (4), a completion call landing anywhere reads the binding and
+relays to the node holding the offering's connection — the same one extra
+hop as run events. The seam matches the broker's: both dicts are private,
+every read goes through `binding_for` / `serving` / `serving_any`, and
+`test_core_is_sdk_free.py`-style fitness tests keep the callers honest.
+
+**Persisting the binding persists the caller's context, and that is a
+deliberate narrowing of keep-your-own-key.md's "the context never touches
+the database".** The reason recorded for that rule is about two specific
+roads: run metadata and run input come back verbatim through the
+deliberately unauthenticated thread endpoints, and the agent provider holds
+a thread_id — *those* stay context-free, unchanged. A dedicated bindings
+table travels neither road; nothing serves it back to anyone. What
+persistence adds is the credential sitting in the database file and its
+backups, and the mitigation is the caller's, not souk's: a context is
+expected to be short-lived and rotated — it authorizes one run tree, not an
+account. souk-as-relay trust was already irreducible (souk holds the context
+in memory today); this extends it to souk's database for the binding's
+lifetime.
+
+Two consequences to do deliberately rather than discover:
+
+- The leak probe in `test_llm_provider_drives_kyok.py` asserts the whole
+  persisted picture is context-free, and a bindings table fails it as
+  written. Its scope changes from "every table" to "everything the serving
+  layer hands back" — run metadata, input, events, thread messages — which
+  is the invariant the rule was actually protecting.
+- The binding row needs the enforced lifetime the in-memory version already
+  has (`discard` hangs off the forget-listener funnel; the registry that
+  lacked this retained 81 MiB — measured). Shared, that means: deleted when
+  its run ends, reclaimed by the lease sweep when its node dies, never by a
+  boot-time reap.
+
 ## What this deliberately does not change
 
 - The core/serving boundary. None of this names a protocol or a transport.
