@@ -7,6 +7,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from souk_provider_sdk import (
     ProviderIdentity,
+    provider_connect_payload,
+    souk_connect_payload,
     deletion_payload,
     kyok_call_payload,
     registration_payload,
@@ -19,6 +21,10 @@ BUILDERS = {
     "agent-registration": lambda i: registration_payload(i["names"], i["timestamp"]),
     "agent-deletion": lambda i: deletion_payload(i["agent_name"], i["timestamp"]),
     "kyok-call": lambda i: kyok_call_payload(i["bearer"], i["timestamp"], i["body_sha256_hex"]),
+    "provider-connect": lambda i: provider_connect_payload(
+        i["souk_nonce"], i["provider_nonce"], i["names"]
+    ),
+    "souk-connect": lambda i: souk_connect_payload(i["souk_nonce"], i["provider_nonce"]),
 }
 
 

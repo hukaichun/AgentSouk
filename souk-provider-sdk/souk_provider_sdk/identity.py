@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +67,42 @@ def kyok_call_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
     return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
 
 
+_CONNECT_PROVIDER = "souk-connect-provider"
+_CONNECT_SOUK = "souk-connect-souk"
+
+
+def new_nonce() -> str:
+    """A fresh 128-bit hex nonce for one side of a link-open challenge."""
+    return secrets.token_hex(16)
+
+
+def provider_connect_payload(souk_nonce: str, provider_nonce: str, names: list[str]) -> bytes:
+    """Builds the bytes a provider signs to authenticate opening a link.
+
+    `souk_nonce` is the challenge the souk being connected to chose — that is
+    what makes a recorded exchange worthless — and the names to be served are
+    bound in (sorted) so they cannot be altered in flight. Do not substitute
+    a timestamp for the nonce: a self-chosen freshness is replayable for its
+    whole window, which is the hole this family exists to close.
+    `souk.identity.provider_connect_signing_payload` computes this same
+    payload independently on souk's side and both must agree byte-for-byte.
+    """
+    return f"{_CONNECT_PROVIDER}:{souk_nonce}:{provider_nonce}:{','.join(sorted(names))}".encode()
+
+
+def souk_connect_payload(souk_nonce: str, provider_nonce: str) -> bytes:
+    """Builds the bytes souk signs to prove itself to a connecting provider.
+
+    Verify it with `verify_signature` against the souk public key you
+    pinned, before sending anything worth stealing; `provider_nonce` is
+    yours, so the proof cannot be a recording. The role tag differs from
+    `provider_connect_payload`'s so neither proof can be reflected as the
+    other. `souk.identity.souk_connect_signing_payload` is the independent
+    twin.
+    """
+    return f"{_CONNECT_SOUK}:{souk_nonce}:{provider_nonce}".encode()
+
+
 class ProviderIdentity:
     """An Ed25519 keypair identifying a provider; `public_key` is its 64-char hex-encoded public key."""
 
@@ -105,6 +142,10 @@ class ProviderIdentity:
     def sign_deletion(self, agent_name: str, timestamp: int | None = None) -> tuple[str, int]:
         timestamp = int(time.time()) if timestamp is None else timestamp
         return self._private_key.sign(deletion_payload(agent_name, timestamp)).hex(), timestamp
+
+    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
+        """Signs `provider_connect_payload(...)`: this provider's answer to a souk's link-open challenge."""
+        return self.sign(provider_connect_payload(souk_nonce, provider_nonce, names))
 
 
     def sign_hop(

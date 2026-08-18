@@ -19,7 +19,7 @@ def _verify(identity: ProviderIdentity, signature_hex: str, payload: bytes) -> b
 
 def test_it_signs_bytes_nobody_here_chose():
     identity = ProviderIdentity.generate()
-    payload = b"souk-provider-connect:abc:translator,summarizer:1755300000"
+    payload = b"any bytes at all \x00\xff -- the SDK does not inspect them"
 
     assert _verify(identity, identity.sign(payload), payload)
 
@@ -95,3 +95,35 @@ def test_it_rejects_a_signature_from_another_key():
 )
 def test_malformed_input_is_false_and_not_an_exception(public_key: str, signature: str):
     assert verify_signature(public_key, signature, b"payload") is False
+
+
+def test_a_link_open_round_trip_and_neither_proof_reflects_as_the_other():
+    from souk_provider_sdk import new_nonce, provider_connect_payload, souk_connect_payload
+
+    provider = ProviderIdentity.generate()
+    souk_key = ProviderIdentity.generate()
+    souk_nonce, provider_nonce = new_nonce(), new_nonce()
+    assert souk_nonce != provider_nonce and len(souk_nonce) == 32
+
+    proof = provider.sign_connect(souk_nonce, provider_nonce, ["b", "a"])
+    payload = provider_connect_payload(souk_nonce, provider_nonce, ["a", "b"])
+    assert verify_signature(provider.public_key, proof, payload)
+
+    answer = souk_key.sign(souk_connect_payload(souk_nonce, provider_nonce))
+    assert verify_signature(
+        souk_key.public_key, answer, souk_connect_payload(souk_nonce, provider_nonce)
+    )
+
+    assert not verify_signature(
+        provider.public_key, proof, souk_connect_payload(souk_nonce, provider_nonce)
+    )
+    assert not verify_signature(
+        provider.public_key,
+        proof,
+        provider_connect_payload(souk_nonce, provider_nonce, ["a", "b", "c"]),
+    )
+    assert not verify_signature(
+        provider.public_key,
+        proof,
+        provider_connect_payload(new_nonce(), provider_nonce, ["a", "b"]),
+    )
