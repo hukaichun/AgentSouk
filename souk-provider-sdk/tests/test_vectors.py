@@ -50,3 +50,15 @@ def test_this_side_reproduces_every_vector_it_has_a_builder_for():
         assert identity.sign(payload) == vector["signature_hex"], vector["kind"]
         assert verify_signature(identity.public_key, vector["signature_hex"], payload)
     assert covered == len(BUILDERS)
+
+
+def test_the_delivered_run_frame_round_trips_through_the_declared_model():
+    from souk_provider_sdk import DeliveredRun
+
+    (frame,) = [w["frame"] for w in VECTORS["wire"] if w["kind"] == "delivered-run"]
+
+    model = DeliveredRun.model_validate(frame)
+
+    assert model.agent_name == frame["agentName"]
+    assert model.run_input.thread_id == frame["runInput"]["threadId"]
+    assert model.model_dump(mode="json", by_alias=True) == frame

@@ -34,9 +34,9 @@ def test_the_adapter_reads_the_fields_souk_actually_sends():
     assert set(CompletionRequest.__dataclass_fields__) == {
         "run_id", "agent", "body", "llm_name", "context", "actor_chain",
     }
-    assert set(DeliveredCompletion.__dataclass_fields__) == DELIVERED_COMPLETION_FIELDS
+    assert set(DeliveredCompletion.model_fields) == DELIVERED_COMPLETION_FIELDS
 
-    source = inspect.getsource(InProcessLLMProvider.complete)
+    source = inspect.getsource(DeliveredCompletion.from_request)
     for read in (
         "request.run_id",
         "request.agent.provider_key",

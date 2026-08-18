@@ -39,17 +39,10 @@ class SoukLink(ABC):
         refusal, not a transient decline — re-offering the same bytes can
         never succeed."""
         try:
-            validated = RunAgentInput.model_validate(run.run_input)
+            delivered = DeliveredRun.from_claimed(run)
         except ValidationError as e:
             return Refusal(f"input does not validate as RunAgentInput: {e}")
-        return await self.offer(
-            DeliveredRun(
-                run_id=run.run_id,
-                agent_name=run.agent.name,
-                run_input=validated,
-                thread_id=run.thread_id,
-            )
-        )
+        return await self.offer(delivered)
 
     @abstractmethod
     async def offer(self, run: DeliveredRun) -> bool | Refusal:

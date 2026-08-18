@@ -64,3 +64,37 @@ def test_every_domain_tag_has_a_published_vector_family():
         f"domain tags without a vector family in docs/contract-vectors.json: {sorted(tags - covered)}. "
         "Whoever states the bytes publishes the vectors for them."
     )
+
+
+def test_the_published_wire_frames_are_what_the_ports_translate_to():
+    from souk.kyok import CompletionRequest
+    from souk.models import AgentRef, ClaimedRun
+    from souk_llm_provider_sdk import DeliveredCompletion
+    from souk_provider_sdk import DeliveredRun
+
+    (run_wire,) = [w["frame"] for w in VECTORS["wire"] if w["kind"] == "delivered-run"]
+    claimed = ClaimedRun(
+        run_id=run_wire["runId"],
+        agent=AgentRef(provider_key="ab" * 32, name=run_wire["agentName"]),
+        thread_id=run_wire["threadId"],
+        run_input=run_wire["runInput"],
+    )
+    assert DeliveredRun.from_claimed(claimed).model_dump(mode="json", by_alias=True) == run_wire
+
+    (completion_wire,) = [
+        w["frame"] for w in VECTORS["wire"] if w["kind"] == "delivered-completion"
+    ]
+    request = CompletionRequest(
+        run_id=completion_wire["runId"],
+        agent=AgentRef(
+            provider_key=completion_wire["providerKey"], name=completion_wire["agentName"]
+        ),
+        body=completion_wire["body"],
+        llm_name=completion_wire["llmName"],
+        context=completion_wire["context"],
+        actor_chain=completion_wire["actorChain"],
+    )
+    assert (
+        DeliveredCompletion.from_request(request).model_dump(mode="json", by_alias=True)
+        == completion_wire
+    )
