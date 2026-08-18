@@ -48,6 +48,14 @@ class InvalidRegistration(SoukError):
 
 
 class KyokRejected(SoukError):
+    """A KYOK completion call was refused; `status` is the HTTP status the caller should see.
+
+    The reasons differ in kind, so `status` varies with them: an
+    unusable bearer token or call signature is 401, a run that is no
+    longer bound or an unregistered agent is 403, a detached LLM
+    provider is 503, and the provider's own completion call failing is
+    502.
+    """
 
     def __init__(self, message: str, *, status: int) -> None:
         super().__init__(message)

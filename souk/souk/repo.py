@@ -44,7 +44,7 @@ class RunRowMissing(Exception):
 
 
 class ThreadNotFound(Exception):
-    pass
+    """`ensure_thread` was called on an unregistered thread id without `create_if_missing`."""
 
 
 class ThreadOwnershipMismatch(Exception):

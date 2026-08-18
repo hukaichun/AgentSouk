@@ -53,6 +53,14 @@ def registration_signing_payload(agent_names: list[str], timestamp: int) -> byte
 
 
 def llm_registration_signing_payload(names: list[str], timestamp: int) -> bytes:
+    """Builds the canonical bytes an LLM provider must sign to register `names`.
+
+    Uses a distinct domain tag from `registration_signing_payload` (agent
+    providers), and sorts names the same way, so the two payload spaces
+    never collide even for identical names/timestamp. `souk_llm_provider_sdk`
+    computes this same payload independently on the provider side and
+    both must agree byte-for-byte.
+    """
     return f"{_REGISTER_LLM}:{','.join(sorted(names))}:{timestamp}".encode()
 
 
@@ -66,6 +74,14 @@ def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:
 
 
 def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
+    """Builds the canonical bytes an LLM provider signs to prove it made a given KYOK completion call.
+
+    Binds the payload to the bearer token, timestamp, and a hash of the
+    request body, so a captured signature can't be replayed for a
+    different call. `souk_provider_sdk.identity.kyok_call_payload`
+    computes this same payload independently on the provider side and
+    both must agree byte-for-byte.
+    """
     return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
 
 
