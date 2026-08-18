@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import jwt
@@ -143,3 +144,77 @@ class ProviderIdentity:
             raise ValueError("extend_chain requires a non-empty chain — use new_chain to start one")
         subject = jwt.decode(prev_chain[-1], options={"verify_signature": False})["subject"]
         return [*prev_chain, self.sign_hop(subject, prev_chain[-1])]
+
+
+class InvalidChain(Exception):
+    """An actor chain that fails verification: forged, reordered, truncated, spliced, expired, or malformed."""
+
+
+@dataclass(frozen=True)
+class VerifiedChain:
+    """What a verified chain vouches for: its subject, and each hop's signing key in order."""
+
+    subject: dict
+    actor_public_keys: list[str]
+
+
+def verify_chain(chain: list[str]) -> VerifiedChain:
+    """Verifies an actor chain without souk: each hop's signature under its own embedded key, `prevHash` linkage, one subject throughout, expiry enforced on the last hop only.
+
+    The independent twin of `souk.identity.verify_actor_chain` — same rules,
+    pinned to each other by interop tests. Unlike souk's, it does not resolve
+    keys to registered agent names (that needs souk's roster); it is the tool
+    an LLM provider uses to police a delegation chain itself, trusting no
+    summary of souk's. Raises `InvalidChain` on any failure.
+    """
+    if not chain:
+        raise InvalidChain("empty actor chain")
+
+    subject: dict | None = None
+    actor_public_keys: list[str] = []
+    prev_token: str | None = None
+
+    for i, token in enumerate(chain):
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+        except jwt.PyJWTError as e:
+            raise InvalidChain(f"hop {i}: unparseable token: {e}") from e
+
+        actor_public_key = unverified.get("actorPublicKey")
+        if not isinstance(actor_public_key, str):
+            raise InvalidChain(f"hop {i}: missing actorPublicKey")
+        try:
+            public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(actor_public_key))
+        except ValueError as e:
+            raise InvalidChain(f"hop {i}: malformed actorPublicKey: {e}") from e
+
+        is_last_hop = i == len(chain) - 1
+        try:
+            payload = jwt.decode(
+                token,
+                key=public_key,
+                algorithms=["EdDSA"],
+                options={"verify_exp": is_last_hop},
+            )
+        except jwt.PyJWTError as e:
+            reason = "signature/expiry check failed" if is_last_hop else "signature check failed"
+            raise InvalidChain(f"hop {i}: {reason}: {e}") from e
+
+        expected_prev_hash = (
+            hashlib.sha256(prev_token.encode()).hexdigest() if prev_token is not None else None
+        )
+        if payload.get("prevHash") != expected_prev_hash:
+            raise InvalidChain(f"hop {i}: prevHash doesn't match — chain reordered, truncated, or spliced")
+
+        if i == 0:
+            subject = payload.get("subject")
+            if not isinstance(subject, dict):
+                raise InvalidChain("hop 0: missing subject")
+        elif payload.get("subject") != subject:
+            raise InvalidChain(f"hop {i}: subject changed partway through the chain")
+
+        actor_public_keys.append(actor_public_key)
+        prev_token = token
+
+    assert subject is not None
+    return VerifiedChain(subject=subject, actor_public_keys=actor_public_keys)

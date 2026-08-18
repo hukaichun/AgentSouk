@@ -1,0 +1,56 @@
+{
+  "comment": "Authoritative byte-level vectors for the payloads souk verifies signatures over. souk's own test suites consume this file, so it cannot drift from the implementation; an external implementation in any language replays it: build each payload from `inputs`, assert the exact `payload_utf8` bytes, and check `signature_hex` verifies (or, since Ed25519 is deterministic, reproduce it) under the published test key. The test key is for vectors only \u2014 never accept it in a real deployment.",
+  "test_key": {
+    "algorithm": "Ed25519",
+    "private_key_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+    "public_key_hex": "29e5833a915a6429a4e3a7948475c338ef436eb82be89c92f059704403db9d55"
+  },
+  "vectors": [
+    {
+      "kind": "agent-registration",
+      "inputs": {
+        "names": [
+          "translator",
+          "summarizer"
+        ],
+        "timestamp": 1755500000,
+        "note": "names are sorted before joining; order in this list must not matter"
+      },
+      "payload_utf8": "souk-register:summarizer,translator:1755500000",
+      "signature_hex": "7f34cb373b288ab1e3e8b1a98ecd3db86ac05b248811e9d46217bbb087e10ad61cfd9a92ec5a18798c0e2305b848f8227f16285a4d9bc9c031321999fe067904"
+    },
+    {
+      "kind": "llm-registration",
+      "inputs": {
+        "names": [
+          "gpt-4",
+          "claude"
+        ],
+        "timestamp": 1755500000,
+        "note": "names are sorted before joining; order in this list must not matter"
+      },
+      "payload_utf8": "souk-register-llm:claude,gpt-4:1755500000",
+      "signature_hex": "f48f0b3c648a6246c59aa0614724755d80ca77a5b7e7578023eb560c000cb8a63b84331064508dfa6535e1521ecae19bc89634d337a1dd3a56aacc1a0bb84200"
+    },
+    {
+      "kind": "agent-deletion",
+      "inputs": {
+        "agent_name": "translator",
+        "timestamp": 1755500000
+      },
+      "payload_utf8": "souk-delete-agent:translator:1755500000",
+      "signature_hex": "d83f85c4c85b9ee8674bd929da745d2bdcf7075071c073b0a1c223e9560e1c729f39278d1b1913f34670cd66d79b10afb168708e402269e99b0b54330379b602"
+    },
+    {
+      "kind": "kyok-call",
+      "inputs": {
+        "bearer": "bearer-token-abc",
+        "timestamp": 1755500000,
+        "body_utf8": "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+        "body_sha256_hex": "aafe81911c246dac10c95e15f6e50babce5f562d691953e0185c372e973940e1"
+      },
+      "payload_utf8": "souk-kyok-call:bearer-token-abc:1755500000:aafe81911c246dac10c95e15f6e50babce5f562d691953e0185c372e973940e1",
+      "signature_hex": "e8d7f35d277f5fbd0ba2d631039c09cca3b9e3af479f29ea760be6b8188755fc4313766513f2669852227665217bd62655b55e69817f2cc63ad7105c32d58d0f"
+    }
+  ]
+}

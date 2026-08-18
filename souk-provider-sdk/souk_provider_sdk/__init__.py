@@ -8,16 +8,22 @@ from souk_provider_sdk.contract import (
 from souk_provider_sdk.inprocess import InProcessLink
 from souk_provider_sdk.link import SoukLink
 from souk_provider_sdk.identity import (
+    InvalidChain,
     ProviderIdentity,
+    VerifiedChain,
     deletion_payload,
     kyok_call_payload,
     registration_payload,
+    verify_chain,
     verify_signature,
 )
 from souk_provider_sdk.provider import AgentHandle, DeliveredRun, HandleProvider, Provider, Refusal
 from souk_provider_sdk.runtime import ProviderRuntime
 
 __all__ = [
+    "InvalidChain",
+    "VerifiedChain",
+    "verify_chain",
     "CONNECTED_PROVIDER_ATTRS",
     "InProcessLink",
     "SoukLink",
