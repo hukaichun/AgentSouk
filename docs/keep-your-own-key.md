@@ -59,9 +59,16 @@ Concretely, an LLM provider:
   *proven* calling-agent identity, which of its own models was addressed,
   the caller's `context`, and the delegation chain
   (`souk.kyok.CompletionRequest`); serving, throttling, billing, or
-  refusing (raise — souk relays it as a 502) is the LLM provider's
-  business. souk never decides on a provider's behalf, and that invariant
-  cuts both ways. A spend ceiling (AgentSouk#26) belongs here too.
+  refusing is the LLM provider's business. A refusal raised as
+  `CompletionRefused(payload)` travels to the calling agent **as data** —
+  souk relays the payload intact and never interprets it; the vocabulary
+  inside is the parties' own (the library defines only the envelope). Any
+  other exception still collapses to an unstructured 502. souk never
+  decides on a provider's behalf, and that invariant cuts both ways: it
+  also counts what it observed (`KyokRelay.quality` — served, refused,
+  failed, per provider) and judges nothing. A spend ceiling belongs here
+  too, as the caller's own few lines, not a library default
+  (AgentSouk#26's resolution).
 
 ```
 caller                       souk                        LLM provider (key K)
