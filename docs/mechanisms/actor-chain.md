@@ -35,12 +35,40 @@ does not prove, by design:
 - **A silent hop is an omission, not a break.** A party that forwards a
   chain without extending it produces a chain that still verifies — it
   has merely erased itself from the path. souk does not force anyone to
-  sign; enforcement belongs to the chain's consumer, whose policy knows
-  the expected call graph and refuses one with a missing link. In KYOK
-  that consumer controls the completions, so signing is not compelled —
-  it is priced.
+  sign, and takes no position on whether it should have: whether the full
+  chain must be carried at every hop is a convention the agent providers
+  and LLM providers involved agree between themselves. souk carries and
+  verifies whatever chain arrives, and leaves what to accept to the
+  parties.
 
 souk verifies chains and relays them; it never signs on anyone's behalf
-and never vouches for a subject. (souk countersigning the delegations it
-routes is a recorded direction — useful for a signed audit trail and for
-chains crossing federated souks — not a built mechanism.)
+and never vouches for a subject.
+
+## souk signs as an identity too — **not implemented yet**
+
+> **Status: decided direction, no code.** Tracked here so the gap is
+> visible; the TTL semantics below block it and are deliberately parked.
+
+souk is an identity like any other (`SoukIdentity`, the key providers
+already pin), so it can bear the same responsibility on a chain that a
+provider does: append one standard hop, signed with its own key, each
+time it dispatches a run — no new claim, no role marker, no format
+extension. What that buys:
+
+- **"Routed through souk" becomes verifiable.** A consumer that pins a
+  souk key can require its hops in the path; a chain that bypassed souk,
+  or was fabricated whole, doesn't have them.
+- **A silent hop becomes structurally visible.** With souk signing every
+  dispatch, a fully-signed chain alternates souk and provider hops; a
+  provider that forwarded without signing leaves two consecutive souk
+  hops — witnessed, without souk naming anyone.
+- **Federation needs no extra design.** A chain crossing several souks
+  carries each souk's own hops; consumers pin the souks they trust, the
+  same act as pinning one.
+
+What blocks it: hop-expiry semantics. souk's hop would often be the last
+hop at delivery time, and verification enforces expiry on the last hop —
+a chain read again late in a long run would fail on souk's own stale
+hop. (The edge exists today for provider hops too; souk signing every
+dispatch would make it constant.) That discussion is parked; the
+mechanism waits for it.
