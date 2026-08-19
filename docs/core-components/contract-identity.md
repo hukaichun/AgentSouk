@@ -49,8 +49,10 @@ the SDK's twin verifier deliberately does not (it has no roster).
 Every structure souk puts on a wire is a pydantic model with camelCase
 aliases: `model_dump(by_alias=True)` **is** the frame a transport
 carries, `model_validate` rebuilds it. `models.py` declares the refs and
-the claimed-run shape; `props.py` declares souk's two forwarded-props
-additions and builds them in one place for both caller doors. Translation
+the claimed-run shape; `props.py` declares the verified-caller props
+model and assembles both forwarded-props additions in one place for both
+caller doors (the KYOK props model itself lives with its mechanism in
+`kyok.py`). Translation
 from souk's internal objects to the delivered forms is stated once, as
 classmethods on the delivered models, read by attribute so no import
 crosses the boundary.

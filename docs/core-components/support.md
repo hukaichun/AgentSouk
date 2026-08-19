@@ -2,9 +2,10 @@
 
 Part of [core components](../core-components.md).
 
-**Change notifications** (`changes.py`) — `Souk.on_change(callback)`
-appends the callback to a plain list and returns an unsubscribe
-function; every state transition worth showing (roster changed, LLM
+**Change notifications** (`changes.py` for the event types, `core.py`
+for the subscription) — `Souk.on_change(callback)` adds the callback to
+a set and returns an unsubscribe function; every state transition worth
+showing (roster changed, LLM
 roster changed, a run's status changed) constructs a small typed event
 and calls each subscriber synchronously. A serving layer subscribes once
 and updates what it shows when told — no polling loop, no missed-poll
@@ -15,8 +16,12 @@ the subscriber's own query.
 `Souk` object, ticks on an interval and fails what stalled: a claimed
 run with no activity past the stall timeout is marked failed by a direct
 database update (it works even if the run's provider vanished), and a
-run queued longer than its window is failed through the broker as
-"no provider took it". Both write a reason and a terminal event; neither
+paused run past its resume deadline the same way, when that timeout is
+configured. A run queued longer than its window is failed as
+"no provider took it" by the dispatch loop itself, not this sweep —
+`expire_queued` in `broker.py`, where the window (a broker argument,
+45 s by default) lives. All of these write a reason and a terminal
+event; none
 guesses an outcome — the sweeps time out on the *absence* of one, which
 is itself an observation. `Souk.health()` is the companion snapshot:
 database reachable, schema at the expected revision, dispatch loop

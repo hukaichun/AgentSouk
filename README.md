@@ -48,7 +48,7 @@ The mechanism/policy split runs through the codebase itself, as a hard line betw
 | | **AgentSouk** (this repo) | **[AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)** |
 |---|---|---|
 | **Owns** | The domain: agents, threads, runs, identity, persistence, protocol *translation* | The network: ports, transports, TLS, CORS, endpoints, wire framing, admin surface |
-| **Ships** | `souk` (the network-free core library) + [`souk-provider-sdk`](souk-provider-sdk/) (the provider-side contract, also transport-free) | The reference gateway, the transport SDKs (`souk-agent-sdk`, `souk-client-sdk`) and the reference providers |
+| **Ships** | `souk` (the network-free core library) + [`souk-provider-sdk`](souk-provider-sdk/) and [`souk-llm-provider-sdk`](souk-llm-provider-sdk/) (the two provider-side contracts, also transport-free) | The reference gateway, the transport SDKs (`souk-agent-sdk`, `souk-client-sdk`) and the reference providers |
 | **May it bind a socket?** | Never. `souk` cannot even *import* a transport — enforced by packaging and by `souk/tests/test_core_is_network_free.py` | Yes — that is its entire job |
 
 Three consequences, recorded in [AgentSouk#27](https://github.com/hukaichun/AgentSouk/issues/27) and load-bearing:
@@ -76,7 +76,7 @@ That is precisely the runtime architecture:
  └─────────────┘   └───────────────┘   └──────────────┘   └────────────────────┘
 ```
 
-The relay channel's contract is core's worker port — `claim_work` / `report_event` / `finish_run` plus a cancel notification — and is deliberately transport-neutral. Today's carrier is a gRPC stream; the base server mode moves it to a WebSocket on the gateway's one HTTP port (spec: AgentSoukServer's `docs/server-mode.md`). Core is untouched by that change, which is the test of whether this boundary is real.
+The relay channel's contract is core's provider port — offer / report events / finish, plus a cancel notification — and is deliberately transport-neutral. Today's carrier is a WebSocket on the gateway's one HTTP port (spec: AgentSoukServer's `docs/server-mode.md`); it was a gRPC stream once, and core was untouched by the swap — which is the test of whether this boundary is real.
 
 ---
 
@@ -119,10 +119,12 @@ Modular, independent distributions — no shared workspace, each stands alone:
 | Module Path | Description |
 |---|---|
 | [`souk/`](souk/) | **The core library.** Agents, threads, runs, identity, the AG-UI/A2A/KYOK adapters, and SQLite/Postgres persistence. Network-free: it depends on no web framework, no gRPC, no WebSocket library — and cannot, by packaging and by test |
-| [`souk-provider-sdk/`](souk-provider-sdk/) | **What a provider and souk agree on**, from the provider's side: identity and what it signs, the port an agent implements, and the provider's own worker loop. Carries no transport — its dependencies are `cryptography` and `pyjwt`, and not `souk` either. See its [README](souk-provider-sdk/README.md) |
-| [`docs/`](docs/) | The design record: [`library-architecture.md`](design/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](design/agent-provider-guide.md), [`keep-your-own-key.md`](design/keep-your-own-key.md), [`responsibility-chains.md`](design/responsibility-chains.md), [`conversation-semantics.md`](design/conversation-semantics.md), [`federation-and-anti-abuse.md`](design/federation-and-anti-abuse.md), [`prior-art.md`](design/prior-art.md) |
+| [`souk-provider-sdk/`](souk-provider-sdk/) | **What an agent provider and souk agree on**, from the provider's side: identity and what it signs, the port an agent implements, and the provider's own worker loop. Carries no transport — its dependencies are `cryptography`, `pyjwt` and `ag-ui-protocol` (the event vocabulary), and not `souk`. See its [README](souk-provider-sdk/README.md) |
+| [`souk-llm-provider-sdk/`](souk-llm-provider-sdk/) | **What an LLM provider and souk agree on** — the party answering KYOK completions: the port, the delivered-completion envelope, the structured refusal, its own registration payloads. Depends on `souk-provider-sdk` (identity is shared) and `openai` (types only), not `souk`. See its [README](souk-llm-provider-sdk/README.md) |
+| [`docs/`](docs/) | The published site — the [integration contract](docs/integration-contract.md), souk's mechanisms, core components, the SDKs, and [`contract-vectors.json`](docs/contract-vectors.json), the byte-level authority behind them |
+| [`design/`](design/) | The working design record: [`library-architecture.md`](design/library-architecture.md) (the core/serving split and every decision behind it), [`keep-your-own-key.md`](design/keep-your-own-key.md), [`responsibility-chains.md`](design/responsibility-chains.md), [`conversation-semantics.md`](design/conversation-semantics.md), [`federation-and-anti-abuse.md`](design/federation-and-anti-abuse.md), [`prior-art.md`](design/prior-art.md), and more — pages graduate from here to `docs/` deliberately |
 
-Three names circulate and they are different packages: **`souk-provider-sdk` is here** and defines the interaction; `souk-agent-sdk` (a client for the gateway's provider WebSocket) and `souk-client-sdk` (the caller's side) live in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer), along with the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`). The gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
+Several names circulate and they are different packages: **`souk-provider-sdk` and `souk-llm-provider-sdk` are here** and define the interaction; `souk-agent-sdk` (a client for the gateway's provider WebSocket) and `souk-client-sdk` (the caller's side) live in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer), along with the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`). The gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
 
 ---
 
