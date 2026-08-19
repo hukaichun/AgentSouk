@@ -2,7 +2,7 @@
 
 Six mechanisms are souk's own inventions. Everything else souk does is
 either a standard protocol carried unchanged (see
-[the integration contract](index.md)) or an implementation detail of one
+[the integration contract](integration-contract.md)) or an implementation detail of one
 of these six.
 
 ## Identity is an Ed25519 keypair
