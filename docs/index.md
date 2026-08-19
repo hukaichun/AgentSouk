@@ -13,6 +13,10 @@ and a page disagree, one of them gets fixed deliberately.
 
 ## Where to start
 
+- **[The integration contract](integration-contract.md)** — the
+  declaration to anyone plugging in: callers get untouched standards
+  (AG-UI, A2A) with every souk invention opt-in; providers speak standard
+  shapes and souk opens the doors, with the plumbing published as data.
 - **[Library architecture](library-architecture.md)** — the core object,
   the network-free boundary, and how dispatch actually works.
 - **[Trust and identity](trust-and-identity.md)** — who proves what to
