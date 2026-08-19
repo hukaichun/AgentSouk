@@ -18,6 +18,7 @@ Concretely, a souk gateway gives you:
 - **Two protocols on one HTTP surface.** AG-UI for human-facing event streaming (SSE) and A2A v1.0 for agent-to-agent JSON-RPC. Both wire vocabularies come from the official packages (`ag-ui-protocol`, `a2a-sdk`) — no field name, enum value, or method name is hand-written, so a spec rename fails at import instead of rotting silently.
 - **Keypair identity, no accounts.** Each provider generates a local Ed25519 keypair; registration verifies ownership of the key and issues short-lived session tokens. A caller can confirm it is talking to the same key as last time. There is no user database and no central authority vouching for what an agent *does*.
 - **Signed delegation chains.** When agents delegate to agents, each hop carries an EdDSA-signed JWT bound to the previous hop's hash — the delegation path is tamper-evident and auditable.
+- **Signing, not transport.** What core guarantees is signing and verification (registration, session tokens, actor chains, KYOK's two-part authorization), all bounded by a 60-second freshness window that only helps on an encrypted path — TLS termination, and why it is mandatory off localhost, is the gateway's job and AgentSoukServer's documentation.
 - **Durable threads, runs, and human-in-the-loop.** Persistent conversation state with native `input-required` pause and resume. SQLite by default with zero configuration; one `SOUK_DATABASE_URL` switch moves the same code path to Postgres for multi-writer deployments.
 - **Keep Your Own Key** *(experimental)*: a relay that lets callers fund LLM inference with their own API keys without handing the raw credential to agent hosts. See [`docs/keep-your-own-key.md`](docs/keep-your-own-key.md).
 - **A static directory UI** (`souk-directory`, in AgentSoukServer) to browse registered agents and chat with them live.
@@ -79,17 +80,23 @@ The relay channel's contract is core's worker port — `claim_work` / `report_ev
 
 ---
 
-## Quick start
+## Quick start (library development)
 
-**Running anything is [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)'s quick start, not this repo's** — the gateway, the provider and caller SDKs, the reference providers (`agent-template`, `providers/*`), deployment, Docker, TLS, and configuration guidance all live there; it owns both ends of every wire it defines. What lives *here* is the library those wires carry: the domain, its persistence, and the protocol translation.
+**Running anything is [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer)'s quick start, not this repo's** — the gateway, the provider and caller SDKs, the reference providers, deployment, Docker, and TLS guidance all live there; it owns both ends of every wire it defines. What lives *here* is the library those wires carry, and it needs no gateway at all:
 
 ```bash
-# Library development is the whole quick start:
 cd souk && uv sync --group dev
 uv run pytest        # SQLite, zero config
 ```
 
-The full local demo stack (gateway + database + example agents + directory UI) lives with the gateway, in AgentSoukServer — this repo's own `docker compose` carries only a Postgres for running the test suites.
+The same suite runs against Postgres by pointing at one — dialect bugs only ever appear on one side, so run both before merging (this repo's own `docker compose` carries only a Postgres for exactly this):
+
+```bash
+docker compose up paradedb -d
+SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk" uv run pytest
+```
+
+Schema changes are Alembic revisions under [`souk/alembic/`](souk/alembic/) — `uv run alembic upgrade head` is a deploy-time DDL step, deliberately separate from anything a running gateway does (see `CONTRIBUTING.md`).
 
 ---
 
@@ -105,28 +112,6 @@ The full comparison, including DID standards and MCP tunnels, is in [`docs/prior
 
 ---
 
-## System architecture
-
-```mermaid
-graph TD
-    User([Human User / Web Directory]) -->|"POST /agui/{agent} (SSE)"| HTTP[Gateway HTTP Surface]
-    CallerAgent([External Agent / Client]) -->|"POST /a2a/{agent}/rpc (JSON-RPC)"| HTTP
-
-    subgraph Gateway ["Souk gateway (AgentSoukServer)"]
-        HTTP --> Core["souk core<br/>(broker, handlers, protocol adapters)"]
-        Relay["Relay engine<br/>(outbound persistent streams)"] <--> Core
-    end
-
-    Gateway --> DB[(SQLite / Postgres<br/>Roster, Threads, Run History)]
-
-    Relay <== "claim work / report events / finish<br/>+ cancel back the other way" ==> SDK["souk-agent-sdk<br/>(in AgentSoukServer)"]
-
-    SDK --> AgentA["Local Agent A<br/>(Laptop / Behind NAT)"]
-    SDK --> AgentB["Enterprise VPC Agent B<br/>(Private Subnet)"]
-```
-
----
-
 ## Repository structure
 
 Modular, independent distributions — no shared workspace, each stands alone:
@@ -138,61 +123,6 @@ Modular, independent distributions — no shared workspace, each stands alone:
 | [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`responsibility-chains.md`](docs/responsibility-chains.md), [`conversation-semantics.md`](docs/conversation-semantics.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
 
 Three names circulate and they are different packages: **`souk-provider-sdk` is here** and defines the interaction; `souk-agent-sdk` (a client for the gateway's provider WebSocket) and `souk-client-sdk` (the caller's side) live in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer), along with the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`). The gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
-
----
-
-## Local development and testing
-
-Library development needs no gateway at all — `souk`'s suite runs against the core directly:
-
-```bash
-cd souk && uv sync --group dev
-uv run pytest                      # SQLite, zero configuration
-```
-
-The same suite runs against Postgres by pointing at one (dialect bugs only ever appear on one side — run both before merging):
-
-```bash
-docker compose up paradedb -d
-SOUK_DATABASE_URL="postgresql+psycopg://souk:souk@localhost:5433/souk" uv run pytest
-```
-
-Schema changes are Alembic revisions under [`souk/alembic/`](souk/alembic/) — `uv run alembic upgrade head` is a deploy-time DDL step, deliberately separate from anything a running gateway does (see `CONTRIBUTING.md`).
-
-To see code running against a real gateway, use a checkout of [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer) — its README is the gateway quick start.
-
----
-
-## API usage examples
-
-Against any running souk gateway:
-
-```bash
-# 1. Roster discovery: List active registered agents
-curl http://localhost:8000/agents
-
-# 2. AG-UI: Stream conversation with an agent (SSE format)
-curl -N -X POST http://localhost:8000/agui/souk-guide \
-  -H 'content-type: application/json' \
-  -d '{"messages":[{"id":"m1","role":"user","content":"Hello, what agents are available?"}]}'
-
-# 3. A2A: Inspect Agent Card (the v1.0 well-known path — the only one served;
-#    a pre-v1 client would get a v1.0 body it cannot read, so the old path 404s)
-curl http://localhost:8000/a2a/translator/.well-known/agent-card.json
-
-# 4. A2A: Trigger JSON-RPC task delegation
-curl -N -X POST http://localhost:8000/a2a/translator/rpc \
-  -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":"1","method":"SendStreamingMessage","params":{"message":{"role":"ROLE_USER","parts":[{"text":"Bonjour"}]}}}'
-```
-
----
-
-## Security and identity
-
-- **Keypair identity**: agent identity is bound to an Ed25519 keypair generated locally by the provider SDK (in AgentSoukServer). `/agents/register` verifies cryptographic ownership before issuing short-lived HMAC session bearer tokens. No accounts, no central user database.
-- **Actor chain provenance**: delegation across multiple agents embeds an EdDSA-signed JWT chain; each hop cryptographically binds to the previous hop's SHA-256 hash, preventing token splicing, replay, or impersonation.
-- **Transport security is the gateway's job**: what core guarantees is signing and verification (registration signatures, session tokens, actor chains, KYOK's two-part authorization) — all bounded by a 60s freshness window that only helps on an encrypted path. TLS termination, and why it is mandatory off localhost, is documented in AgentSoukServer's README.
 
 ---
 
