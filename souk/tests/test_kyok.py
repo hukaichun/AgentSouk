@@ -242,7 +242,7 @@ def test_withdrawing_everything_served_by_an_identity_empties_its_offerings():
     relay.withdraw(relay.served_by(link.public_key))
     assert relay.serving(_GPT4) is None
     assert relay.serving(fast) is None
-    assert relay._links == {}
+    assert relay.served_by(link.public_key) == []
 
 
 def test_reattach_replaces_the_connection_under_the_same_offering():
