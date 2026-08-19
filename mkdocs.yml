@@ -1,0 +1,55 @@
+site_name: Agent Souk
+site_description: The network-free agent marketplace core — design, contracts, and guides
+site_url: https://hukaichun.github.io/AgentSouk/
+repo_url: https://github.com/hukaichun/AgentSouk
+repo_name: hukaichun/AgentSouk
+docs_dir: docs
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.action.edit
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Overview: index.md
+  - Architecture:
+      - Library architecture: library-architecture.md
+      - Trust and identity: trust-and-identity.md
+      - Keep your own key: keep-your-own-key.md
+      - Conversation semantics: conversation-semantics.md
+      - Responsibility chains: responsibility-chains.md
+  - Guides:
+      - Agent provider guide: agent-provider-guide.md
+      - Writing a transport: transport-author-guide.md
+      - Managing the schema yourself: managing-the-schema-yourself.md
+      - AI Town as frontend: ai-town-as-frontend.md
+  - Design records:
+      - Broker horizontal scaling: broker-horizontal-scaling.md
+      - Federation and anti-abuse: federation-and-anti-abuse.md
+      - Prior art: prior-art.md

@@ -1,7 +1,7 @@
 # Agent provider guide: situations, how to handle them, what souk does
 
 Two quick starts, for two different questions.
-[`souk-provider-sdk/README.md`](../souk-provider-sdk/README.md) is this
+[`souk-provider-sdk/README.md`](https://github.com/hukaichun/AgentSouk/blob/main/souk-provider-sdk/README.md) is this
 repo's: what a provider and souk agree on, and how to serve an agent with
 souk as a library in your own process.
 [souk-agent-sdk's README](https://github.com/hukaichun/AgentSoukServer/blob/main/souk-agent-sdk/README.md)
