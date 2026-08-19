@@ -5,7 +5,7 @@ Part of [core components](../core-components.md). The six
 
 | mechanism | core-side implementation | provider-side twin |
 |---|---|---|
-| [Identity is an Ed25519 keypair](../mechanisms/identity.md) | `identity.py` (verification, challenges, `SoukIdentity`); roster rules in `core.py`'s `_Roster` | `souk_provider_sdk.identity` (keypair, signers, payload builders) |
+| [Identity is an Ed25519 keypair](../mechanisms/identity.md) | `identity.py` (verification, payload builders, `SoukIdentity`); challenges and roster rules in `core.py`'s `_Roster` | `souk_provider_sdk.identity` (keypair, signers, payload builders) |
 | [Actor chain](../mechanisms/actor-chain.md) | `identity.py` (`verify_actor_chain`, chain builders) | `souk_provider_sdk` (`sign_hop`, `verify_chain`) |
 | [Runs and cancels are requests](../mechanisms/requests.md) | `broker.py` (three-valued offer, cancel relay, observed outcomes) | `SoukLink.offer` / `Refusal` in `souk_provider_sdk` |
 | [Provider quality counters](../mechanisms/quality.md) | `live_roster.py` counters; snapshots via `RunBroker.quality` / `KyokRelay.quality` | — (observed, not reported by providers) |

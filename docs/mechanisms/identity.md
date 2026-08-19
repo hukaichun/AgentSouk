@@ -50,9 +50,11 @@ concern behind its single connection.
 
 ## Published as data
 
-Every payload above is exported by the provider SDK as an independent
-twin of souk's implementation — neither package imports the other — and
-pinned byte-for-byte in
+Every payload above is exported by the SDKs — the agent families by
+`souk-provider-sdk`, the LLM families by `souk-llm-provider-sdk` — as
+independent twins of souk's implementation: neither SDK imports souk nor
+souk them (the LLM SDK does share the provider SDK's keypair class,
+because identity is identity). Each is pinned byte-for-byte in
 [`contract-vectors.json`](../contract-vectors.json), with deterministic
 signatures under a published test key. CI fails if a payload family goes
 unpublished.

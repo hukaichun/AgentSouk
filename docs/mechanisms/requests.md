@@ -28,7 +28,9 @@ vantage point while the provider's log alone knew the truth.
 
 A cancel is relayed to the provider as a request. The provider may comply,
 finish normally anyway, or ignore it; souk keeps relaying whatever the
-run emits and records the outcome it then observes — a run is never
-marked `cancelled` at request time, because souk never records an outcome
-it has not observed. The same rule holds everywhere: statuses are
-observations, not intentions.
+run emits and records the outcome it then observes — a claimed run is
+never marked `cancelled` at request time, because souk never records an
+outcome it has not observed. The one immediate cancellation is a run
+still queued: no provider has it, so there is no outcome souk could be
+pre-empting. The same rule holds everywhere: statuses are observations,
+not intentions.
