@@ -53,9 +53,10 @@ def build_forwarded_props(
     unchanged if there is nothing to add.
 
     Both adapters build through here — a run's `caller` looks the same
-    whichever protocol dispatched it. `kyok` differs by road on purpose:
-    an AG-UI run gets the grant at opt-in bind time, an A2A run only by
-    inheriting a parent's binding, because A2A has no fresh opt-in road.
+    whichever protocol dispatched it, and both doors take the same
+    `metadata.kyok` opt-in. A2A additionally inherits a parent's binding
+    through `referenceTaskIds` when no fresh opt-in is given; an explicit
+    opt-in wins over inheritance.
     """
     extra: dict[str, Any] = {}
     if kyok_enabled:
