@@ -46,3 +46,10 @@ nav:
       - Provider quality counters: mechanisms/quality.md
       - Keep your own key: mechanisms/kyok.md
       - Responsibility chains: mechanisms/responsibility-chains.md
+  - Core components:
+      - core-components.md
+      - Persistence: core-components/persistence.md
+      - The dispatch trunk: core-components/dispatch.md
+      - Contract and identity: core-components/contract-identity.md
+      - Mechanism to code: core-components/extensions.md
+      - Support: core-components/support.md
