@@ -64,7 +64,7 @@ promise that replaces opt-in is threefold:
 ## LLM providers: serve OpenAI shapes, souk exposes the endpoint
 
 The same pattern, one seam over. An LLM provider (the party holding a
-real key — see [Keep your own key](keep-your-own-key.md)) also connects
+real key — see [Keep your own key](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md)) also connects
 out and also promises only a shape: receive a completion request, stream
 back OpenAI chat-completion chunks. The OpenAI-compatible endpoint that
 agents call is souk's to expose; the provider behind it is resolved per
@@ -79,7 +79,7 @@ identity; one keypair may be both), under the same threefold promise.
 
 What the plumbing actually is — the seven signed payload families, the
 link-open challenge, actor chains and what they do and do not prove — is
-[Trust and identity](trust-and-identity.md). How to carry all of it over
-a wire of your own is [Writing a transport](transport-author-guide.md).
+[Trust and identity](https://github.com/hukaichun/AgentSouk/blob/main/design/trust-and-identity.md). How to carry all of it over
+a wire of your own is [Writing a transport](https://github.com/hukaichun/AgentSouk/blob/main/design/transport-author-guide.md).
 This page is the contract; those are the mechanisms it obliges souk to
 publish.

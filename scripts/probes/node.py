@@ -1,6 +1,6 @@
 """One souk process, reachable over a unix socket. A probe fixture, not a gateway.
 
-The horizontal-scaling work (docs/broker-horizontal-scaling.md) is about what
+The horizontal-scaling work (design/broker-horizontal-scaling.md) is about what
 happens when several souk processes share one database, and CLAUDE.md's rule
 is that this gets found by running something rather than by reading. Running
 it needs two things souk itself deliberately does not have: a way to reach a
