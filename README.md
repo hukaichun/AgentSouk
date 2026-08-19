@@ -10,7 +10,7 @@
 
 ## What it is
 
-A *souk* is an open market: the operator provides the space and the footfall; vendors keep their own stall, face, and reputation. The name marks the design stance, which is load-bearing throughout the code: **souk provides mechanism; whoever hosts an instance decides policy.** An operator who wants an invite-only or allowlisted registry puts their own logic in front of souk's `/agents/register` endpoint rather than souk deciding on their behalf (see [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md)). Souk itself never takes a side between "open" and "curated" — the same gateway serves an enterprise-internal deployment and a public one.
+A *souk* is an open market — a shared rendezvous point where independent vendors set up stalls and anyone can walk in. The name is a design stance, unpacked under [Design principles](#design-principles) below.
 
 Concretely, a souk gateway gives you:
 
@@ -26,12 +26,15 @@ Concretely, a souk gateway gives you:
 
 ## Design principles
 
-Four invariants are load-bearing in the shipped code — every one has caused a real bug when bent:
+A traditional souk is famously not curated. The market operator provides the space and the footfall; it does not vouch for what any stall sells. You recognize a stall because it is always in the same spot, run by the same face — and trust in the goods is earned through reputation and direct experience, not through a central authority's seal of approval. Decentralized trust scales; centralized gatekeeping rebuilds the monopoly you came here to escape.
 
-- **souk never decides on a provider's behalf.** It can *ask* an agent to stop; it cannot make it. A run's outcome is recorded only when observed: a run that finishes despite a cancellation request records `completed`, because that is what happened.
-- **The core is network-free — vocabulary included.** Which protocol something arrives over is a serving-layer choice, so the core doesn't just avoid importing transports; it avoids *naming* them.
-- **Identity is a keypair, not an account.** And sharing a process earns no shortcuts: an in-process provider passes the same registration, identity, and liveness checks a remote one does.
-- **Standard clients, unmodified.** A stock AG-UI or A2A client works as-is; every souk-invented mechanism is opt-in.
+souk is that market, built as software. The invariants below are load-bearing in the shipped code:
+
+- **The market never runs the stalls.** souk can *ask* an agent to stop; it cannot make it. A run's outcome is recorded only when observed: a run that finishes despite a cancellation request records `completed`, because that is what happened.
+- **The same spot, the same face.** Identity is an Ed25519 keypair, not an account — a caller can verify it is talking to the same key as last time, and nobody's seal claims more than that. Sharing a process earns no shortcuts: an in-process provider passes the same registration, identity, and liveness checks a remote one does.
+- **The market provides mechanism; the host decides policy.** Open-by-default is souk's own stance, not a constraint it imposes on deployments: an operator who wants an invite-only or allowlisted market puts their own gate in front of `/agents/register` (see [`docs/federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md)). The same gateway serves an enterprise-internal deployment and a public one — souk never takes a side between "open" and "curated".
+- **Anyone may walk in.** A stock AG-UI or A2A client works unmodified; every souk-invented mechanism is opt-in.
+- **The core is network-free — vocabulary included.** No market image for this one; it is a codebase discipline. Which protocol something arrives over is a serving-layer choice, so the core doesn't just avoid importing transports; it avoids *naming* them.
 
 The same principles extend into a conversation-semantics direction that is **designed but not yet implemented** — who may speak on a thread ([`docs/responsibility-chains.md`](docs/responsibility-chains.md)), when speech gets handled and how to speak to work already in flight ([`docs/conversation-semantics.md`](docs/conversation-semantics.md)). Parts of it are under open discussion with the protocol communities: [who answers a delegated `input-required`](https://github.com/a2aproject/A2A/discussions/2148), [the multi-turn gap list](https://github.com/a2aproject/A2A/issues/1992), and [in-flight steering for AG-UI](https://github.com/ag-ui-protocol/ag-ui/issues/2148).
 
