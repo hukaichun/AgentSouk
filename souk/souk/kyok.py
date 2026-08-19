@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from openai.types.chat import ChatCompletionChunk, CompletionCreateParams
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from souk.live_roster import LiveRoster
 from souk.models import AgentRef, LlmRef
 
 KYOK_TOKEN_TTL_SECONDS = 3600
@@ -183,8 +184,7 @@ class KyokRelay:
 
     def __init__(self) -> None:
         self._bindings: dict[str, KyokBinding] = {}
-        self._links: dict[LlmRef, ConnectedLLMProvider] = {}
-        self._quality: dict[str, dict[str, int]] = {}
+        self._live = LiveRoster(("completions", "refused", "failed"))
 
 
     def bind_run(self, run_id: str, binding: KyokBinding) -> None:
@@ -213,26 +213,25 @@ class KyokRelay:
 
 
     def attach(self, mapping: dict[LlmRef, ConnectedLLMProvider]) -> None:
-        self._links.update(mapping)
+        self._live.attach(mapping)
 
     def withdraw(self, refs: list[LlmRef]) -> None:
-        for ref in refs:
-            self._links.pop(ref, None)
+        self._live.withdraw(refs)
 
     def serving(self, ref: LlmRef) -> ConnectedLLMProvider | None:
-        return self._links.get(ref)
+        return self._live.serving(ref)
 
     def served_by(self, public_key: str) -> list[LlmRef]:
-        return [ref for ref in self._links if ref.provider_key == public_key]
+        return self._live.served_by(public_key)
 
     def bound_runs(self, ref: LlmRef) -> int:
         return sum(1 for b in self._bindings.values() if b.llm_provider == ref)
 
     def note_outcome(self, public_key: str, outcome: str) -> None:
-        counters = self._quality.setdefault(
-            public_key, {"completions": 0, "refused": 0, "failed": 0}
-        )
-        counters[outcome] += 1
+        self._live.note(public_key, outcome)
 
     def quality(self) -> dict[str, LlmProviderQuality]:
-        return {key: LlmProviderQuality(**counters) for key, counters in self._quality.items()}
+        return {
+            key: LlmProviderQuality(**counters)
+            for key, counters in self._live.counters().items()
+        }

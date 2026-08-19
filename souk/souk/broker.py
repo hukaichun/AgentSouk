@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from souk.live_roster import LiveRoster
 from souk.models import AgentRef, ClaimedRun
 
 logger = logging.getLogger("souk.broker")
@@ -68,10 +69,6 @@ class _Capacity:
 
     declared: int | None
     in_flight: int = 0
-    misdeclared: int = 0
-    abandoned: int = 0
-    unanswered: int = 0
-    answered_late: int = 0
 
     @property
     def has_room(self) -> bool:
@@ -216,7 +213,7 @@ class RunBroker:
         self._spawn = spawn or self._spawn_unsupervised
         self._runs: dict[str, Run] = {}
         self._pending_by_agent: dict[AgentRef, deque[str]] = defaultdict(deque)
-        self._providers: dict[AgentRef, ConnectedProvider] = {}
+        self._live = LiveRoster(("misdeclared", "abandoned", "unanswered", "answered_late"))
         self._capacity: dict[str, _Capacity] = {}
         self._handlers: dict[str, HandlerMap] = {}
         self._pipeline_tasks: set[asyncio.Task] = set()
@@ -314,7 +311,7 @@ class RunBroker:
         wakes the sweep loop. A provider re-registering under a key it already
         has capacity tracking for keeps its existing in-flight count rather
         than resetting it."""
-        self._providers.update(mapping)
+        self._live.attach(mapping)
         for provider in mapping.values():
             self._capacity.setdefault(
                 provider.public_key, _Capacity(declared=provider.max_concurrent_runs)
@@ -322,14 +319,13 @@ class RunBroker:
         self._work_to_do.set()
 
     def serving(self, agent: AgentRef) -> ConnectedProvider | None:
-        return self._providers.get(agent)
+        return self._live.serving(agent)
 
     def agents_served_by(self, public_key: str) -> list[AgentRef]:
-        return [a for a, p in self._providers.items() if p.public_key == public_key]
+        return self._live.served_by(public_key)
 
     def unregister_provider(self, agents: list[AgentRef]) -> None:
-        for agent in agents:
-            self._providers.pop(agent, None)
+        self._live.withdraw(agents)
 
     async def _offer_pending(self, agent: AgentRef) -> bool:
         """Offers `agent`'s queued runs, in order, to its provider until the
@@ -338,7 +334,7 @@ class RunBroker:
         whether at least one run was placed."""
         placed = False
         while True:
-            provider = self._providers.get(agent)
+            provider = self._live.serving(agent)
             queue = self._pending_by_agent.get(agent)
             if provider is None or not queue:
                 return placed
@@ -380,19 +376,17 @@ class RunBroker:
                     )
                 )
         except TimeoutError:
-            if capacity is not None:
-                capacity.unanswered += 1
+            self._live.note(provider.public_key, "unanswered")
             logger.warning(
                 "provider %s did not answer an offer of run %s within %ss (%d so far)",
                 provider.public_key[:16],
                 run.run_id,
                 self.deliver_timeout_seconds,
-                capacity.unanswered if capacity else 0,
+                self._live.count(provider.public_key, "unanswered"),
             )
             return False
         except Exception:
-            if capacity is not None:
-                capacity.unanswered += 1
+            self._live.note(provider.public_key, "unanswered")
             logger.exception("run %s: delivering to its provider failed", run.run_id)
             return False
         reason = getattr(accepted, "reason", None)
@@ -407,7 +401,7 @@ class RunBroker:
             return "refused"
         if not accepted:
             if capacity is not None and capacity.has_room:
-                capacity.misdeclared += 1
+                self._live.note(provider.public_key, "misdeclared")
                 capacity.in_flight = capacity.declared or capacity.in_flight
                 logger.warning(
                     "provider %s declined a run while souk believed it had room "
@@ -446,15 +440,13 @@ class RunBroker:
         if run is None:
             return False
         if isinstance(command, Fail) and run.claimed_by is not None:
-            capacity = self._capacity.get(run.claimed_by)
-            if capacity is not None:
-                capacity.abandoned += 1
-                logger.warning(
-                    "provider %s abandoned run %s (%d so far): took it and never ended it",
-                    run.claimed_by[:16],
-                    run_id,
-                    capacity.abandoned,
-                )
+            self._live.note(run.claimed_by, "abandoned")
+            logger.warning(
+                "provider %s abandoned run %s (%d so far): took it and never ended it",
+                run.claimed_by[:16],
+                run_id,
+                self._live.count(run.claimed_by, "abandoned"),
+            )
         run.in_queue.put_nowait(command)
         return True
 
@@ -534,7 +526,7 @@ class RunBroker:
         run = self._runs.get(run_id)
         if run is None or run.claimed_by is not None:
             return False
-        provider = self._providers.get(run.agent)
+        provider = self._live.serving(run.agent)
         if provider is None or provider.public_key != claimed_by:
             return False
 
@@ -544,14 +536,14 @@ class RunBroker:
 
         capacity = self._capacity.get(claimed_by)
         if capacity is not None:
-            capacity.answered_late += 1
             capacity.in_flight += 1
+        self._live.note(claimed_by, "answered_late")
         logger.warning(
             "provider %s answered late for run %s (%d so far): already producing for "
             "a run souk had put back in the queue",
             claimed_by[:16],
             run_id,
-            capacity.answered_late if capacity else 0,
+            self._live.count(claimed_by, "answered_late"),
         )
         run.claimed_by = claimed_by
         run.cancel_notify = provider.cancel
@@ -562,14 +554,15 @@ class RunBroker:
         return True
 
     def quality(self) -> dict[str, ProviderQuality]:
+        counters = self._live.counters()
         return {
             key: ProviderQuality(
                 in_flight=c.in_flight,
                 declared=c.declared,
-                misdeclared=c.misdeclared,
-                abandoned=c.abandoned,
-                unanswered=c.unanswered,
-                answered_late=c.answered_late,
+                **{
+                    name: counters.get(key, {}).get(name, 0)
+                    for name in ("misdeclared", "abandoned", "unanswered", "answered_late")
+                },
             )
             for key, c in self._capacity.items()
         }
