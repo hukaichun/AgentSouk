@@ -9,23 +9,31 @@ because one keypair may serve agents and models at once) and `openai`
 (the wire shapes are OpenAI's chat completions — types only, no client
 is constructed here). No transport, no souk, same fitness test.
 
-## Registration and identity
+## Identity and signing
 
 `sign_llm_registration` / `llm_registration_payload` and their deletion
 counterparts — the offering roster's payloads, distinct domain tags from
 the agent family, twins of souk's builders, vector-pinned. Connect
 authentication reuses the shared `sign_connect`.
 
-## The port
+## The port and the worker
 
-`SoukLLMLink` is the abstract port: the base translates souk's
-completion request into a `DeliveredCompletion` (run id, the proven
-calling-agent identity, which model was addressed, the opaque `context`,
-the actor chain), and `serve` is where the provider's own code takes
-over — the interposition point every completion passes through before
-any money moves. `InProcessLLMProvider` is the in-process transport,
-driving a plain `CompletionHandler` (an async function from
-`DeliveredCompletion` to a stream of chunks).
+`SoukLLMLink` is the abstract port a transport implements: the base
+translates souk's completion request into a `DeliveredCompletion`, and
+`serve` is where the provider's own code takes over — the interposition
+point every completion passes through before any money moves. The worker
+is a plain `CompletionHandler` — an async function from
+`DeliveredCompletion` to a stream of chunks — and
+`InProcessLLMProvider` is the in-process transport driving one
+(in-process is a transport, not a special case, same as the agent side).
+
+## The envelopes
+
+`DeliveredCompletion` is both what the handler consumes and the declared
+wire frame (`model_dump(by_alias=True)` / `model_validate`): the run id,
+the proven calling-agent identity, which model was addressed, the opaque
+`context` relayed untouched, and the run's actor chain — everything a
+policy needs, with no trust in souk's summary required.
 
 ## Refusing structurally
 
