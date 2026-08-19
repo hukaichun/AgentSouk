@@ -53,3 +53,7 @@ nav:
       - Contract and identity: core-components/contract-identity.md
       - Mechanism to code: core-components/extensions.md
       - Support: core-components/support.md
+  - SDKs:
+      - sdks.md
+      - souk-provider-sdk: sdks/provider-sdk.md
+      - souk-llm-provider-sdk: sdks/llm-provider-sdk.md
