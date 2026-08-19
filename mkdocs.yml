@@ -20,7 +20,7 @@ theme:
         icon: material/brightness-4
         name: light mode
   features:
-    - navigation.sections
+    - navigation.indexes
     - navigation.top
     - content.action.edit
     - search.suggest
@@ -37,5 +37,12 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
 
 nav:
-  - Overview: index.md
-  - The integration contract: integration-contract.md
+  - The integration contract: index.md
+  - Mechanisms:
+      - mechanisms.md
+      - Identity is an Ed25519 keypair: mechanisms/identity.md
+      - Actor chain: mechanisms/actor-chain.md
+      - Runs and cancels are requests: mechanisms/requests.md
+      - Provider quality counters: mechanisms/quality.md
+      - Keep your own key: mechanisms/kyok.md
+      - Responsibility chains: mechanisms/responsibility-chains.md
