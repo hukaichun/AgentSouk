@@ -24,6 +24,19 @@ Concretely, a souk gateway gives you:
 
 ---
 
+## Design principles
+
+Four invariants are load-bearing in the shipped code — every one has caused a real bug when bent:
+
+- **souk never decides on a provider's behalf.** It can *ask* an agent to stop; it cannot make it. A run's outcome is recorded only when observed: a run that finishes despite a cancellation request records `completed`, because that is what happened.
+- **The core is network-free — vocabulary included.** Which protocol something arrives over is a serving-layer choice, so the core doesn't just avoid importing transports; it avoids *naming* them.
+- **Identity is a keypair, not an account.** And sharing a process earns no shortcuts: an in-process provider passes the same registration, identity, and liveness checks a remote one does.
+- **Standard clients, unmodified.** A stock AG-UI or A2A client works as-is; every souk-invented mechanism is opt-in.
+
+The same principles extend into a conversation-semantics direction that is **designed but not yet implemented** — who may speak on a thread ([`docs/responsibility-chains.md`](docs/responsibility-chains.md)), when speech gets handled and how to speak to work already in flight ([`docs/conversation-semantics.md`](docs/conversation-semantics.md)). Parts of it are under open discussion with the protocol communities: [who answers a delegated `input-required`](https://github.com/a2aproject/A2A/discussions/2148), [the multi-turn gap list](https://github.com/a2aproject/A2A/issues/1992), and [in-flight steering for AG-UI](https://github.com/ag-ui-protocol/ag-ui/issues/2148).
+
+---
+
 ## Two repositories, one boundary
 
 The mechanism/policy split runs through the codebase itself, as a hard line between two repos:
@@ -119,7 +132,7 @@ Modular, independent distributions — no shared workspace, each stands alone:
 |---|---|
 | [`souk/`](souk/) | **The core library.** Agents, threads, runs, identity, the AG-UI/A2A/KYOK adapters, and SQLite/Postgres persistence. Network-free: it depends on no web framework, no gRPC, no WebSocket library — and cannot, by packaging and by test |
 | [`souk-provider-sdk/`](souk-provider-sdk/) | **What a provider and souk agree on**, from the provider's side: identity and what it signs, the port an agent implements, and the provider's own worker loop. Carries no transport — its dependencies are `cryptography` and `pyjwt`, and not `souk` either. See its [README](souk-provider-sdk/README.md) |
-| [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
+| [`docs/`](docs/) | The design record: [`library-architecture.md`](docs/library-architecture.md) (the core/serving split and every decision behind it), [`agent-provider-guide.md`](docs/agent-provider-guide.md), [`keep-your-own-key.md`](docs/keep-your-own-key.md), [`responsibility-chains.md`](docs/responsibility-chains.md), [`conversation-semantics.md`](docs/conversation-semantics.md), [`federation-and-anti-abuse.md`](docs/federation-and-anti-abuse.md), [`prior-art.md`](docs/prior-art.md) |
 
 Three names circulate and they are different packages: **`souk-provider-sdk` is here** and defines the interaction; `souk-agent-sdk` (a client for the gateway's provider WebSocket) and `souk-client-sdk` (the caller's side) live in [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer), along with the reference providers (`agent-template`, `providers/*`) and the directory UI (`souk-directory`). The gateway repo owns both ends of every wire it defines, and the clients and examples live with the stack they front.
 
