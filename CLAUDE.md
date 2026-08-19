@@ -104,7 +104,7 @@ These are load-bearing; breaking one has caused a real bug here.
 
 ## Where the design lives
 
-`docs/library-architecture.md`. It records decisions *and* the ones that
+`design/library-architecture.md`. It records decisions *and* the ones that
 turned out wrong, with the measurements behind them. Read it before changing
 the provider port, cancellation, or the core/serving boundary — and if the
 code contradicts it, one of them needs fixing, deliberately.

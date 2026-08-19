@@ -39,18 +39,3 @@ markdown_extensions:
 nav:
   - Overview: index.md
   - The integration contract: integration-contract.md
-  - Architecture:
-      - Library architecture: library-architecture.md
-      - Trust and identity: trust-and-identity.md
-      - Keep your own key: keep-your-own-key.md
-      - Conversation semantics: conversation-semantics.md
-      - Responsibility chains: responsibility-chains.md
-  - Guides:
-      - Agent provider guide: agent-provider-guide.md
-      - Writing a transport: transport-author-guide.md
-      - Managing the schema yourself: managing-the-schema-yourself.md
-      - AI Town as frontend: ai-town-as-frontend.md
-  - Design records:
-      - Broker horizontal scaling: broker-horizontal-scaling.md
-      - Federation and anti-abuse: federation-and-anti-abuse.md
-      - Prior art: prior-art.md
