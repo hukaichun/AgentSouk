@@ -20,7 +20,7 @@ signature. Each builder is the independent twin of souk's, and
 reproduces the published vectors byte-for-byte, deterministic signatures
 included.
 
-## The port and the loop
+## The port and the worker
 
 `SoukLink` is the abstract port a transport implements: `offer` a
 delivered run (answering accepted / declined / `Refusal`), `cancel`,
