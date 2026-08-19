@@ -49,7 +49,7 @@ class Recording:
 
 @pytest.fixture
 async def broker():
-    b = RunBroker(deliver_timeout_seconds=0.05, queued_timeout_seconds=30)
+    b = RunBroker(deliver_timeout_seconds=0.05, unserved_timeout_seconds=30)
     b.start()
     try:
         yield b
@@ -299,3 +299,46 @@ def test_a_broker_can_be_built_outside_a_loop_and_started_in_two(caplog):
         assert asyncio.run(place_one("run_2")) == ["run_2"]
 
     assert [r.getMessage() for r in caplog.records] == []
+
+
+async def test_a_queued_run_waits_as_long_as_its_agent_is_served():
+    b = RunBroker(deliver_timeout_seconds=0.02, unserved_timeout_seconds=0.05)
+    b.start()
+    try:
+        b.register_provider({AGENT: Recording(default=False)})
+        _enqueue(b, "run_1")
+        await asyncio.sleep(0.25)
+        run = b.get("run_1")
+        assert run is not None and run.claimed_by is None
+    finally:
+        b.stop()
+
+
+async def test_losing_the_provider_starts_the_clock_that_fails_the_run():
+    b = RunBroker(deliver_timeout_seconds=0.02, unserved_timeout_seconds=0.05)
+    b.start()
+    try:
+        b.register_provider({AGENT: Recording(default=False)})
+        _enqueue(b, "run_1")
+        await asyncio.sleep(0.25)
+        assert b.get("run_1") is not None
+
+        b.unregister_provider([AGENT])
+        await _until(lambda: b.get("run_1") is None, timeout=2.0)
+    finally:
+        b.stop()
+
+
+async def test_a_provider_returning_within_the_window_keeps_the_run():
+    b = RunBroker(deliver_timeout_seconds=0.02, unserved_timeout_seconds=0.3)
+    b.start()
+    try:
+        b.register_provider({AGENT: Recording(default=False)})
+        _enqueue(b, "run_1")
+        b.unregister_provider([AGENT])
+        await asyncio.sleep(0.05)
+        b.register_provider({AGENT: Recording(default=False)})
+        await asyncio.sleep(0.6)
+        assert b.get("run_1") is not None
+    finally:
+        b.stop()

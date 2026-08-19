@@ -207,18 +207,19 @@ class RunBroker:
         spawn=None,
         *,
         sweep_interval_seconds: float = 1.0,
-        queued_timeout_seconds: float = 45.0,
+        unserved_timeout_seconds: float = 45.0,
         deliver_timeout_seconds: float = 5.0,
     ) -> None:
         self._spawn = spawn or self._spawn_unsupervised
         self._runs: dict[str, Run] = {}
         self._pending_by_agent: dict[AgentRef, deque[str]] = defaultdict(deque)
         self._live = LiveRoster(("misdeclared", "abandoned", "unanswered", "answered_late"))
+        self._unserved_since: dict[AgentRef, datetime] = {}
         self._capacity: dict[str, _Capacity] = {}
         self._handlers: dict[str, HandlerMap] = {}
         self._pipeline_tasks: set[asyncio.Task] = set()
         self.sweep_interval_seconds = sweep_interval_seconds
-        self.queued_timeout_seconds = queued_timeout_seconds
+        self.unserved_timeout_seconds = unserved_timeout_seconds
         self.deliver_timeout_seconds = deliver_timeout_seconds
         self._loop_task: asyncio.Task | None = None
         self._work_to_do = asyncio.Event()
@@ -246,14 +247,14 @@ class RunBroker:
             self._loop_task = None
 
     async def run_forever(self) -> None:
-        """Repeatedly expires timed-out queued runs and offers pending runs to
-        their providers, sleeping until new work arrives (`enqueue_run`,
-        `register_provider`) or the queued-run timeout elapses. Swallows and
-        logs any exception other than cancellation so one bad sweep doesn't
-        stop future ones."""
+        """Repeatedly gives up on queued runs whose agent has gone unserved for
+        too long and offers pending runs to their providers, sleeping until new
+        work arrives (`enqueue_run`, `register_provider`) or the unserved
+        timeout elapses. Swallows and logs any exception other than
+        cancellation so one bad sweep doesn't stop future ones."""
         while True:
             try:
-                self.expire_queued(self.queued_timeout_seconds)
+                self.expire_queued(self.unserved_timeout_seconds)
                 self._work_to_do.clear()
                 placed = False
                 for agent in list(self._pending_by_agent):
@@ -263,7 +264,7 @@ class RunBroker:
                     await asyncio.sleep(0)
                     continue
                 with contextlib.suppress(TimeoutError):
-                    async with asyncio.timeout(self.queued_timeout_seconds):
+                    async with asyncio.timeout(self.unserved_timeout_seconds):
                         await self._work_to_do.wait()
             except asyncio.CancelledError:
                 raise
@@ -312,6 +313,8 @@ class RunBroker:
         has capacity tracking for keeps its existing in-flight count rather
         than resetting it."""
         self._live.attach(mapping)
+        for agent in mapping:
+            self._unserved_since.pop(agent, None)
         for provider in mapping.values():
             self._capacity.setdefault(
                 provider.public_key, _Capacity(declared=provider.max_concurrent_runs)
@@ -325,7 +328,11 @@ class RunBroker:
         return self._live.served_by(public_key)
 
     def unregister_provider(self, agents: list[AgentRef]) -> None:
+        now = datetime.now(timezone.utc)
         self._live.withdraw(agents)
+        for agent in agents:
+            if self._live.serving(agent) is None:
+                self._unserved_since[agent] = now
 
     async def _offer_pending(self, agent: AgentRef) -> bool:
         """Offers `agent`'s queued runs, in order, to its provider until the
@@ -474,15 +481,28 @@ class RunBroker:
         return True
 
     def expire_queued(self, timeout_seconds: float) -> list[str]:
-        """Removes runs that have been queued (unclaimed) longer than
-        `timeout_seconds`, failing each with `Fail("no_provider_took_it")`, and
-        returns their run_ids."""
+        """Gives up on queued (unclaimed) runs whose agent has had no serving
+        provider for longer than `timeout_seconds`, failing each with
+        `Fail("no_provider_took_it")`, and returns their run_ids. A run whose
+        agent *is* served stays queued indefinitely — a declining-but-attached
+        provider is a full stall, not a lost one. The clock is the later of the
+        run's own enqueue and the moment the agent last lost its provider, so
+        every run gets the full grace period even if its agent was already
+        unserved when it arrived."""
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=timeout_seconds)
         expired: list[str] = []
-        for queue in list(self._pending_by_agent.values()):
+        for agent, queue in list(self._pending_by_agent.items()):
+            if self._live.serving(agent) is not None:
+                continue
+            unserved_since = self._unserved_since.get(agent)
             for run_id in list(queue):
                 run = self._runs.get(run_id)
-                if run is None or run.queued_at > cutoff:
+                if run is None:
+                    continue
+                reference = (
+                    max(run.queued_at, unserved_since) if unserved_since else run.queued_at
+                )
+                if reference > cutoff:
                     continue
                 queue.remove(run_id)
                 expired.append(run_id)
