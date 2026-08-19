@@ -3,55 +3,88 @@
 Part of [core components](../core-components.md).
 
 Four lanes, all network-free — each is a set of methods a serving layer
-puts on whatever wire it chooses.
+puts on whatever wire it chooses. This page describes how each lane
+actually works, in order of what happens.
 
 ## The caller doors: AG-UI and A2A
 
-`protocols/agui.py` and `protocols/a2a.py` are the adapters a standard
-client's requests land on: start or resume a run, stream its events,
-read a thread back, send an A2A message, follow task lineage. Both
-validate against the protocol packages themselves (`ag-ui-protocol`,
-`a2a-sdk`) — souk hand-writes no protocol, so a renamed field upstream
-fails at import, not in production.
+Starting a run over AG-UI (`protocols/agui.py`) is a straight line:
+verify the caller's metadata (an actor chain, if attached, is verified
+here and a summary added), create or reopen the thread and run rows,
+append the caller's messages to the thread, and check the agent is
+currently served — an offline agent fails the run immediately with a
+terminal event rather than queueing into silence. Then the run input is
+built (below), handed to the broker, and the caller gets back a live
+**event stream**: an async iterator that yields each AG-UI event as the
+provider produces it. Resuming a paused run is the same door with a
+`resume` payload — the run keeps its id and its provider is invoked
+again.
+
+The A2A door (`protocols/a2a.py`) speaks JSON-RPC with method names read
+off the A2A service descriptor (nothing hand-written, so an upstream
+rename fails at import). `message/send` creates a thread and run the
+same way; task states are derived from run statuses; `referenceTaskIds`
+records lineage; `tasks/cancel` is the one external cancel path.
 
 ## The translation: A2A becomes AG-UI before dispatch
 
-Every A2A call is translated into the same AG-UI-shaped run input the
-AG-UI door produces (`build_run_agent_input`), so a provider sees one
-shape regardless of which protocol the caller spoke — this is what lets
-souk open an A2A door for an agent whose author never wrote a line of
-A2A. souk's own forwarded-props additions are built in one place for
-both doors, so a run's `caller` looks the same whichever road dispatched
-it.
+Both doors converge on one function that builds the AG-UI
+`RunAgentInput` the provider will see: thread id, run id, the folded
+message history, and `forwardedProps` — the caller's free-form slot plus
+souk's own two additions (`caller`, `kyok`), built by a single shared
+builder so a run's identity props are byte-identical whichever protocol
+dispatched it. An agent therefore becomes A2A-callable without its
+author writing any A2A: by the time the run reaches the provider, the
+protocol difference has already been erased.
 
 ## The agent-provider lane: offer, claim, pipeline
 
-`RunBroker` is the brokering machine: a started run queues per agent; the
-broker offers it to the agent's attached provider inside a delivery
-window; the provider answers accepted, declined, or refused (see
-[runs and cancels are requests](../mechanisms/requests.md)); an accepted
-run is claimed and gets a per-run pipeline that consumes its commands in
-order — relay an event, finish the stream, request a cancel, fail — with
-`handlers.py` folding each into the database and the caller's live
-stream. Capacity is the provider's declaration; what souk observes about
-it goes to the quality counters.
+`RunBroker` keeps the live state in memory: a `Run` object per active
+run, a pending deque per agent, and a capacity bucket per provider
+(declared limit vs in-flight count). A sweep task wakes whenever work
+arrives or capacity frees, and walks each agent's queue:
+
+1. **Offer.** The head run is offered to the agent's attached connection
+   — one awaited call carrying the claimed-run envelope, under a
+   delivery timeout. The provider answers accepted / declined-full /
+   refused-permanently; timeouts and refusals are handled per
+   [runs and cancels are requests](../mechanisms/requests.md).
+2. **Claim.** An accepted run is marked claimed by that provider's key
+   and its in-flight count rises.
+3. **Pipeline.** Each claimed run gets its own consumer task draining a
+   per-run command queue **in order**: the provider reporting an event
+   becomes a relay command (persist the event row, forward it to the
+   caller's live stream); finishing the stream folds the run's outcome
+   and writes the terminal status; a cancel request is forwarded to the
+   provider's `cancel` and the pipeline keeps running until a terminal
+   command actually arrives. Ordering per run is guaranteed by the queue;
+   runs are independent of each other.
+
+When a run ends — however it ends — one funnel (`forget`) releases its
+state: capacity is freed, the sweep wakes, KYOK bindings die, listeners
+are told.
 
 ## The LLM-provider lane: the completion relay
 
-`KyokRelay` plus `protocols/kyok.py` are the relaying machine: a
-KYOK-bound run's agent calls the OpenAI-compatible door; three checks
-authorize the call (souk's token, the run still live, the agent's own
-signature); the binding resolves to whichever connection currently serves
-the offering, and chunks stream back through a counter that records the
-outcome. No queue, no negotiation — an unattached offering is an
-immediate fast-fail, because the caller is waiting on a live stream.
+The KYOK door (`protocols/kyok.py`) is request-scoped, no queue. A call
+arrives bearing the run's token; three checks run in order — the token
+verifies and hasn't expired, the run it names is still live for that
+agent, and the call is freshly signed by the agent provider's own key
+over the token, a timestamp and the body hash. Then the run's binding
+names an offering; the offering resolves to whichever connection
+currently serves it (attach/re-attach mid-run just works, because the
+binding never names a connection); and the provider's chunk iterator is
+returned to the caller, wrapped in a counter that records how the stream
+ended. Not attached → immediate fast-fail, because the calling agent is
+holding a live stream open — queueing here would help nobody.
 
 ## One substrate under both
 
-A broker and a relay are deliberately different machines — one queues and
-negotiates, one passes through — but each keeps the same roster: which
-connection serves each ref, one connection per role, counters recorded
-and never judged. That table is extracted once as `LiveRoster` and
-composed by both, so the two lanes cannot drift apart; the register /
-attach / detach semantics above them are likewise stated once, in the
-facade's `_Roster`.
+A broker and a relay are deliberately different machines — one queues
+and negotiates, one passes through — but each keeps the same roster:
+a plain map from ref to connection where re-attaching under the same ref
+replaces the old link (one connection per role), plus per-identity
+counters. That table is extracted once as `LiveRoster` and composed by
+both hosts, so the two lanes cannot drift apart; the register / attach /
+detach ceremony above them is likewise stated once, in the facade's
+`_Roster` base.
