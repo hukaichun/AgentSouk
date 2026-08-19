@@ -1,6 +1,6 @@
 # The SDKs
 
-Callers need no SDK — that is [the contract](index.md)'s promise, not an
+Callers need no SDK — that is [the contract](integration-contract.md)'s promise, not an
 omission. The SDKs in this repository serve the two parties that connect
 *out* to souk, and both are **pure contract packages**: what each side
 agrees on, as importable code and models, with no transport inside.

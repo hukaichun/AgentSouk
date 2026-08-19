@@ -37,7 +37,8 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
 
 nav:
-  - The integration contract: index.md
+  - Overview: index.md
+  - The integration contract: integration-contract.md
   - Mechanisms:
       - mechanisms.md
       - Identity is an Ed25519 keypair: mechanisms/identity.md
