@@ -130,7 +130,7 @@ async def main() -> int:
     print("[2] a run is started for an agent no provider is attached to")
     quick = Souk(
         CoreSettings(database_url=URL, token_signing_secret="probe"),
-        broker=RunBroker(queued_timeout_seconds=0.05),
+        broker=RunBroker(unserved_timeout_seconds=0.05),
     )
     await quick.start()
     lonely = ProviderIdentity(Ed25519PrivateKey.generate())
