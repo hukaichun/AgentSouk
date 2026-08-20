@@ -52,12 +52,16 @@ class AGUIAdapter:
 
     async def run(self, agent: AgentRef, body: RunAgentInput) -> EventStream | ThreadSnapshot:
         """Starts (or resumes) an AG-UI run for `agent`. Creates a new thread if `body.thread_id`
-        is unseen, ignores the caller-supplied `run_id` and mints souk's own, and returns a
-        `ThreadSnapshot` instead of starting a run if the thread already has an unrelated active
-        run. If the agent is registered but not currently served, the run is recorded as failed
-        and the returned stream carries a `RUN_ERROR` event rather than hanging. Raises
-        `AgentNotFound` if `agent` isn't registered, `LlmProviderNotFound` if a KYOK opt-in names
-        an unknown LLM provider, and `InvalidRunInput` if the assembled AG-UI input is invalid."""
+        is unseen, ignores the caller-supplied `run_id` and mints souk's own. A run on a thread
+        that already has one in flight is accepted and queued behind it — one turn per thread at
+        a time — and its returned stream stays silent until its turn comes; an AG-UI client
+        normally holds one session per thread, so a second concurrent run is unusual but not
+        refused. A resume with no surviving paused run to target (another caller answered first)
+        gets a `ThreadSnapshot` instead of a stream. If the agent is registered but not currently
+        served, the run is recorded as failed and the returned stream carries a `RUN_ERROR` event
+        rather than hanging. Raises `AgentNotFound` if `agent` isn't registered,
+        `LlmProviderNotFound` if a KYOK opt-in names an unknown LLM provider, and
+        `InvalidRunInput` if the assembled AG-UI input is invalid."""
         souk = self._souk
         async with souk.session() as session:
             if await repo.get_agent(session, agent) is None:
@@ -87,8 +91,6 @@ class AGUIAdapter:
             paused = (
                 await repo.get_paused_run_for_thread(session, thread_id) if resume else None
             )
-            if paused is None and await repo.get_active_run_for_thread(session, thread_id):
-                return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
 
             input_dump = body.model_dump(mode="json", by_alias=True)
             if isinstance(input_dump.get("metadata"), dict):

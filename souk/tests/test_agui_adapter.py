@@ -85,7 +85,9 @@ async def test_a_registered_but_unserved_agent_fails_the_run_rather_than_hanging
     assert (await souk.get_run(result.run_id)).status == "failed"
 
 
-async def test_a_second_run_on_a_busy_thread_gets_the_thread_back(souk, serve):
+async def test_a_second_run_on_a_busy_thread_is_queued_behind_the_first(souk, serve):
+    from souk import repo
+
     served = await serve(_NeverFinishes(), "slow")
     adapter = AGUIAdapter(souk)
 
@@ -93,10 +95,15 @@ async def test_a_second_run_on_a_busy_thread_gets_the_thread_back(souk, serve):
     assert isinstance(first, EventStream)
     assert (await anext(first.events))["type"] == "RUN_STARTED"
 
-    second = await adapter.run(served.agents["slow"], _body(first.thread_id))
+    second = await adapter.run(served.agents["slow"], _body(first.thread_id, "one more"))
 
-    assert isinstance(second, ThreadSnapshot)
-    assert second.data["active_run"]["run_id"] == first.run_id
+    assert isinstance(second, EventStream), "a second run is accepted and queued, not refused"
+    assert second.run_id != first.run_id
+    async with souk.session() as session:
+        stored = await repo.get_run(session, second.run_id)
+        messages = await repo.get_thread_messages(session, first.thread_id)
+    assert stored.status == "queued", "it waits its turn behind the in-flight run"
+    assert "one more" in [m.get("content") for m in messages], "and its message is kept"
 
 
 async def test_events_encode_as_sse_payloads(souk, serve):

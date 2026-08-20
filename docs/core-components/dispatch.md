@@ -16,9 +16,13 @@ currently served — an offline agent fails the run immediately with a
 terminal event rather than queueing into silence. Then the run input is
 built (below), handed to the broker, and the caller gets back a live
 **event stream**: an async iterator that yields each AG-UI event as the
-provider produces it. Resuming a paused run is the same door with a
-`resume` payload — the run keeps its id and its provider is invoked
-again.
+provider produces it. A run on a thread that already has one in flight
+is accepted and queued behind it, its stream silent until its turn —
+AG-UI has no "accepted, not yet worked on" state to answer with, and an
+AG-UI client holds one session per thread, so the unusual second run is
+queued rather than refused. Resuming a paused run is the same door with
+a `resume` payload — the run keeps its id and its provider is invoked
+again, targeting the thread's `input-required` run specifically.
 
 The A2A door (`protocols/a2a.py`) speaks JSON-RPC with method names read
 off the A2A service descriptor (nothing hand-written, so an upstream

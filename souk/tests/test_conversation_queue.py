@@ -208,3 +208,43 @@ async def test_start_reseeds_the_thread_gate_from_paused_runs(settings, session,
         assert reborn.broker._thread_holder.get(thread_id) == created["run_id"]
     finally:
         await reborn.aclose()
+
+
+async def test_an_agui_run_queued_behind_another_flows_when_its_turn_comes(souk, serve):
+    from ag_ui.core import RunAgentInput, UserMessage
+
+    from souk.protocols.agui import AGUIAdapter
+
+    def _body(thread_id: str, text: str) -> RunAgentInput:
+        return RunAgentInput(
+            thread_id=thread_id,
+            run_id="ignored",
+            state={},
+            messages=[UserMessage(id="m1", role="user", content=text)],
+            tools=[],
+            context=[],
+            forwarded_props={},
+        )
+
+    async def _drain(stream) -> list[dict]:
+        return [event async for event in stream.events]
+
+    provider = GateAgent()
+    served = await serve(provider, "sse")
+    agent = served.agents["sse"]
+    adapter = AGUIAdapter(souk)
+
+    first = await adapter.run(agent, _body("t-sse", "start"))
+    first_events = asyncio.create_task(_drain(first))
+    await _until(lambda: len(provider.runs) == 1)
+
+    second = await adapter.run(agent, _body(first.thread_id, "one more"))
+    second_events = asyncio.create_task(_drain(second))
+    await asyncio.sleep(0.1)
+    assert len(provider.runs) == 1, "the queued run must not start while the first is in flight"
+    assert not second_events.done(), "its stream stays open, silent until its turn"
+
+    provider.release.set()
+    assert {e["type"] for e in await first_events} >= {"RUN_STARTED", "RUN_FINISHED"}
+    assert {e["type"] for e in await second_events} >= {"RUN_STARTED", "RUN_FINISHED"}
+    assert [r.thread_id for r in provider.runs] == [first.thread_id, first.thread_id]

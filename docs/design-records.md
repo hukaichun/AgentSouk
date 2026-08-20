@@ -238,17 +238,21 @@ messages belong together is the batch-correlation swamp that killed an
 earlier design; membership is only ever declared by the caller and
 absorbed by the provider, never assumed by the relay.
 
-This shipped for the A2A door (before it, a message sent mid-run was
-answered with the in-flight task and **silently discarded** — not
-queued, not appended, invisible to the caller), with the dispatch half
-in the broker: one turn per thread at a time, and a paused
-`input-required` run holds its thread until answered, so nothing
-overtakes an unanswered question. Two deliberate narrowings: enqueue
-order is arrival order (truly concurrent messages have no canonical
-order to preserve, and the gate serializes dispatch regardless), and the
-AG-UI door still answers a busy thread with a snapshot — what its caller
-should see while queued is an unsettled UX question, not a mechanism
-gap.
+This shipped for both doors (before it, the A2A door answered a mid-run
+message with the in-flight task and **silently discarded** the message —
+not queued, not appended, invisible to the caller — and the AG-UI door
+refused a busy thread with a snapshot), with the dispatch half in the
+broker: one turn per thread at a time, and a paused `input-required` run
+holds its thread until answered, so nothing overtakes an unanswered
+question. Two deliberate narrowings. Enqueue order is arrival order —
+truly concurrent messages have no canonical order to preserve, and the
+gate serializes dispatch regardless. And an AG-UI run queued behind
+another holds its event stream open, silent, until its turn comes:
+AG-UI has no "accepted, not yet worked on" vocabulary to answer with
+(that is A2A's `submitted`), so the silence is chosen debt, guarded by
+the use case — an AG-UI client holds one session per thread and rarely
+opens a second run mid-turn; souk accepts the unusual one rather than
+refusing it.
 
 [full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#queueing-delivery-is-the-protocols-timing-is-the-providers)
 
