@@ -49,6 +49,42 @@ own. Any other failure is an unstructured error. souk counts what it saw
 (served, refused, failed — see
 [quality counters](quality.md)) and decides nothing.
 
+## How a refusal reaches the caller
+
+A refusal is the LLM provider's policy working, not an error souk has an
+opinion about — so souk relays it as **data** and reads none of it.
+
+The provider raises `CompletionRefused(refusal)` carrying its own dict.
+souk picks the payload off by attribute name, duck-typed: the two
+packages do not import each other, and the attribute name itself is
+pinned in the contract so it cannot drift. Anything that is not a dict
+is not treated as a structured refusal.
+
+There are two shapes, depending on where the caller is when it happens:
+
+- **Before the stream starts**, it surfaces as `KyokRejected` carrying
+  the provider's refusal and a status. The statuses are a fixed map:
+  401 for a bad token or signature, 400 for a malformed body, 403 for an
+  inactive run or an unregistered agent, 503 for a missing binding or a
+  detached provider, 502 for the provider's own call failing.
+- **Mid-stream**, the relay emits one final `{"error": ...}` frame
+  carrying the same payload. Note that this path ends the stream
+  *without* the trailing `[DONE]` sentinel a successful stream emits — a
+  client that waits for `[DONE]` before acting will wait forever.
+
+An exception that is not a structured refusal collapses to plain prose
+instead, and the quality counters record it as `failed` rather than
+`refused`. Both are counted; neither is judged — see
+[quality counters](quality.md).
+
 The full design record, including the two prior designs this replaced and
 why they failed, is
 [`design/keep-your-own-key.md`](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md).
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [KYOK replaced two designs, both failing for one reason](../design-records.md#kyok-replaced-two-designs-both-failing-for-one-reason)
+- [An inter-chunk timeout kills slow models and blames the wrong side](../design-records.md#an-inter-chunk-timeout-kills-slow-models-and-blames-the-wrong-side)
+- ["Trustless" binding was rejected as false safety](../design-records.md#trustless-binding-was-rejected-as-false-safety)

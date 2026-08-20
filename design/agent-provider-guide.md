@@ -43,7 +43,7 @@ if pending:
     return "still waiting on <sub-agent> — you'll get a real answer next time you check"
 ```
 
-`providers/pydantic-ai-agent/pydantic_ai_agent/sub_agent_tool.py` is the
+AgentSoukServer's `pydantic-ai-agent` fixture (`sub_agent_tool.py`) is the
 worked example. There's no subscription to register and nothing to learn
 beyond this: whether a *later* call to the same sub-agent gets a real
 answer or another "still pending" is decided fresh each time, purely by
@@ -85,7 +85,7 @@ independent choices you make separately.
 Delegation composes into arbitrary graphs of agents talking to each other
 through souk, since each hop is just one more A2A call. Two shapes worth
 naming explicitly, both exercised against a real LLM
-(`providers/pydantic-ai-agent/config.test-topologies.yaml` — kept in the
+(that fixture's `config.test-topologies.yaml` — kept in the
 repo as a regression fixture, not a live demo):
 
 - **Fan-out / diamond** (you call two sub-agents concurrently, and both
@@ -157,8 +157,9 @@ in `run_stream` changes that, since the cancel signal never gets sent in
 the first place. Worth knowing rather than assuming cancellation
 uniformly "just works" for every caller.
 
-When it does happen (A2A `tasks/cancel`), souk sends a `cancel=true`
-envelope on your current gRPC stream — a *request*, not a command: souk
+When it does happen (A2A `tasks/cancel`), souk sends a cancel
+notification on your provider connection — however your transport frames
+one — a *request*, not a command: souk
 keeps persisting and relaying whatever your run emits afterwards, and if
 you finish normally anyway the run is recorded `completed`. The SDK
 complies on your behalf: its read loop calls `.cancel()` on the task
@@ -207,14 +208,13 @@ difference. `scripts/gen_dev_tls_cert.py` generates a self-signed pair for
 local testing; see the top-level README's Security section for the
 server-side settings this pairs with.
 
-## Keep Your Own Key (KYOK) — experimental
+## Keep Your Own Key (KYOK)
 
-Treat this as experimental, unlike everything else in this document:
-`souk/api_llm_bridge.py`/`souk/kyok.py` have no test coverage today
-(contrast the broker/pause/health paths, which have been through several
-rounds of race-condition review), and the bridge's pending-completion
-registry is in-memory/single-process only. Fine for a demo or low-stakes
-integration; if a run genuinely dies mid-relay (souk restart, provider
-crash) there's no persisted state to recover from, and that path hasn't
-been exercised under test. See
-[`docs/keep-your-own-key.md`](keep-your-own-key.md) for the full design.
+The design this section used to describe — a bridge in
+`souk/api_llm_bridge.py` with no test coverage — is gone. KYOK is now a
+real LLM provider on the same identity machinery, in `souk/souk/kyok.py`,
+covered by `souk/tests/test_kyok.py` and
+`souk/tests/test_llm_provider_drives_kyok.py`. The current account is
+[`docs/mechanisms/kyok.md`](../docs/mechanisms/kyok.md); the design
+record, including the two designs it replaced and why, is
+[`keep-your-own-key.md`](keep-your-own-key.md).

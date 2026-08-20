@@ -72,3 +72,9 @@ a chain read again late in a long run would fail on souk's own stale
 hop. (The edge exists today for provider hops too; souk signing every
 dispatch would make it constant.) That discussion is parked; the
 mechanism waits for it.
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [A silent hop is priced, not compelled](../design-records.md#a-silent-hop-is-priced-not-compelled)

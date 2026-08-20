@@ -75,11 +75,77 @@ never reads it.
 The plumbing is the same machinery agent providers use (identity is
 identity; one keypair may be both), under the same threefold promise.
 
+## What a standard A2A client observes
+
+"A standard client works unmodified" is a promise about what souk
+*requires*, not a claim that every A2A concept has a souk meaning. These
+are the identifier rules and the current gaps, stated so nobody has to
+discover them from behavior.
+
+**Identifiers are souk's to mint.** A task id is souk's `run_id`; a
+`contextId` is souk's `thread_id`. Neither is caller-choosable. Omitting
+`contextId` on the first call is the correct pattern — souk generates
+one and returns it, and the caller passes it back to continue the
+thread. An unknown `contextId` is refused rather than created, because
+accepting arbitrary caller-chosen ids would let any party claim a thread
+it did not originate. A `contextId` belonging to a different agent is
+refused for the same reason.
+
+**`referenceTaskIds` is lineage, not continuity.** The first reference
+resolves to its thread and becomes the new thread's parent, which is how
+a delegated call hangs off the thread that spawned it. It does *not*
+continue that conversation — for that, pass the `contextId`. One further
+consequence worth knowing: the same reference is what a KYOK binding is
+inherited through.
+
+**`Message.taskId` references an existing task.** It resolves to that
+task's thread, and an unknown one is a JSON-RPC `-32001`. Note it is read
+from the message, not from `params`; a `params`-level `taskId` is
+ignored and the call starts a fresh thread.
+
+**A resumed run keeps its task id.** A pause does not end a task and
+resuming does not mint a successor, so a stored task id stays valid
+across the pause.
+
+### Current gaps, stated plainly
+
+These are not design positions. They are what the code does today, and a
+client author needs them.
+
+- **A paused task cannot be answered over A2A.** Resume is AG-UI-only,
+  gated in one place, and the A2A surface always passes no resume. A
+  task in `input-required` is a dead end for an A2A caller. This began
+  as a deliberate doctrine — a delegating *agent* must not be able to
+  approve an interrupt meant for a human — but A2A now has
+  `elicitationId` for exactly this, and souk has no answer to it yet.
+- **A second message on a live `contextId` is dropped.** While a run on
+  that thread is still active, `SendMessage` returns the in-flight task
+  as its result and the message is discarded — not queued, not appended
+  to the thread. This is the gap the
+  [queueing direction](design-records.md#queueing-makes-may-i-speak-always-answerable-with-yes)
+  exists to close.
+- **An unknown AG-UI `threadId` mints a new thread and discards the id
+  you sent.** A client that invents its own thread id and keeps sending
+  it gets a brand-new thread on every call, because the id it supplied
+  is never registered. Use the id souk returns.
+- **An offline agent looks like a failed task, not an error.** The run
+  is recorded `failed` with `agent_offline`, and the task comes back
+  `FAILED` with no message part.
+- **Only `RunNotFound` becomes a JSON-RPC error in core.** Unknown
+  thread, thread-ownership mismatch, unknown agent, invalid actor chain
+  and invalid run input all escape as Python exceptions for the serving
+  layer to map. Which HTTP status a caller sees is the gateway's choice,
+  not core's.
+- **Non-lifecycle AG-UI events ride status updates** under a souk
+  metadata key. A standard client ignores them, which means tool-call
+  events are not visible over A2A.
+
 ## Where the inventions live
 
 What the plumbing actually is — the seven signed payload families, the
 link-open challenge, actor chains and what they do and do not prove — is
-[Trust and identity](https://github.com/hukaichun/AgentSouk/blob/main/design/trust-and-identity.md). How to carry all of it over
-a wire of your own is [Writing a transport](https://github.com/hukaichun/AgentSouk/blob/main/design/transport-author-guide.md).
-This page is the contract; those are the mechanisms it obliges souk to
+[Identity is an Ed25519 keypair](mechanisms/identity.md) and
+[Actor chain](mechanisms/actor-chain.md). How to carry all of it over a
+wire of your own is [Writing a transport](writing-a-transport.md). This
+page is the contract; those are the mechanisms it obliges souk to
 publish.

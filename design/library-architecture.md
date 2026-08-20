@@ -1,8 +1,9 @@
 # Library architecture: souk as a network-free core
 
-Status: **design, not yet implemented.** Supersedes the implicit structure
-of today's `souk/` subproject, which is a server that happens to be
-pip-installable.
+Status: **implemented.** The core/serving split described here shipped;
+`souk/` is a network-free library, and serving lives downstream in
+AgentSoukServer. Sections that record a decision later reversed say so
+in place.
 
 ## The principle
 
@@ -28,7 +29,7 @@ to stand up an HTTP server to get them.
 which framework, which middleware, which port, which TLS story. souk hands
 back objects and pure functions; the host decides how (or whether) they
 reach a network. This is the same mechanism/policy split the project already
-applies to registration (see `docs/federation-and-anti-abuse.md`).
+applies to registration (see `federation-and-anti-abuse.md`).
 
 ## Package layout
 
@@ -758,7 +759,7 @@ after attaching.
 ## What this leaves open: horizontal scaling
 
 Not a goal now, but the layering should not foreclose it.
-`docs/broker-horizontal-scaling.md` is the plan.
+`broker-horizontal-scaling.md` is the plan.
 
 Where souk's state lives:
 
