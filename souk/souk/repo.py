@@ -51,6 +51,15 @@ class ThreadOwnershipMismatch(Exception):
     pass
 
 
+class ThreadQueueFull(Exception):
+    """The thread's pending-utterance buffer is at its limit; the message was NOT accepted.
+
+    A resource guard, not a judgment: souk counts pending runs, never reads
+    them. The refusal is loud on purpose — accepting and silently expiring
+    later would be worse than saying no now. Answering a paused run's
+    question (the reply lane) is never subject to this limit."""
+
+
 async def get_schema_revision(session: AsyncSession) -> str | None:
     connection = await session.connection()
     if not await connection.run_sync(lambda c: inspect(c).has_table("alembic_version")):
@@ -630,6 +639,37 @@ async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> di
         )
     ).mappings().first()
     return dict(row) if row else None
+
+
+async def ensure_queue_room(session: AsyncSession, thread_id: str, limit: int | None) -> None:
+    """Refuses (ThreadQueueFull) a new pending run when the thread's buffer is
+    at `limit`; a no-op when `limit` is None. One door-side guard for every
+    place a new queued run joins a thread — the reply lane (reopening a paused
+    run) never goes through it, because answering a question adds nothing to
+    the buffer."""
+    if limit is None:
+        return
+    depth = await count_queued_runs_for_thread(session, thread_id)
+    if depth >= limit:
+        raise ThreadQueueFull(
+            f"thread '{thread_id}' already has {depth} pending run(s), at its limit of "
+            f"{limit} — the message was not accepted; wait for the thread to drain "
+            "or answer its paused question"
+        )
+
+
+async def count_queued_runs_for_thread(session: AsyncSession, thread_id: str) -> int:
+    """How many of the thread's runs are still waiting to be dispatched — the
+    depth of its pending-utterance buffer. The count-then-create at the doors
+    is deliberately unlocked: the limit is a resource guard, not accounting,
+    and a rare concurrent overshoot by one is cheaper than a lock here."""
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(runs)
+            .where(runs.c.thread_id == thread_id, runs.c.status == "queued")
+        )
+    ).scalar_one()
 
 
 async def get_paused_run_for_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:

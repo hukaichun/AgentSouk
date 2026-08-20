@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from souk.repo import ProviderFingerprintTaken, ThreadNotFound, ThreadOwnershipMismatch
+from souk.repo import (
+    ProviderFingerprintTaken,
+    ThreadNotFound,
+    ThreadOwnershipMismatch,
+    ThreadQueueFull,
+)
 
 __all__ = [
     "AgentInUse",
@@ -13,6 +18,7 @@ __all__ = [
     "SoukError",
     "ThreadNotFound",
     "ThreadOwnershipMismatch",
+    "ThreadQueueFull",
 ]
 
 

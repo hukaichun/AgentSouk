@@ -20,6 +20,8 @@ class CoreSettings(BaseSettings):
 
     paused_timeout_seconds: int | None = None
 
+    thread_queue_limit: int | None = 8
+
 
     token_signing_secret: str
 

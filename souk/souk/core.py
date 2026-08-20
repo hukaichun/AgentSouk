@@ -908,6 +908,9 @@ class Souk:
             resolved_thread_id = await repo.ensure_thread(
                 session, agent, thread_id, metadata=metadata, create_if_missing=True
             )
+            await repo.ensure_queue_room(
+                session, resolved_thread_id, self.settings.thread_queue_limit
+            )
             created = await repo.create_run(
                 session, resolved_thread_id, agent, "ag-ui", run_input, metadata
             )
