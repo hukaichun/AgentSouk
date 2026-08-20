@@ -31,10 +31,12 @@ Registration and deletion sign over a timestamp inside a freshness
 window. Link-open does not: a self-chosen timestamp is replayable for its
 whole window by anyone on the path, so opening a link answers a
 **challenge the verifier chose** — souk mints a single-use nonce, the
-provider signs it together with its own nonce and the names it intends to
-serve, and souk's answering signature (over both nonces, under a distinct
-role tag so neither proof reflects as the other) is what the provider
-verifies against its pinned souk key. In-process connections authenticate
+provider signs it together with its own nonce, the names it intends to
+serve, and the souk key it means to connect to — the recipient is in the
+signed bytes, so a proof coaxed out by one souk cannot be relayed to
+attach at another — and souk's answering signature (over both nonces,
+under a distinct role tag so neither proof reflects as the other) is what
+the provider verifies against its pinned souk key. In-process connections authenticate
 the same way, automatically — sharing a process is not a reason to skip
 identity.
 

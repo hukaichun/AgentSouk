@@ -44,6 +44,7 @@ from souk.identity import (
     llm_registration_signing_payload,
     provider_connect_signing_payload,
     registration_signing_payload,
+    souk_connect_signing_payload,
     verify_signature,
 )
 from souk.ids import new_id
@@ -193,20 +194,32 @@ class _Roster(abc.ABC):
         challenge: str | None = None,
         provider_nonce: str | None = None,
         proof: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Connect `connection` as the live server for its already-registered `names`.
 
         Attaching is where runs change hands, so it authenticates like
         everything else: `proof` is a signature over
-        `provider_connect_signing_payload(challenge, provider_nonce, names)`
-        where `challenge` came from `Souk.issue_connect_challenge` — souk
-        chose the freshness, so a recording is worthless. A connection that
+        `provider_connect_signing_payload(this souk's public key, challenge,
+        provider_nonce, names)` where `challenge` came from
+        `Souk.issue_connect_challenge` — souk chose the freshness, so a
+        recording is worthless, and the payload names this souk as the
+        recipient, so a proof coaxed out by one souk cannot be relayed to
+        attach at another. A connection that
         can sign (it exposes `sign_connect`, as the in-process links do) is
         challenged and verified automatically; in-process is not trusted
         either. A connection that offers a proof has it verified; one that
         offers none is rejected. There is deliberately no way to switch
         this off — one handshake everywhere is what lets a provider in any
         language implement it once against the published vectors.
+
+        souk answers in kind: the return value is its own signature over
+        `souk_connect_signing_payload(challenge, provider_nonce)` — the
+        proof a provider checks against the souk key it pinned — or None
+        if this souk has no identity configured and so cannot prove
+        itself. A transport relays the answer to the far side; a
+        connection exposing `confirm_connect` (as the in-process links do)
+        is handed it before the attach is committed, so a provider that
+        pins can refuse the wrong souk by raising there.
         """
         if not names:
             raise ValueError(
@@ -217,14 +230,18 @@ class _Roster(abc.ABC):
         if proof is None and callable(signer):
             challenge = self._souk.issue_connect_challenge()
             provider_nonce = secrets.token_hex(16)
-            proof = signer(challenge, provider_nonce, names)
+            proof = signer(
+                self._souk.identity_public_key or "", challenge, provider_nonce, names
+            )
         if proof is not None:
             if challenge is None or not self._souk._consume_connect_challenge(challenge):
                 raise InvalidRegistration(
                     f"connect proof for {self.party} '{connection.public_key}' does not "
                     "answer a live challenge souk issued"
                 )
-            payload = provider_connect_signing_payload(challenge, provider_nonce or "", names)
+            payload = provider_connect_signing_payload(
+                self._souk.identity_public_key or "", challenge, provider_nonce or "", names
+            )
             if not verify_signature(connection.public_key, proof, payload):
                 raise InvalidRegistration(
                     f"invalid connect proof for {self.party} '{connection.public_key}'"
@@ -242,11 +259,20 @@ class _Roster(abc.ABC):
                 f"{self.party} '{connection.public_key}' has not registered {unknown} — "
                 "register before attaching, in-process or not"
             )
+        answer = (
+            self._souk.sign(souk_connect_signing_payload(challenge, provider_nonce or ""))
+            if self._souk.identity is not None
+            else None
+        )
+        confirm = getattr(connection, "confirm_connect", None)
+        if callable(confirm):
+            confirm(challenge, provider_nonce or "", answer)
         self.write_live({self.ref(connection.public_key, n): connection for n in names})
         async with self._souk.session() as session:
             await self.touch(session, connection.public_key, names)
             await session.commit()
         self._souk._notify_change(self.changed())
+        return answer
 
     @abc.abstractmethod
     def live(self, ref: Any) -> Any: ...
@@ -629,16 +655,18 @@ class Souk:
         challenge: str | None = None,
         provider_nonce: str | None = None,
         proof: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Connect `provider` as the live server for its already-registered `agent_names`.
 
         Raises `ValueError` for an empty list and `AgentNotFound` if any name was never
         registered under this provider's key — attaching does not implicitly register.
         A connection exposing `sign_connect` is challenged and verified automatically;
         a transport passes the `challenge` it relayed (from `issue_connect_challenge`),
-        the provider's `provider_nonce`, and the returned `proof`. See `_Roster.attach`.
+        the provider's `provider_nonce`, and the returned `proof`, and relays the
+        returned answer — souk's own signature for the provider to check against its
+        pinned souk key. See `_Roster.attach`.
         """
-        await self._agent_roster.attach(
+        return await self._agent_roster.attach(
             provider, agent_names, challenge=challenge, provider_nonce=provider_nonce, proof=proof
         )
 
@@ -673,14 +701,14 @@ class Souk:
         challenge: str | None = None,
         provider_nonce: str | None = None,
         proof: str | None = None,
-    ) -> None:
+    ) -> str | None:
         """Connect `link` as the live server for its already-registered `model_names`.
 
         Raises `ValueError` for an empty list and `LlmProviderNotFound` if any name was
-        never registered under this key. Connect authentication works exactly as in
-        `attach_provider`.
+        never registered under this key. Connect authentication — souk's answering
+        signature included — works exactly as in `attach_provider`.
         """
-        await self._llm_roster.attach(
+        return await self._llm_roster.attach(
             link, model_names, challenge=challenge, provider_nonce=provider_nonce, proof=proof
         )
 

@@ -64,16 +64,17 @@
     {
       "kind": "provider-connect",
       "inputs": {
+        "souk_public_key": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
         "souk_nonce": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7",
         "provider_nonce": "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
         "names": [
           "translator",
           "summarizer"
         ],
-        "note": "souk_nonce is chosen by the souk being connected to; names are sorted before joining"
+        "note": "souk_public_key is the recipient — the souk key the provider pinned (empty string for a souk with no identity), so a proof cannot be relayed to a different souk; souk_nonce is chosen by the souk being connected to; names are sorted before joining"
       },
-      "payload_utf8": "souk-connect-provider:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9:summarizer,translator",
-      "signature_hex": "ac86077777ea7fb30d513249c161dda812f50a1bc657b6e12424cec16c1b83052333c32c2ecc80181745d164249d3dec4d1b758fa4f1b413fbbb341e0102cb0d"
+      "payload_utf8": "souk-connect-provider:d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9:summarizer,translator",
+      "signature_hex": "fdc0e84c7837e6aaefc70d96f7dea089b52c3e4bebc3e505be92796809270af86704cbf5faa5d6d77739302143d1d5df477ec8ffd18d834885e8016c6f20050c"
     },
     {
       "kind": "souk-connect",

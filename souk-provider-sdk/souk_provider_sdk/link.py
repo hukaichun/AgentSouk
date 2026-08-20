@@ -18,8 +18,11 @@ class SoukLink(ABC):
     `provider_connect_payload` (and check souk's `souk_connect_payload`
     answer against the souk key you pinned). A self-chosen timestamp is not
     a challenge; a signature over one is replayable for its whole freshness
-    window. `InProcessLink` skips this only because there is no boundary to
-    cross.
+    window. `InProcessLink` performs the same ceremony automatically —
+    sharing a process is not a reason to skip it. A link may expose
+    `confirm_connect(souk_nonce, provider_nonce, answer)`: souk's answering
+    signature is handed over there before the attach commits, so a pinning
+    link refuses the wrong souk by raising.
     """
 
     @property
