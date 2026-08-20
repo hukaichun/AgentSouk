@@ -70,7 +70,7 @@ async def test_a_challenge_is_single_use(souk):
     proof = identity.sign_connect("", challenge, "pn", ["once"])
 
     await souk.attach_provider(stub, ["once"], challenge=challenge, provider_nonce="pn", proof=proof)
-    await souk.detach_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
     with pytest.raises(InvalidRegistration, match="live challenge"):
         await souk.attach_provider(
             stub, ["once"], challenge=challenge, provider_nonce="pn", proof=proof

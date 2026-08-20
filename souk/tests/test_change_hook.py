@@ -45,7 +45,7 @@ async def test_registering_and_attaching_both_change_the_roster(souk: Souk, atta
     assert seen == [RosterChanged()]
 
     await attach(identity, _Provider(), [agent.name])
-    await souk.detach_provider(agent.provider_key)
+    souk.detach_all_for(agent.provider_key)
 
     assert seen == [RosterChanged(), RosterChanged(), RosterChanged()]
 

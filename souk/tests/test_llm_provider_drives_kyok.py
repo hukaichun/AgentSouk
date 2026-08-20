@@ -71,7 +71,7 @@ async def llm(souk):
     await souk.attach_llm_provider(InProcessLLMProvider(identity, stub), ["gpt4"])
     ref = LlmRef(provider_key=identity.public_key, name="gpt4")
     yield stub, identity, ref
-    souk.detach_llm_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
 
 
 class KyokTokenAgent:
@@ -379,7 +379,7 @@ async def test_a_detached_llm_provider_is_a_503_not_a_hang(souk, serve, llm):
     agent = KyokTokenAgent()
     served, stream = await _run_with_token(souk, serve, agent, ref)
 
-    souk.detach_llm_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
     body = _completion_body()
     with pytest.raises(KyokRejected) as exc:
         await KyokAdapter(souk).complete(
@@ -454,7 +454,7 @@ async def test_two_providers_may_both_offer_gpt4(souk, serve, llm):
         assert stub_b.seen and not stub_a.seen
         await _finish(agent, stream)
     finally:
-        souk.detach_llm_provider(other.public_key)
+        souk.detach_all_for(other.public_key)
 
 
 async def test_attach_touches_and_announces_like_attach_provider(souk):
@@ -478,8 +478,8 @@ async def test_attach_touches_and_announces_like_attach_provider(souk):
             ))["last_seen_at"]
         assert after >= before
 
-        souk.detach_llm_provider(identity.public_key)
-        souk.detach_llm_provider(identity.public_key)
+        souk.detach_all_for(identity.public_key)
+        souk.detach_all_for(identity.public_key)
         assert [type(e) for e in events].count(LlmRosterChanged) == 3
     finally:
         unsubscribe()
@@ -553,7 +553,7 @@ async def test_deleting_an_offering_mirrors_delete_agent(souk):
         await souk.delete_llm_offering(identity.public_key, "gone", signature, timestamp)
     assert exc.value.reason == "connected"
 
-    souk.detach_llm_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
     souk.kyok_relay.bind_run("run-x", KyokBinding(llm_provider=ref))
     with pytest.raises(LlmOfferingInUse) as exc:
         await souk.delete_llm_offering(identity.public_key, "gone", signature, timestamp)
