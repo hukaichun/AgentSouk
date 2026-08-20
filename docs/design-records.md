@@ -71,13 +71,23 @@ mapping — rather than a re-dumped model, so no `timestamp: null` is ever
 injected into a caller's stream, and souk reads only the fields it
 decides on (`type`, and the interrupt outcome for pause detection).
 
-**The first row is still open.** An event that does not validate ends the
-run, so a provider running a newer AG-UI than souk would have its run
-broken by an event type souk has not heard of — the exact hazard named
-above. The design record proposed admitting both a typed event and a
-plain mapping on the port; that is not what the port does today, where
-`report_event` takes `Any` and souk validates strictly. Anyone widening
-this should start from why `RawEvent` was refused.
+**The first row is closed (#116), by a three-way rule.** An event whose
+`type` souk's pinned AG-UI knows is validated strictly, and a failure
+still ends the run — as does an event with no `type` string at all: both
+are malformation, not version skew. An event whose `type` is a string
+souk does not recognise is relayed untouched — stored and forwarded,
+never branched on — because whether to skip it is the caller's decision
+(AG-UI's fail-open rule; A2A's spec likewise says implementations SHOULD
+ignore unrecognized fields), never the relay's. The precedent is
+protobuf's own reversal: proto3 shipped with unknown fields *dropped*
+and 3.5 reversed it, because dropping silently destroyed data passing
+through every intermediary that parses and re-serializes — exactly the
+seat souk occupies. Unknown *enum* values and unknown *oneof* branches
+are preserved through a protobuf relay too, and an unknown event type is
+the same shape. The discipline that keeps this from becoming dict soup:
+souk never branches on an unrecognized event's content — it may only
+store and forward it; peeking is reserved for strictly-validated known
+types.
 
 See [The dispatch trunk](core-components/dispatch.md) →
 [full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#typed-data-and-where-typing-stops)

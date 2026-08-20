@@ -65,7 +65,11 @@ so the run that stopped to ask a human is not filed as one that finished.
 Runs that never reach that funnel are failed with a reason instead: an
 agent with no attached provider (`agent_offline`), a queued run whose
 agent went unserved past its window (`no_provider_took_it`), a permanent
-refusal, and an event that is not valid AG-UI.
+refusal, and a malformed event — one whose known AG-UI `type` fails
+validation, or one with no `type` string at all. An event whose `type`
+is a string souk merely does not recognise is not malformed: it is a
+newer AG-UI's event, and souk relays it untouched — whether to skip it
+is the caller's decision, never the relay's.
 
 A run recorded `failed` that never emitted its own `RUN_ERROR` gets one
 synthesized, persisted and relayed, so a caller can tell failure from an

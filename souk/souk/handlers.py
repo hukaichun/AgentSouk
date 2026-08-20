@@ -5,7 +5,7 @@ import logging
 from functools import partial
 from typing import TYPE_CHECKING
 
-from ag_ui.core import Event
+from ag_ui.core import Event, EventType
 from pydantic import TypeAdapter, ValidationError
 
 from souk import repo
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("souk.handlers")
 
 _EVENT = TypeAdapter(Event)
+_KNOWN_EVENT_TYPES = frozenset(member.value for member in EventType)
 
 
 async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
@@ -38,24 +39,32 @@ async def _handle_claim(souk: "Souk", run: Run, cmd: Claim) -> None:
 async def _handle_relay(souk: "Souk", run: Run, cmd: RelayEvent) -> None:
     """Validate, persist, and forward a provider event; fail the run on invalid AG-UI.
 
-    An event that doesn't validate as AG-UI drains the run's queue and pushes a `Fail`
-    instead of relaying anything further. A `RUN_FINISHED` carrying an interrupt outcome
-    records it as the run's pause payload; a `RUN_ERROR` is remembered so `_handle_finish`
+    Three-way rule. An event whose `type` is one souk's pinned AG-UI knows is
+    validated strictly, and a validation failure drains the run's queue and
+    pushes a `Fail` — as does an event with no `type` string at all: both are
+    malformation, not version skew. An event whose `type` is a string souk
+    does not recognise is a newer AG-UI's event, and it is relayed untouched:
+    souk stores and forwards it and never branches on its content — whether to
+    skip it is the caller's decision (AG-UI's fail-open rule), never the
+    relay's. A `RUN_FINISHED` carrying an interrupt outcome records it as the
+    run's pause payload; a `RUN_ERROR` is remembered so `_handle_finish`
     doesn't synthesize a second one.
     """
     event = cmd.event
-    try:
-        _EVENT.validate_python(event)
-    except ValidationError as e:
-        logger.warning(
-            "run %s: provider sent an event that is not valid AG-UI, ending the run: %s",
-            run.run_id,
-            e,
-        )
-        while not run.in_queue.empty():
-            run.in_queue.get_nowait()
-        souk.broker.push(run.run_id, Fail("provider sent a malformed AG-UI event"))
-        return
+    type_tag = event.get("type") if isinstance(event, dict) else None
+    if not isinstance(type_tag, str) or type_tag in _KNOWN_EVENT_TYPES:
+        try:
+            _EVENT.validate_python(event)
+        except ValidationError as e:
+            logger.warning(
+                "run %s: provider sent an event that is not valid AG-UI, ending the run: %s",
+                run.run_id,
+                e,
+            )
+            while not run.in_queue.empty():
+                run.in_queue.get_nowait()
+            souk.broker.push(run.run_id, Fail("provider sent a malformed AG-UI event"))
+            return
     if event.get("type") == "RUN_FINISHED":
         run.saw_run_finished = True
         interrupts = interrupt_outcome_of(event)
