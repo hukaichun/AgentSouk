@@ -293,25 +293,33 @@ broker: one turn per thread at a time, and a paused `input-required` run
 holds its thread until answered, so nothing overtakes an unanswered
 question.
 
-The right way to read the queue is as the thread's **pending-utterance
-buffer**, with two consumers: dispatch takes the earliest entry when the
-turn opens, and interjection (designed below, not built) is the provider
-reaching into the same buffer early — "an agent that drains its queue
-eagerly *is* a steerable agent" describes one buffer, not two
-mechanisms. Nothing is ever dumped: the provider receives one run per
-turn (whose input carries the history folded at its arrival, with
-`thread_messages` as the authoritative read), and anything more is the
-provider *pulling*, never souk pushing. That reading also sizes the
-buffer's limit (`thread_queue_limit`, default 8, `None` opts out): a
-live conversation holds a few unconsumed utterances, not dozens — a
-depth in the tens is a runaway loop, not a caller. At the limit the
-door refuses **loudly** (`ThreadQueueFull`: the message was NOT
-accepted) — a resource guard, not a judgment, and honest refusal beats
-accepting into a buffer that will only rot. The reply lane is never
-subject to it: answering the question is how the buffer drains. The
-count-then-create at the door is deliberately unlocked; a rare
-concurrent overshoot by one is cheaper than locking a guard that is not
-accounting. Two deliberate narrowings. Enqueue order is arrival order —
+The queue is a **run queue, and every entry stays a run**: each is
+dispatched whole, as its own turn, and never changes shape. A reading
+that tempted us and was rejected — "one buffer, two consumers", where
+interjection (designed below, not built) would be the provider reaching
+into the same queue early — puts an entry's meaning in the hands of
+whoever picks it up: the batch-correlation swamp reborn, and a run
+whose work was absorbed into another turn would need a terminal status
+souk never observed. So the two verbs stay separate at birth, declared
+by the caller and never inferred: a queued entry is always a run;
+an interjection travels through its own opt-in entry point with
+`parentRunId`, is never a run at all when accepted (its response grows
+out of the original stream), and only becomes one if rejected and
+deliberately resent through the ordinary door. Nothing is ever dumped:
+the provider receives one run per turn (whose input carries the history
+folded at its arrival, with `thread_messages` as the authoritative
+read).
+
+The pending depth is bounded (`thread_queue_limit`, default 8, `None`
+opts out): a live conversation holds a few unconsumed utterances, not
+dozens — a depth in the tens is a runaway loop, not a caller. At the
+limit the door refuses **loudly** (`ThreadQueueFull`: the message was
+NOT accepted) — a resource guard, not a judgment, and honest refusal
+beats accepting into a queue that will only rot. The reply lane is
+never subject to it: answering the question is how the thread drains.
+The count-then-create at the door is deliberately unlocked; a rare
+concurrent overshoot by one is cheaper than locking a guard that is
+not accounting. Two deliberate narrowings. Enqueue order is arrival order —
 truly concurrent messages have no canonical order to preserve, and the
 gate serializes dispatch regardless. And an AG-UI run queued behind
 another holds its event stream open, silent, until its turn comes:
