@@ -164,7 +164,7 @@ async def test_attach_answers_and_the_in_process_link_verifies_it(settings: Core
         await _register(souk, identity, "mutual")
 
         challenge = souk.issue_connect_challenge()
-        proof = identity.sign_connect(challenge, "pn", ["mutual"])
+        proof = identity.sign_connect(souk.identity_public_key, challenge, "pn", ["mutual"])
         answer = await souk.attach_provider(
             _link(souk, identity), ["mutual"], challenge=challenge, provider_nonce="pn", proof=proof
         )
@@ -211,6 +211,30 @@ async def test_an_identityless_souk_answers_nothing_and_only_a_pin_objects(setti
         with pytest.raises(WrongSouk):
             await souk.attach_provider(
                 _link(souk, identity, souk_public_key=pinned), ["trusting"]
+            )
+    finally:
+        await souk.aclose()
+
+
+async def test_a_proof_bound_to_another_souk_is_refused(settings: CoreSettings):
+    from souk.errors import InvalidRegistration
+
+    souk = _souk_with_identity(settings)
+    try:
+        identity = ProviderIdentity.generate()
+        await _register(souk, identity, "relayed")
+
+        challenge = souk.issue_connect_challenge()
+        the_souk_it_meant = ProviderIdentity.generate().public_key
+        proof = identity.sign_connect(the_souk_it_meant, challenge, "pn", ["relayed"])
+
+        with pytest.raises(InvalidRegistration, match="invalid connect proof"):
+            await souk.attach_provider(
+                _link(souk, identity),
+                ["relayed"],
+                challenge=challenge,
+                provider_nonce="pn",
+                proof=proof,
             )
     finally:
         await souk.aclose()

@@ -91,7 +91,7 @@ def llm_deletion_signing_payload(name: str, timestamp: int) -> bytes:
 
 
 def provider_connect_signing_payload(
-    souk_nonce: str, provider_nonce: str, names: list[str]
+    souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
 ) -> bytes:
     """Builds the canonical bytes a provider signs to authenticate opening a link.
 
@@ -99,14 +99,22 @@ def provider_connect_signing_payload(
     connected to, so a recorded exchange is worthless to whoever recorded
     it. `provider_nonce` is the provider's own challenge for souk's answering
     proof, and the names the provider intends to serve are bound in (sorted,
-    order-independent) so they cannot be altered in flight. The role in the
-    domain tag keeps this proof and souk's from ever being the same bytes,
-    and the tag keeps it unmistakable for a registration or deletion.
+    order-independent) so they cannot be altered in flight.
+    `souk_public_key` names the recipient: the souk the provider means to
+    connect to (its pinned key; empty string for a souk with no identity),
+    so a proof handed to one souk cannot be relayed to attach at another —
+    the verifying souk builds this payload with its *own* key and a
+    mismatch fails the signature. The role in the domain tag keeps this
+    proof and souk's from ever being the same bytes, and the tag keeps it
+    unmistakable for a registration or deletion.
     `souk_provider_sdk.identity.provider_connect_payload` computes this same
     payload independently on the provider side and both must agree
     byte-for-byte.
     """
-    return f"{_CONNECT_PROVIDER}:{souk_nonce}:{provider_nonce}:{','.join(sorted(names))}".encode()
+    return (
+        f"{_CONNECT_PROVIDER}:{souk_public_key}:{souk_nonce}:{provider_nonce}:"
+        f"{','.join(sorted(names))}".encode()
+    )
 
 
 def souk_connect_signing_payload(souk_nonce: str, provider_nonce: str) -> bytes:

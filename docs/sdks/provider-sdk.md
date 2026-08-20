@@ -14,9 +14,10 @@ test keeps it that way.
 from a key file so a restarted process keeps its identity; `public_key`
 is the 64-char hex). Around it, builders for every payload the provider
 signs: registration and deletion (timestamped), the link-open connect
-proof (challenge-answered — `sign_connect` over souk's nonce, the
-provider's own nonce, and the names to serve), and the per-call KYOK
-signature. Each builder is the independent twin of souk's, and
+proof (challenge-answered — `sign_connect` over the pinned souk key,
+souk's nonce, the provider's own nonce, and the names to serve, so the
+proof names its recipient and cannot be relayed to another souk), and
+the per-call KYOK signature. Each builder is the independent twin of souk's, and
 reproduces the published vectors byte-for-byte, deterministic signatures
 included.
 

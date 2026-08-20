@@ -82,9 +82,11 @@ class _Taker:
     def cancel(self, run_id: str) -> None:
         pass
 
-    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
         return self._key.sign(
-            provider_connect_signing_payload(souk_nonce, provider_nonce, names)
+            provider_connect_signing_payload(souk_public_key, souk_nonce, provider_nonce, names)
         ).hex()
 
 

@@ -41,10 +41,13 @@ class WireLink:
         self.public_key = runtime.public_key
         self.max_concurrent_runs = runtime.max_concurrent_runs
 
-    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
-        # the challenge and proof cross as bytes too
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
+        # the claimed souk key, the challenge and the proof all cross as bytes too
+        relayed_key = souk_public_key.encode().decode()
         relayed = souk_nonce.encode().decode()
-        return self._runtime.identity.sign_connect(relayed, provider_nonce, names)
+        return self._runtime.identity.sign_connect(relayed_key, relayed, provider_nonce, names)
 
     async def deliver(self, run) -> bool | Refusal:
         frame = DeliveredRun.from_claimed(run).model_dump_json(by_alias=True).encode()
@@ -122,8 +125,10 @@ class WireLLMLink:
         self._identity = identity
         self.public_key = identity.public_key
 
-    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
-        return self._identity.sign_connect(souk_nonce, provider_nonce, names)
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
+        return self._identity.sign_connect(souk_public_key, souk_nonce, provider_nonce, names)
 
     def complete(self, request: CompletionRequest):
         frame = DeliveredCompletion.from_request(request).model_dump_json(by_alias=True).encode()

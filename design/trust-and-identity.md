@@ -67,10 +67,15 @@ The published shape is challenge-response, both directions:
 
 1. souk mints a **single-use nonce** (`issue_connect_challenge`), expiring
    with the freshness window. A transport relays it to the far side.
-2. The provider signs `souk-connect-provider:{souk_nonce}:{provider_nonce}:{names}`
+2. The provider signs
+   `souk-connect-provider:{souk_public_key}:{souk_nonce}:{provider_nonce}:{names}`
    — souk's nonce makes a recording worthless; the provider's own nonce is
    its challenge for souk's answer; the sorted names bind what it intends
-   to serve so they cannot be altered in flight.
+   to serve so they cannot be altered in flight; and the leading souk key
+   names the recipient — the souk the provider pinned — so a proof coaxed
+   out by one souk cannot be relayed to attach at another (the verifier
+   builds the payload with its own key, and a mismatch fails the
+   signature).
 3. souk answers with its own signature over
    `souk-connect-souk:{souk_nonce}:{provider_nonce}` — verified by the
    provider against the souk key it pinned. The role tags differ so

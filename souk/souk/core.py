@@ -199,9 +199,12 @@ class _Roster(abc.ABC):
 
         Attaching is where runs change hands, so it authenticates like
         everything else: `proof` is a signature over
-        `provider_connect_signing_payload(challenge, provider_nonce, names)`
-        where `challenge` came from `Souk.issue_connect_challenge` — souk
-        chose the freshness, so a recording is worthless. A connection that
+        `provider_connect_signing_payload(this souk's public key, challenge,
+        provider_nonce, names)` where `challenge` came from
+        `Souk.issue_connect_challenge` — souk chose the freshness, so a
+        recording is worthless, and the payload names this souk as the
+        recipient, so a proof coaxed out by one souk cannot be relayed to
+        attach at another. A connection that
         can sign (it exposes `sign_connect`, as the in-process links do) is
         challenged and verified automatically; in-process is not trusted
         either. A connection that offers a proof has it verified; one that
@@ -227,14 +230,18 @@ class _Roster(abc.ABC):
         if proof is None and callable(signer):
             challenge = self._souk.issue_connect_challenge()
             provider_nonce = secrets.token_hex(16)
-            proof = signer(challenge, provider_nonce, names)
+            proof = signer(
+                self._souk.identity_public_key or "", challenge, provider_nonce, names
+            )
         if proof is not None:
             if challenge is None or not self._souk._consume_connect_challenge(challenge):
                 raise InvalidRegistration(
                     f"connect proof for {self.party} '{connection.public_key}' does not "
                     "answer a live challenge souk issued"
                 )
-            payload = provider_connect_signing_payload(challenge, provider_nonce or "", names)
+            payload = provider_connect_signing_payload(
+                self._souk.identity_public_key or "", challenge, provider_nonce or "", names
+            )
             if not verify_signature(connection.public_key, proof, payload):
                 raise InvalidRegistration(
                     f"invalid connect proof for {self.party} '{connection.public_key}'"

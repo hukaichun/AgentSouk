@@ -32,8 +32,17 @@ class InProcessLLMProvider(SoukLLMLink):
     def public_key(self) -> str:
         return self._identity.public_key
 
-    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
-        return self._identity.sign_connect(souk_nonce, provider_nonce, names)
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
+        """Sign the link-open proof, bound to the pinned souk key — refusing, before any
+        signature leaves, a souk claiming a different key than the pin."""
+        if self._souk_public_key is not None and souk_public_key != self._souk_public_key:
+            raise WrongSouk(
+                f"this link is pinned to '{self._souk_public_key}', "
+                f"not the souk claiming '{souk_public_key}'"
+            )
+        return self._identity.sign_connect(souk_public_key, souk_nonce, provider_nonce, names)
 
     def confirm_connect(self, souk_nonce: str, provider_nonce: str, answer: str | None) -> None:
         """Verify souk's answering signature against `souk_public_key`, raising `WrongSouk` on a miss; a no-op when no key was pinned."""

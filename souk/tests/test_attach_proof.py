@@ -31,8 +31,10 @@ class _Forged(_Stub):
         super().__init__(claimed_key)
         self._actual = actual
 
-    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
-        return self._actual.sign_connect(souk_nonce, provider_nonce, names)
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
+        return self._actual.sign_connect(souk_public_key, souk_nonce, provider_nonce, names)
 
 
 async def _registered(souk, name: str) -> ProviderIdentity:
@@ -53,7 +55,7 @@ async def test_a_connection_that_cannot_sign_for_its_claimed_key_is_rejected(sou
 async def test_an_explicit_proof_must_answer_a_challenge_souk_issued(souk):
     identity = await _registered(souk, "replayer")
     stub = _Stub(identity.public_key)
-    proof = identity.sign_connect("not-a-souk-challenge", "pn", ["replayer"])
+    proof = identity.sign_connect("", "not-a-souk-challenge", "pn", ["replayer"])
 
     with pytest.raises(InvalidRegistration, match="live challenge"):
         await souk.attach_provider(
@@ -65,7 +67,7 @@ async def test_a_challenge_is_single_use(souk):
     identity = await _registered(souk, "once")
     stub = _Stub(identity.public_key)
     challenge = souk.issue_connect_challenge()
-    proof = identity.sign_connect(challenge, "pn", ["once"])
+    proof = identity.sign_connect("", challenge, "pn", ["once"])
 
     await souk.attach_provider(stub, ["once"], challenge=challenge, provider_nonce="pn", proof=proof)
     await souk.detach_provider(identity.public_key)

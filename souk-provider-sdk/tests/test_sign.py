@@ -105,8 +105,8 @@ def test_a_link_open_round_trip_and_neither_proof_reflects_as_the_other():
     souk_nonce, provider_nonce = new_nonce(), new_nonce()
     assert souk_nonce != provider_nonce and len(souk_nonce) == 32
 
-    proof = provider.sign_connect(souk_nonce, provider_nonce, ["b", "a"])
-    payload = provider_connect_payload(souk_nonce, provider_nonce, ["a", "b"])
+    proof = provider.sign_connect(souk_key.public_key, souk_nonce, provider_nonce, ["b", "a"])
+    payload = provider_connect_payload(souk_key.public_key, souk_nonce, provider_nonce, ["a", "b"])
     assert verify_signature(provider.public_key, proof, payload)
 
     answer = souk_key.sign(souk_connect_payload(souk_nonce, provider_nonce))
@@ -120,10 +120,17 @@ def test_a_link_open_round_trip_and_neither_proof_reflects_as_the_other():
     assert not verify_signature(
         provider.public_key,
         proof,
-        provider_connect_payload(souk_nonce, provider_nonce, ["a", "b", "c"]),
+        provider_connect_payload(souk_key.public_key, souk_nonce, provider_nonce, ["a", "b", "c"]),
     )
     assert not verify_signature(
         provider.public_key,
         proof,
-        provider_connect_payload(new_nonce(), provider_nonce, ["a", "b"]),
+        provider_connect_payload(souk_key.public_key, new_nonce(), provider_nonce, ["a", "b"]),
     )
+    assert not verify_signature(
+        provider.public_key,
+        proof,
+        provider_connect_payload(
+            ProviderIdentity.generate().public_key, souk_nonce, provider_nonce, ["a", "b"]
+        ),
+    ), "a proof bound to one souk must not verify as a proof for another"

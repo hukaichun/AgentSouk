@@ -50,8 +50,19 @@ class InProcessLink(SoukLink):
     def max_concurrent_runs(self) -> int | None:
         return self._runtime.max_concurrent_runs
 
-    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
-        return self._runtime.identity.sign_connect(souk_nonce, provider_nonce, names)
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
+        """Sign the link-open proof, bound to the pinned souk key — refusing, before any
+        signature leaves, a souk claiming a different key than the pin."""
+        if self._souk_public_key is not None and souk_public_key != self._souk_public_key:
+            raise WrongSouk(
+                f"this link is pinned to '{self._souk_public_key}', "
+                f"not the souk claiming '{souk_public_key}'"
+            )
+        return self._runtime.identity.sign_connect(
+            souk_public_key, souk_nonce, provider_nonce, names
+        )
 
     async def offer(self, run: "DeliveredRun") -> bool:
         return await self._runtime.deliver(run)

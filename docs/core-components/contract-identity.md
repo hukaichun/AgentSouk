@@ -24,9 +24,12 @@ Connect authentication cannot ride a timestamp (self-chosen freshness is
 replayable for its whole window), so it answers a challenge souk chose:
 souk mints a random single-use nonce and remembers it with its issue
 time; the connecting provider signs
-`souk-connect-provider:{souk nonce}:{provider nonce}:{sorted names}`;
-verification **consumes** the nonce (a second use fails) and checks it
-was issued recently. souk answers in kind: `attach` returns its own
+`souk-connect-provider:{pinned souk key}:{souk nonce}:{provider nonce}:{sorted names}`
+— the first field names the recipient, so a proof one souk coaxes out
+cannot be relayed to attach at another; verification **consumes** the
+nonce (a second use fails), checks it was issued recently, and builds
+the payload with this souk's *own* key, so a proof bound elsewhere
+fails the signature. souk answers in kind: `attach` returns its own
 signature — the `SoukIdentity` keypair over
 `souk-connect-souk:{both nonces}` — for the transport to relay, and
 hands it to any connection exposing `confirm_connect` before the attach

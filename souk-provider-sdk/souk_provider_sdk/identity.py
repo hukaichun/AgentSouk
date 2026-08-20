@@ -76,18 +76,28 @@ def new_nonce() -> str:
     return secrets.token_hex(16)
 
 
-def provider_connect_payload(souk_nonce: str, provider_nonce: str, names: list[str]) -> bytes:
+def provider_connect_payload(
+    souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+) -> bytes:
     """Builds the bytes a provider signs to authenticate opening a link.
 
     `souk_nonce` is the challenge the souk being connected to chose — that is
     what makes a recorded exchange worthless — and the names to be served are
-    bound in (sorted) so they cannot be altered in flight. Do not substitute
-    a timestamp for the nonce: a self-chosen freshness is replayable for its
-    whole window, which is the hole this family exists to close.
+    bound in (sorted) so they cannot be altered in flight.
+    `souk_public_key` is the recipient: the souk key you pinned (empty
+    string for a souk with no identity). It is what stops a souk you
+    connect to from relaying your proof to attach elsewhere as you — the
+    verifying souk builds this payload with its own key, so a proof bound
+    to the wrong souk fails there. Do not substitute a timestamp for the
+    nonce: a self-chosen freshness is replayable for its whole window,
+    which is the hole this family exists to close.
     `souk.identity.provider_connect_signing_payload` computes this same
     payload independently on souk's side and both must agree byte-for-byte.
     """
-    return f"{_CONNECT_PROVIDER}:{souk_nonce}:{provider_nonce}:{','.join(sorted(names))}".encode()
+    return (
+        f"{_CONNECT_PROVIDER}:{souk_public_key}:{souk_nonce}:{provider_nonce}:"
+        f"{','.join(sorted(names))}".encode()
+    )
 
 
 class WrongSouk(Exception):
@@ -150,9 +160,13 @@ class ProviderIdentity:
         timestamp = int(time.time()) if timestamp is None else timestamp
         return self._private_key.sign(deletion_payload(agent_name, timestamp)).hex(), timestamp
 
-    def sign_connect(self, souk_nonce: str, provider_nonce: str, names: list[str]) -> str:
-        """Signs `provider_connect_payload(...)`: this provider's answer to a souk's link-open challenge."""
-        return self.sign(provider_connect_payload(souk_nonce, provider_nonce, names))
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
+        """Signs `provider_connect_payload(...)`: this provider's answer to a souk's link-open challenge, bound to the souk key it means to connect to."""
+        return self.sign(
+            provider_connect_payload(souk_public_key, souk_nonce, provider_nonce, names)
+        )
 
 
     def sign_hop(

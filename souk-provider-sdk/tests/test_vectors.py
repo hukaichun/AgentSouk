@@ -22,7 +22,7 @@ BUILDERS = {
     "agent-deletion": lambda i: deletion_payload(i["agent_name"], i["timestamp"]),
     "kyok-call": lambda i: kyok_call_payload(i["bearer"], i["timestamp"], i["body_sha256_hex"]),
     "provider-connect": lambda i: provider_connect_payload(
-        i["souk_nonce"], i["provider_nonce"], i["names"]
+        i["souk_public_key"], i["souk_nonce"], i["provider_nonce"], i["names"]
     ),
     "souk-connect": lambda i: souk_connect_payload(i["souk_nonce"], i["provider_nonce"]),
 }
