@@ -131,6 +131,43 @@ for it.
 See [Runs and cancels are requests](mechanisms/requests.md) →
 [full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#cancelling-a-request-with-the-outcome-decided-later)
 
+### Conversation naming rights wait for a caller to own them
+
+The two caller doors answer an unknown thread id differently — AG-UI
+mints a new thread under souk's own id, A2A raises `ThreadNotFound` —
+and the asymmetry turned out to be each protocol's own grammar: A2A's
+spec assigns `contextId` server-side, while AG-UI's `threadId` is
+required and client-chosen. What is *not* protocol grammar is the
+decision underneath, and it comes from ownership (#117).
+
+AG-UI's client-minted `threadId` is safe in AG-UI's native habitat
+because the whole loop has **one owner**: the same party runs the
+frontend and the agent backend, so a client naming a thread is an owner
+naming its own thing. souk breaks that premise — caller and provider
+are two different owners with a relay between them. Adopting a
+caller-chosen name into the agent's global thread namespace would let
+one party write names into another's space: guessable, collidable, and
+today a thread id still acts as a capability (the open contradiction
+below), so a caller who picks `"test"` has minted a skeleton key others
+can guess.
+
+The rule that shipped: **souk mints every thread id, on both doors, and
+the id in souk's reply is authoritative** — it rides on every returned
+event, so the substitution is visible, not silent. The caller's naming
+rights are real, but a name needs something to scope it to, and souk
+has no caller identity yet (an acknowledged open front). The clean end
+state, once it exists: caller-chosen ids become **caller-scoped
+aliases** — your `trip-planning` and mine are two threads, collision
+and hijack impossible by construction, and rule zero holds because the
+alias names without authorizing. Until then, adoption into the global
+namespace is refused as borrowing safety that isn't there;
+`ThreadOwnershipMismatch` (a thread belongs to its agent) stays the
+only cross-party guard. The same decision fixed `create_if_missing`
+silently dropping `parent_thread_id`.
+
+See [The integration contract](integration-contract.md) →
+issue [#117](https://github.com/hukaichun/AgentSouk/issues/117)
+
 ## Designed, not built
 
 ### Rule zero: identifiers are never credentials

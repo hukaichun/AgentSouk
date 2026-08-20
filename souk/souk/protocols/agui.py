@@ -51,8 +51,12 @@ class AGUIAdapter:
         self._souk = souk
 
     async def run(self, agent: AgentRef, body: RunAgentInput) -> EventStream | ThreadSnapshot:
-        """Starts (or resumes) an AG-UI run for `agent`. Creates a new thread if `body.thread_id`
-        is unseen, ignores the caller-supplied `run_id` and mints souk's own. A run on a thread
+        """Starts (or resumes) an AG-UI run for `agent`. An unseen `body.thread_id` gets a new
+        thread under a **souk-minted id** — the caller's own id is deliberately not adopted, and
+        the `threadId` on every returned event is the authoritative one to continue with (souk
+        owns its record's primary keys; a caller-chosen name has no caller identity to scope it
+        to yet — see the design record on conversation naming rights). The caller-supplied
+        `run_id` is likewise ignored in favour of souk's own. A run on a thread
         that already has one in flight is accepted and queued behind it — one turn per thread at
         a time — and its returned stream stays silent until its turn comes; an AG-UI client
         normally holds one session per thread, so a second concurrent run is unusual but not

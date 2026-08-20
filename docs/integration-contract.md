@@ -126,10 +126,16 @@ client author needs them.
   [queueing record](design-records.md#queueing-makes-may-i-speak-always-answerable-with-yes)
   carries the reasoning; a paused task holds its thread, so queued
   messages wait until its question is answered.
-- **An unknown AG-UI `threadId` mints a new thread and discards the id
-  you sent.** A client that invents its own thread id and keeps sending
-  it gets a brand-new thread on every call, because the id it supplied
-  is never registered. Use the id souk returns.
+- **souk mints every thread id, on both doors — the id in souk's reply
+  is the one to continue with.** An unseen AG-UI `threadId` gets a new
+  thread under souk's own id (carried on every returned event); the id
+  you sent is deliberately not adopted, so a client that keeps resending
+  its own invented id gets a fresh thread each call. A2A's unknown
+  `contextId` is a plain `ThreadNotFound`, per its spec's server-assigned
+  ids. The asymmetry is each protocol's own grammar; the shared rule and
+  its reasoning — souk is a relay between two owners, and a caller's
+  naming rights have no caller identity to scope them to yet — are in
+  [the design record](design-records.md#conversation-naming-rights-wait-for-a-caller-to-own-them).
 - **An offline agent looks like a failed task, not an error.** The run
   is recorded `failed` with `agent_offline`, and the task comes back
   `FAILED` with no message part.
