@@ -1,7 +1,7 @@
-"""N souk processes and a hand-rolled load balancer over them.
+"""N funduq processes and a hand-rolled load balancer over them.
 
 The second half of the probe fixture (see node.py for the first). A real
-deployment puts nginx or a cloud LB in front of several souk processes; this
+deployment puts nginx or a cloud LB in front of several funduq processes; this
 is fifty lines that do the part that matters for finding bugs — send each call
 to a different process — without introducing a dependency, a config file or a
 second thing to install.
@@ -17,8 +17,8 @@ asks for one by name (`call(..., node="b")`), because that is a scenario, not
 a routing decision.
 
 The processes are real: separate OS processes, spawned with `subprocess`, each
-constructing its own `Souk` with its own engine and its own in-memory broker,
-sharing only `SOUK_DATABASE_URL`. That is the whole point — two `Souk` objects
+constructing its own `Funduq` with its own engine and its own in-memory broker,
+sharing only `FUNDUQ_DATABASE_URL`. That is the whole point — two `Funduq` objects
 in one process share an event loop and can be made to look like they work by
 accident, which is how the first version of this probe overstated what it had
 shown.
@@ -27,7 +27,7 @@ Usage:
 
     async with Cluster(nodes=["a", "b"]) as c:
         run = await c.call({"op": "start_run", ...})     # lands wherever
-        await c.call({"op": "souk_start"}, node="b")     # lands on b
+        await c.call({"op": "funduq_start"}, node="b")     # lands on b
         c.kill("a")                                      # SIGKILL, no cleanup
 """
 
@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SOUK_DIR = REPO_ROOT / "souk"
+FUNDUQ_DIR = REPO_ROOT / "funduq"
 NODE_SCRIPT = Path(__file__).resolve().parent / "node.py"
 
 SIGNING_SECRET = "probe-signing-secret"
@@ -58,7 +58,7 @@ class NodeError(RuntimeError):
 
 
 class Cluster:
-    """A running cluster of souk processes, plus the LB that talks to them."""
+    """A running cluster of funduq processes, plus the LB that talks to them."""
 
     def __init__(
         self,
@@ -68,13 +68,13 @@ class Cluster:
         start_nodes: bool = False,
         env: dict[str, str] | None = None,
     ) -> None:
-        """`start_nodes` calls `Souk.start()` on every node at boot, as a real
+        """`start_nodes` calls `Funduq.start()` on every node at boot, as a real
         deployment would. Off by default: *when* each node reconciles is the
         subject of several probes, not a detail they can leave to chance.
         """
         self.names = list(nodes)
-        self.tmpdir = Path(tempfile.mkdtemp(prefix="souk-probe-"))
-        self.database_url = database_url or f"sqlite+aiosqlite:///{self.tmpdir / 'souk.db'}"
+        self.tmpdir = Path(tempfile.mkdtemp(prefix="funduq-probe-"))
+        self.database_url = database_url or f"sqlite+aiosqlite:///{self.tmpdir / 'funduq.db'}"
         self.start_nodes = start_nodes
         self.extra_env = env or {}
         self.procs: dict[str, subprocess.Popen] = {}
@@ -85,17 +85,17 @@ class Cluster:
     def _env(self) -> dict[str, str]:
         return {
             **os.environ,
-            "SOUK_DATABASE_URL": self.database_url,
-            "SOUK_TOKEN_SIGNING_SECRET": SIGNING_SECRET,
+            "FUNDUQ_DATABASE_URL": self.database_url,
+            "FUNDUQ_TOKEN_SIGNING_SECRET": SIGNING_SECRET,
             **self.extra_env,
         }
 
     def migrate(self) -> None:
         """`alembic upgrade head`, once, before any node boots — the same
-        separate step a real deployment runs (see souk/alembic/)."""
+        separate step a real deployment runs (see funduq/alembic/)."""
         subprocess.run(
             [sys.executable, "-m", "alembic", "upgrade", "head"],
-            cwd=SOUK_DIR,
+            cwd=FUNDUQ_DIR,
             env=self._env(),
             check=True,
             capture_output=True,
@@ -122,7 +122,7 @@ class Cluster:
             cmd.append("--start")
         proc = subprocess.Popen(
             cmd,
-            cwd=SOUK_DIR,
+            cwd=FUNDUQ_DIR,
             env=self._env(),
             stdout=subprocess.PIPE,
             stderr=None,
@@ -136,7 +136,7 @@ class Cluster:
 
     def kill(self, name: str) -> None:
         """SIGKILL, no unwinding — the failure the lease design exists for.
-        SIGTERM would let `Souk.aclose()` run, which is a *graceful* shutdown
+        SIGTERM would let `Funduq.aclose()` run, which is a *graceful* shutdown
         and a different scenario entirely (and one that still leaves its runs
         `running` in the database, by design)."""
         proc = self.procs.pop(name, None)

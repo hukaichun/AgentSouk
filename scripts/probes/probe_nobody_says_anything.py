@@ -6,7 +6,7 @@ where waiting is futile. A provider ran 30 minutes on the second one with its
 container healthy, its own logs clean and exit code 0, absent from the roster
 entirely.
 
-That call is gone — souk hands work over now, so nothing asks souk for
+That call is gone — funduq hands work over now, so nothing asks funduq for
 anything — which does not retire the question, it moves it. Silence is still
 possible; it just happens somewhere else. This asks where.
 
@@ -14,7 +14,7 @@ Each scenario induces one path and reports what actually happens. It exists to
 *disprove predictions*: every reasoned conclusion in this repository's recent
 history that was checked by running something turned out different.
 
-    cd souk && uv run python ../scripts/probes/probe_nobody_says_anything.py
+    cd funduq && uv run python ../scripts/probes/probe_nobody_says_anything.py
 """
 
 from __future__ import annotations
@@ -30,15 +30,15 @@ from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete
 
-from souk.broker import RunBroker
-from souk.config import CoreSettings
-from souk.core import Souk
+from funduq.broker import RunBroker
+from funduq.config import CoreSettings
+from funduq.core import Funduq
 
-from souk.models import AgentRef
-from souk.schema import agents, providers, run_events, runs, thread_messages, threads
-from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
+from funduq.models import AgentRef
+from funduq.schema import agents, providers, run_events, runs, thread_messages, threads
+from funduq_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
 
-DB = Path(tempfile.gettempdir()) / "souk_probe_silence.db"
+DB = Path(tempfile.gettempdir()) / "funduq_probe_silence.db"
 URL = f"sqlite+aiosqlite:///{DB}"
 
 
@@ -47,9 +47,9 @@ def migrate() -> None:
         p = Path(str(DB) + suffix)
         if p.exists():
             p.unlink()
-    os.environ["SOUK_DATABASE_URL"] = URL
+    os.environ["FUNDUQ_DATABASE_URL"] = URL
     cfg = Config()
-    cfg.set_main_option("script_location", "souk:alembic")
+    cfg.set_main_option("script_location", "funduq:alembic")
     command.upgrade(cfg, "head")
 
 
@@ -60,9 +60,9 @@ class Agent:
         yield {"type": "RUN_FINISHED", **ids}
 
 
-async def register(souk: Souk, identity: ProviderIdentity, *names: str):
+async def register(funduq: Funduq, identity: ProviderIdentity, *names: str):
     signature, timestamp = identity.sign_registration(list(names))
-    return await souk.register_agents(
+    return await funduq.register_agents(
         identity.public_key, signature, timestamp, [{"name": n} for n in names]
     )
 
@@ -103,17 +103,17 @@ class Findings:
 async def main() -> int:
     migrate()
     findings = Findings()
-    souk = Souk(CoreSettings(database_url=URL, token_signing_secret="probe"))
-    await souk.start()
+    funduq = Funduq(CoreSettings(database_url=URL, token_signing_secret="probe"))
+    await funduq.start()
 
     # --- 1. a name this key never registered (a typo, a wrong config)
     print("\n[1] a provider attaches for a name it never registered")
     identity = ProviderIdentity(Ed25519PrivateKey.generate())
-    await register(souk, identity, "translator")
+    await register(funduq, identity, "translator")
     runtime = ProviderRuntime(identity, Agent())
     runtime.start()
     try:
-        await souk.attach_provider(InProcessLink(souk, runtime), ["translatr"])
+        await funduq.attach_provider(InProcessLink(funduq, runtime), ["translatr"])
         outcome = "attached, and will now be offered nothing, forever"
         silent = True
     except Exception as exc:
@@ -128,7 +128,7 @@ async def main() -> int:
 
     # --- 2. a caller's run for an agent nobody is serving
     print("[2] a run is started for an agent no provider is attached to")
-    quick = Souk(
+    quick = Funduq(
         CoreSettings(database_url=URL, token_signing_secret="probe"),
         broker=RunBroker(unserved_timeout_seconds=0.05),
     )
@@ -151,31 +151,31 @@ async def main() -> int:
     await quick.aclose()
 
     # --- 3. the database is replaced under an attached provider
-    print("[3] souk's database is replaced while a provider stays attached")
+    print("[3] funduq's database is replaced while a provider stays attached")
     identity = ProviderIdentity(Ed25519PrivateKey.generate())
-    await register(souk, identity, "steady")
+    await register(funduq, identity, "steady")
     runtime = ProviderRuntime(identity, Agent())
     runtime.start()
-    await souk.attach_provider(InProcessLink(souk, runtime), ["steady"])
-    async with souk.session() as session:
+    await funduq.attach_provider(InProcessLink(funduq, runtime), ["steady"])
+    async with funduq.session() as session:
         for table in (run_events, thread_messages, runs, threads, agents, providers):
             await session.execute(delete(table))
         await session.commit()
 
     agent = AgentRef(provider_key=identity.public_key, name="steady")
-    still_registered = souk.broker.serving(agent) is not None
-    roster = [a.name for a in await souk.list_agents()]
+    still_registered = funduq.broker.serving(agent) is not None
+    roster = [a.name for a in await funduq.list_agents()]
     findings.record(
         "the database is replaced under a live attachment",
         still_registered,
         f"broker still routes 'steady' to it: {still_registered}; roster now {roster} "
-        "— souk has no row for this agent and no way to say so, because nothing "
+        "— funduq has no row for this agent and no way to say so, because nothing "
         "asks. The provider finds out by re-attaching, which is scenario 1",
         must_answer=False,
     )
 
     await runtime.aclose()
-    await souk.aclose()
+    await funduq.aclose()
     print()
     return findings.summarize()
 

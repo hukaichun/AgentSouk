@@ -1,12 +1,12 @@
-"""Does `alembic upgrade head` build the same schema as `souk/schema.py`?
+"""Does `alembic upgrade head` build the same schema as `funduq/schema.py`?
 
 Two definitions of one schema — the Core metadata the app queries through, and
 the migration a deployment actually runs — and nothing makes them agree except
 whoever last edited both. `d363d76` compared them by hand when the migration
 chain was collapsed; this is that check, kept.
 
-    cd souk && uv run python ../scripts/probes/probe_schema_agrees.py
-    SOUK_DATABASE_URL=postgresql+psycopg://… uv run --extra postgres python ../scripts/probes/probe_schema_agrees.py
+    cd funduq && uv run python ../scripts/probes/probe_schema_agrees.py
+    FUNDUQ_DATABASE_URL=postgresql+psycopg://… uv run --extra postgres python ../scripts/probes/probe_schema_agrees.py
 
 Both backends, because this is exactly where they differ: SQLite renders JSON
 as TEXT and needs `INTEGER PRIMARY KEY` for autoincrement, Postgres has JSONB
@@ -25,9 +25,9 @@ from pathlib import Path
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import make_url
 
-from souk.schema import metadata
+from funduq.schema import metadata
 
-SOUK_DIR = Path(__file__).resolve().parents[2] / "souk"
+FUNDUQ_DIR = Path(__file__).resolve().parents[2] / "funduq"
 
 
 def _sync_url(url: str) -> str:
@@ -38,7 +38,7 @@ def _sync_url(url: str) -> str:
 
 
 def _describe(engine) -> dict:
-    """Everything two schemas can differ by that souk would notice."""
+    """Everything two schemas can differ by that funduq would notice."""
     inspector = inspect(engine)
     out: dict = {}
     for table in sorted(inspector.get_table_names()):
@@ -65,8 +65,8 @@ def _describe(engine) -> dict:
 
 
 def main() -> int:
-    configured = os.environ.get("SOUK_DATABASE_URL")
-    tmp = Path(tempfile.mkdtemp(prefix="souk-schema-"))
+    configured = os.environ.get("FUNDUQ_DATABASE_URL")
+    tmp = Path(tempfile.mkdtemp(prefix="funduq-schema-"))
 
     if configured and make_url(configured).get_backend_name() != "sqlite":
         print("Postgres: comparing in two schemas of the same database")
@@ -77,20 +77,20 @@ def main() -> int:
             conn.exec_driver_sql("DROP SCHEMA IF EXISTS probe_declared CASCADE")
             conn.exec_driver_sql("CREATE SCHEMA probe_migrated")
             conn.exec_driver_sql("CREATE SCHEMA probe_declared")
-        env = {**os.environ, "SOUK_DATABASE_URL": configured, "SOUK_DB_SCHEMA": "probe_migrated"}
+        env = {**os.environ, "FUNDUQ_DATABASE_URL": configured, "FUNDUQ_DB_SCHEMA": "probe_migrated"}
         declared_engine = create_engine(base, connect_args={"options": "-c search_path=probe_declared"})
         migrated_engine = create_engine(base, connect_args={"options": "-c search_path=probe_migrated"})
     else:
         print("SQLite: comparing two throwaway files")
         migrated_url = f"sqlite:///{tmp / 'migrated.db'}"
         declared_url = f"sqlite:///{tmp / 'declared.db'}"
-        env = {**os.environ, "SOUK_DATABASE_URL": migrated_url}
+        env = {**os.environ, "FUNDUQ_DATABASE_URL": migrated_url}
         migrated_engine = create_engine(migrated_url)
         declared_engine = create_engine(declared_url)
 
     subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
-        cwd=SOUK_DIR, env=env, check=True, capture_output=True,
+        cwd=FUNDUQ_DIR, env=env, check=True, capture_output=True,
     )
     metadata.create_all(declared_engine)
 

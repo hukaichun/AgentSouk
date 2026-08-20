@@ -1,8 +1,8 @@
-site_name: Agent Souk
-site_description: The network-free agent marketplace core — design, contracts, and guides
-site_url: https://hukaichun.github.io/AgentSouk/
-repo_url: https://github.com/hukaichun/AgentSouk
-repo_name: hukaichun/AgentSouk
+site_name: funduq
+site_description: The network-free core of funduq — design, contracts, and guides
+site_url: https://hukaichun.github.io/funduq/
+repo_url: https://github.com/hukaichun/funduq
+repo_name: hukaichun/funduq
 docs_dir: docs
 edit_uri: edit/main/docs/
 
@@ -51,13 +51,13 @@ nav:
       - core-components.md
       - Persistence: core-components/persistence.md
       - The dispatch trunk: core-components/dispatch.md
-      - Embedding souk: core-components/embedding.md
+      - Embedding funduq: core-components/embedding.md
       - Contract and identity: core-components/contract-identity.md
       - Mechanism to code: core-components/extensions.md
       - Support: core-components/support.md
   - SDKs:
       - sdks.md
-      - souk-provider-sdk: sdks/provider-sdk.md
-      - souk-llm-provider-sdk: sdks/llm-provider-sdk.md
+      - funduq-provider-sdk: sdks/provider-sdk.md
+      - funduq-llm-provider-sdk: sdks/llm-provider-sdk.md
   - Writing a transport: writing-a-transport.md
   - Design records: design-records.md

@@ -3,14 +3,14 @@
 The acceptance check for retiring `agent_id`: an agent is (provider_key,
 name), both halves of which the provider already holds.
 
-souk used to mint an id per agent and require a provider to hold it and echo
+funduq used to mint an id per agent and require a provider to hold it and echo
 it back on every claim. That made a provider's whole vocabulary belong to one
 particular database. Replace the database and:
 
-- the ids it holds mean nothing to the souk it is talking to, and it cannot
-  re-derive them because only souk can mint them;
+- the ids it holds mean nothing to the funduq it is talking to, and it cannot
+  re-derive them because only funduq can mint them;
 - re-registering does not fix it either — a fresh database mints *fresh* ids,
-  and souk's own in-process worker keeps claiming for the ones it was attached
+  and funduq's own in-process worker keeps claiming for the ones it was attached
   with, so `attach_provider` has to be called a second time with the new ones.
 
 That second point is what this probe pins. It is not "an id changed"; it is
@@ -22,7 +22,7 @@ An agent is `(provider_key, name)` now. Both halves come from the provider's
 own configuration, so nothing it holds can be invalidated by a database it
 never saw. Re-registering is the whole repair.
 
-    cd souk && uv run python ../scripts/probes/probe_registration_survives_a_new_database.py
+    cd funduq && uv run python ../scripts/probes/probe_registration_survives_a_new_database.py
 """
 
 from __future__ import annotations
@@ -38,14 +38,14 @@ from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy import delete
 
-from souk.config import CoreSettings
-from souk.core import Souk
+from funduq.config import CoreSettings
+from funduq.core import Funduq
 
-from souk.identity import registration_signing_payload
-from souk.schema import agents, providers, run_events, runs, thread_messages, threads
-from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
+from funduq.identity import registration_signing_payload
+from funduq.schema import agents, providers, run_events, runs, thread_messages, threads
+from funduq_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
 
-DB = Path(tempfile.gettempdir()) / "souk_probe_new_database.db"
+DB = Path(tempfile.gettempdir()) / "funduq_probe_new_database.db"
 URL = f"sqlite+aiosqlite:///{DB}"
 
 
@@ -54,9 +54,9 @@ def migrate() -> None:
         p = Path(str(DB) + suffix)
         if p.exists():
             p.unlink()
-    os.environ["SOUK_DATABASE_URL"] = URL
+    os.environ["FUNDUQ_DATABASE_URL"] = URL
     cfg = Config()
-    cfg.set_main_option("script_location", "souk:alembic")
+    cfg.set_main_option("script_location", "funduq:alembic")
     command.upgrade(cfg, "head")
 
 
@@ -73,14 +73,14 @@ class Provider:
 
 async def main() -> int:
     migrate()
-    souk = Souk(CoreSettings(database_url=URL, token_signing_secret="probe"))
-    await souk.start()
+    funduq = Funduq(CoreSettings(database_url=URL, token_signing_secret="probe"))
+    await funduq.start()
     identity = ProviderIdentity(Ed25519PrivateKey.generate())
     key, public_key = identity._private_key, identity.public_key
 
     async def register():
         timestamp = int(time.time())
-        return await souk.register_agents(
+        return await funduq.register_agents(
             public_key,
             key.sign(registration_signing_payload(["translator"], timestamp)).hex(),
             timestamp,
@@ -89,18 +89,18 @@ async def main() -> int:
 
     first = await register()
     # Attached once, with the names from this provider's own configuration.
-    # Through the SDK's runtime, because that is what souk can hand a run to.
+    # Through the SDK's runtime, because that is what funduq can hand a run to.
     runtime = ProviderRuntime(identity, Provider())
     runtime.start()
-    await souk.attach_provider(InProcessLink(souk, runtime), ["translator"])
+    await funduq.attach_provider(InProcessLink(funduq, runtime), ["translator"])
 
-    handle = await souk.start_run(first.agents["translator"], {"messages": []})
+    handle = await funduq.start_run(first.agents["translator"], {"messages": []})
     before = [event async for event in handle.events()]
-    print(f"before  : {len(before)} event(s), run reached {(await souk.get_run(handle.run_id)).status}")
+    print(f"before  : {len(before)} event(s), run reached {(await funduq.get_run(handle.run_id)).status}")
 
     # The database is replaced: a restore from before this provider existed,
-    # or souk repointed at a fresh one, while this process keeps running.
-    async with souk.session() as session:
+    # or funduq repointed at a fresh one, while this process keeps running.
+    async with funduq.session() as session:
         for table in (run_events, thread_messages, runs, threads, agents, providers):
             await session.execute(delete(table))
         await session.commit()
@@ -111,13 +111,13 @@ async def main() -> int:
     same_identity = second.agents["translator"] == first.agents["translator"]
     print(f"        : re-registered; same identity as before? {same_identity}")
 
-    handle = await souk.start_run(second.agents["translator"], {"messages": []})
+    handle = await funduq.start_run(second.agents["translator"], {"messages": []})
     try:
         async with asyncio.timeout(10):
             after = [event async for event in handle.events()]
     except TimeoutError:
         after = []
-    status = (await souk.get_run(handle.run_id)).status
+    status = (await funduq.get_run(handle.run_id)).status
     print(f"after   : {len(after)} event(s), run reached {status}")
 
     ok = same_identity and status == "completed" and len(after) == len(before)
@@ -127,7 +127,7 @@ async def main() -> int:
         else f"\nBROKEN: same_identity={same_identity} status={status} events={len(after)}"
     )
     await runtime.aclose(cancel_in_flight=True)
-    await souk.aclose()
+    await funduq.aclose()
     return 0 if ok else 1
 
 
