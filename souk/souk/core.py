@@ -34,7 +34,7 @@ from souk.errors import (
     LlmProviderNotFound,
 )
 from souk.handlers import make_handlers
-from souk.health import run_health_sweeps_forever
+from souk.health import close_with_terminal_event, run_health_sweeps_forever
 from souk.identity import (
     SoukIdentity,
     agent_deletion_signing_payload,
@@ -458,6 +458,8 @@ class Souk:
             orphaned = await repo.fail_orphaned_runs(session)
             for paused in await repo.get_paused_runs(session):
                 self.broker.hold_thread(paused["thread_id"], paused["run_id"])
+        for run_id in orphaned:
+            await close_with_terminal_event(self, run_id, "orphaned_by_souk_restart")
         if orphaned:
             logger.warning(
                 "start: marked %d run(s) failed — still queued/running from before this "
