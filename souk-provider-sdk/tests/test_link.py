@@ -216,3 +216,31 @@ async def test_a_runtime_with_no_link_drops_its_output_rather_than_raising():
         await asyncio.sleep(0.05)
     finally:
         await runtime.aclose()
+
+
+async def test_the_runtime_declines_a_mid_turn_addressed_offer_by_default():
+    from souk_provider_sdk import AgentHandle, HandleProvider, ProviderIdentity, ProviderRuntime
+
+    async def agent(run_input: RunAgentInput):
+        yield {"type": "RUN_FINISHED", "threadId": "t", "runId": "r"}
+
+    runtime = ProviderRuntime(
+        ProviderIdentity.generate(), HandleProvider([AgentHandle("a", agent)])
+    )
+    runtime.start()
+    try:
+        addressed = DeliveredRun(
+            run_id="r2",
+            agent_name="a",
+            run_input=RunAgentInput(**_run_agent_input()),
+            metadata={"addressedRunId": "r1"},
+        )
+        assert await runtime.deliver(addressed) is False, (
+            "no absorption machinery yet — the decline is the whole negotiation"
+        )
+        plain = DeliveredRun(
+            run_id="r2", agent_name="a", run_input=RunAgentInput(**_run_agent_input())
+        )
+        assert await runtime.deliver(plain) is True
+    finally:
+        await runtime.aclose()

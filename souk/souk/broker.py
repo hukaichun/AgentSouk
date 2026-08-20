@@ -112,6 +112,8 @@ class Run:
     queued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     seq: int = 0
     round_starting_seq: int = 0
+    addressed_run_id: str | None = None
+    mid_turn_declined: bool = False
     pause_payload: dict[str, Any] | None = None
     claimed_by: str | None = None
     cancel_notify: Callable[[str], None] | None = None
@@ -277,6 +279,7 @@ class RunBroker:
         protocol: str,
         handlers: HandlerMap | None = None,
         seq: int = 0,
+        addressed_run_id: str | None = None,
     ) -> Run:
         """Queues a new run for `agent` and wakes the sweep loop to offer it.
         Raises `RuntimeError` if the broker hasn't been `start()`-ed, since
@@ -294,6 +297,7 @@ class RunBroker:
             protocol=protocol,
             seq=seq,
             round_starting_seq=seq,
+            addressed_run_id=addressed_run_id,
         )
         self._runs[run_id] = run
         self._pending_by_agent[agent].append(run_id)
@@ -354,12 +358,20 @@ class RunBroker:
             capacity = self._capacity.get(provider.public_key)
             if capacity is not None and not capacity.has_room:
                 return placed
+            holder = self._thread_holder.get(run.thread_id)
+            mid_turn = holder is not None and holder != run.run_id
             outcome = await self._offer(run, provider)
             if outcome == "refused":
                 with contextlib.suppress(ValueError):
                     queue.remove(run_id)
                 continue
             if not outcome:
+                if mid_turn:
+                    # One shot only: any answer but acceptance routes the run
+                    # back behind the thread gate as a plain next turn —
+                    # re-offering mid-turn every sweep would be the
+                    # re-offered-forever bug wearing a new hat.
+                    run.mid_turn_declined = True
                 return placed
             with contextlib.suppress(ValueError):
                 queue.remove(run_id)
@@ -370,7 +382,11 @@ class RunBroker:
         Dead entries (unknown or cancel-requested runs) are returned as-is so
         the caller drops them; live entries on a held thread are passed over,
         which preserves per-thread order — the holder of the thread is, by
-        construction, an earlier run on it."""
+        construction, an earlier run on it. One exemption: a run addressed to
+        the run currently holding its thread (a caller-declared interjection)
+        is offered mid-turn, once — the provider's ordinary three-valued
+        answer is the whole negotiation, and a decline routes it back behind
+        the gate as a plain next turn."""
         for run_id in queue:
             run = self._runs.get(run_id)
             if run is None or run.cancel_requested:
@@ -378,7 +394,26 @@ class RunBroker:
             holder = self._thread_holder.get(run.thread_id)
             if holder is None or holder == run_id:
                 return run_id
+            if self._mid_turn_offerable(run, holder):
+                return run_id
         return None
+
+    def _mid_turn_offerable(self, run: Run, holder: str) -> bool:
+        return (
+            not run.mid_turn_declined
+            and holder == run.addressed_run_id
+            and self._addressed_target_in_flight(run)
+        )
+
+    def _addressed_target_in_flight(self, run: Run) -> bool:
+        """Whether the run this one addresses is claimed and producing right
+        now — the only moment a mid-turn offer means anything. A paused
+        target still holds its thread's gate but has nothing in flight to
+        absorb into, so it does not qualify."""
+        if run.addressed_run_id is None:
+            return False
+        target = self._runs.get(run.addressed_run_id)
+        return target is not None and target.claimed_by is not None
 
     async def _offer(self, run: Run, provider: ConnectedProvider) -> bool | str:
         """Delivers `run` to `provider` within `deliver_timeout_seconds` and, if
@@ -398,6 +433,16 @@ class RunBroker:
                         agent=run.agent,
                         thread_id=run.thread_id,
                         run_input=run.input_json,
+                        # The annotation rides only on a live mid-turn offer.
+                        # Once the addressed run has ended (or declined us back
+                        # behind the gate), this is an ordinary next turn and
+                        # the envelope must say so — a stale annotation would
+                        # make a default-declining provider refuse forever.
+                        metadata=(
+                            {"addressedRunId": run.addressed_run_id}
+                            if self._addressed_target_in_flight(run)
+                            else {}
+                        ),
                     )
                 )
         except TimeoutError:
@@ -438,7 +483,12 @@ class RunBroker:
             return False
         run.claimed_by = provider.public_key
         run.cancel_notify = provider.cancel
-        self._thread_holder[run.thread_id] = run.run_id
+        # A mid-turn (interjection) claim must not take the thread: it runs
+        # inside the holder's turn, and if it finished first while holding
+        # the gate, its forget would open the thread under the still-running
+        # holder. The holder keeps the gate until its own turn ends.
+        if self._thread_holder.get(run.thread_id) in (None, run.run_id):
+            self._thread_holder[run.thread_id] = run.run_id
         if capacity is not None:
             capacity.in_flight += 1
         handlers = self._handlers.get(run.run_id)
@@ -569,14 +619,15 @@ class RunBroker:
         if provider is None or provider.public_key != claimed_by:
             return False
         holder = self._thread_holder.get(run.thread_id)
-        if holder is not None and holder != run_id:
+        if holder is not None and holder != run_id and holder != run.addressed_run_id:
             return False
 
         queue = self._pending_by_agent.get(run.agent)
         if queue is not None and run_id in queue:
             queue.remove(run_id)
 
-        self._thread_holder[run.thread_id] = run_id
+        if holder in (None, run_id):
+            self._thread_holder[run.thread_id] = run_id
         capacity = self._capacity.get(claimed_by)
         if capacity is not None:
             capacity.in_flight += 1

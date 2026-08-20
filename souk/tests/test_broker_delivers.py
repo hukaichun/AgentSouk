@@ -394,3 +394,77 @@ async def test_a_paused_run_keeps_its_thread_until_released(broker):
 
     broker.release_thread("run_1")
     await _until(lambda: provider.offered == ["run_1", "run_2"], timeout=2.0)
+
+
+async def test_an_addressed_run_is_offered_mid_turn_and_does_not_take_the_gate(broker):
+    from souk.broker import FinishStream
+
+    provider = Recording()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_x", thread_id="t-shared")
+    await _until(lambda: provider.offered == ["run_x"])
+
+    broker.enqueue_run(
+        "run_r", AGENT, "t-shared", {"messages": []}, "ag-ui", {}, addressed_run_id="run_x"
+    )
+    await _until(lambda: provider.offered == ["run_x", "run_r"])
+
+    _enqueue(broker, "run_q", thread_id="t-shared")
+    await asyncio.sleep(0.05)
+    assert "run_q" not in provider.offered, "a plain sibling must stay behind the gate"
+
+    broker.push("run_r", FinishStream())
+    await _until(lambda: broker.get("run_r") is None, timeout=2.0)
+    await asyncio.sleep(0.05)
+    assert "run_q" not in provider.offered, "the interjection's end must not open the holder's gate"
+
+    broker.push("run_x", FinishStream())
+    await _until(lambda: "run_q" in provider.offered, timeout=2.0)
+
+
+async def test_a_declined_mid_turn_offer_falls_back_to_a_plain_next_turn(broker):
+    from souk.broker import FinishStream
+
+    envelopes: list = []
+
+    class Choosy(Recording):
+        async def deliver(self, run) -> bool:
+            envelopes.append(dict(run.metadata))
+            self.offered.append(run.run_id)
+            return not run.metadata.get("addressedRunId")
+
+    provider = Choosy()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_x", thread_id="t-fallback")
+    await _until(lambda: provider.offered == ["run_x"])
+
+    broker.enqueue_run(
+        "run_r", AGENT, "t-fallback", {"messages": []}, "ag-ui", {}, addressed_run_id="run_x"
+    )
+    await _until(lambda: provider.offered == ["run_x", "run_r"])
+    assert envelopes[1] == {"addressedRunId": "run_x"}, "the mid-turn offer names its address"
+
+    await asyncio.sleep(0.1)
+    assert provider.offered == ["run_x", "run_r"], "one shot only — no mid-turn re-offer"
+
+    broker.push("run_x", FinishStream())
+    await _until(lambda: provider.offered == ["run_x", "run_r", "run_r"], timeout=2.0)
+    assert envelopes[2] == {}, "behind the gate it is a plain next turn, annotation gone"
+
+
+async def test_a_run_addressed_to_a_paused_holder_waits_like_anyone_else(broker):
+    from souk.broker import FinishStream
+
+    provider = Recording()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_x", thread_id="t-paused")
+    await _until(lambda: provider.offered == ["run_x"])
+    broker._runs["run_x"].pause_payload = {"interrupts": []}
+    broker.push("run_x", FinishStream())
+    await _until(lambda: broker.get("run_x") is None, timeout=2.0)
+
+    broker.enqueue_run(
+        "run_r", AGENT, "t-paused", {"messages": []}, "ag-ui", {}, addressed_run_id="run_x"
+    )
+    await asyncio.sleep(0.1)
+    assert provider.offered == ["run_x"], "a paused target has nothing in flight to absorb into"

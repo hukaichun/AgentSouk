@@ -330,14 +330,18 @@ class A2AAdapter:
             messages = a2a_message_to_agui_messages(params.get("message", {}))
             run_input = {"thread_id": thread_id, "messages": messages}
 
-            # Two lanes. A message whose taskId names this thread's paused
-            # (input-required) task is the bound answer to its question and
-            # resumes that run. Every other message — mid-run follow-ups
-            # included — becomes a new queued run on the thread; the broker
-            # dispatches one turn per thread at a time, so it waits its turn
-            # instead of being merged, refused, or dropped. The reopen is
-            # status-guarded so two concurrent replies resolve to one resume;
-            # the loser lands in the queue lane like any other utterance.
+            # Two lanes, one annotation. A message whose taskId names this
+            # thread's paused (input-required) task is the bound answer to
+            # its question and resumes that run (the reopen is status-guarded
+            # so two concurrent replies resolve to one resume; the loser
+            # lands in the queue lane like any other utterance). Every other
+            # message becomes a new queued run on the thread — and when its
+            # taskId names the thread's *running* task, the run carries that
+            # address as an annotation: the caller declared an interjection,
+            # and the broker will offer it once mid-turn, the provider's
+            # ordinary accept/decline being the whole negotiation. A declined
+            # or unannotated run waits its turn — one per thread at a time —
+            # never merged, refused, or dropped.
             task_id = params.get("taskId")
             addressed = await repo.get_run(session, task_id) if task_id else None
             reopened = (
@@ -352,6 +356,16 @@ class A2AAdapter:
                     expected_status="input-required",
                 )
             )
+            addressed_run_id = (
+                task_id
+                if (
+                    not reopened
+                    and addressed is not None
+                    and addressed.thread_id == thread_id
+                    and addressed.status == "running"
+                )
+                else None
+            )
             if reopened:
                 run_id = task_id
                 starting_seq = await repo.get_last_event_seq(session, run_id)
@@ -359,8 +373,13 @@ class A2AAdapter:
                 await repo.ensure_queue_room(
                     session, thread_id, souk.settings.thread_queue_limit
                 )
+                run_metadata = (
+                    {**metadata, "addressedRunId": addressed_run_id}
+                    if addressed_run_id is not None
+                    else metadata
+                )
                 created = await repo.create_run(
-                    session, thread_id, agent, "a2a", run_input, metadata=metadata
+                    session, thread_id, agent, "a2a", run_input, metadata=run_metadata
                 )
                 run_id = created["run_id"]
                 starting_seq = 0
@@ -405,7 +424,15 @@ class A2AAdapter:
                 run_id,
                 KyokBinding(llm_provider=kyok_ref, context=kyok.context, actor_chain=actor_chain),
             )
-        souk.enqueue_run(run_id, agent, thread_id, agui_input, "a2a", seq=starting_seq)
+        souk.enqueue_run(
+            run_id,
+            agent,
+            thread_id,
+            agui_input,
+            "a2a",
+            seq=starting_seq,
+            addressed_run_id=addressed_run_id,
+        )
         return run_id, thread_id, True
 
 

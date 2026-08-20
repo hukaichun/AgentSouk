@@ -41,7 +41,17 @@ class ProviderRuntime:
 
 
     async def deliver(self, run: DeliveredRun) -> bool:
-        """Queues `run` for execution; returns False (without queuing) if not started, at `max_concurrent_runs`, or the queue is full."""
+        """Queues `run` for execution; returns False (without queuing) if not started, at `max_concurrent_runs`, or the queue is full.
+
+        A run whose `metadata` carries `addressedRunId` is a mid-turn offer:
+        the caller declared it an interjection into a run this provider has
+        in flight. This runtime has no absorption machinery yet, so it
+        declines — the decline is the whole negotiation, and souk re-offers
+        the same run as an ordinary next turn once the addressed run ends.
+        Nothing here signals capability to anyone; the answer is the answer.
+        """
+        if run.metadata.get("addressedRunId"):
+            return False
         if not self._running:
             return False
         if self.max_concurrent_runs is not None and len(self._in_flight) >= self.max_concurrent_runs:
