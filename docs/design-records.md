@@ -138,6 +138,17 @@ is left alone. `cancelled` still gets nothing — there is no cancelled
 event to send, and the only party who would read it is the one who asked
 for it.
 
+The rule reaches runs the broker no longer tracks, too (#127): a stale
+pause reaped as `paused_no_resume`, or an orphan reaped at startup as
+`orphaned_by_souk_restart`, has no pipeline left to push a `Fail`
+through — so the same terminal `RUN_ERROR` is appended to the record
+directly. There is no subscriber to relay it to (the paused round closed
+normally; the orphan's subscriber died with the previous process), which
+is exactly why the persisted record owes the verdict: it is the only
+place a later reader can learn how the run died, and an event stream
+that ends on a question while the database says `failed` is the silence
+this record exists to forbid.
+
 See [Runs and cancels are requests](mechanisms/requests.md) →
 [full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#cancelling-a-request-with-the-outcome-decided-later)
 

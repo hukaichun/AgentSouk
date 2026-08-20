@@ -14,8 +14,28 @@ if TYPE_CHECKING:
 logger = logging.getLogger("souk.health")
 
 
-async def _close_with_terminal_event(souk: "Souk", run_id: str, failure_reason: str) -> None:
-    souk.broker.push(run_id, Fail(failure_reason))
+async def close_with_terminal_event(souk: "Souk", run_id: str, failure_reason: str) -> None:
+    """Give a run souk has just failed its terminal `RUN_ERROR`, whether or not
+    the broker still tracks it.
+
+    A live run gets a `Fail` pushed into its pipeline, which appends the event
+    and relays it to any subscriber. A run the broker has already forgotten —
+    a stale pause reaped by the sweep, an orphan reaped at startup — has no
+    pipeline and no subscriber left, but the record still owes the verdict: the
+    same event is appended directly, so the event stream ends the way the
+    database says the run did. A run that already carries its own `RUN_ERROR`
+    is left alone, same as everywhere else."""
+    if souk.broker.push(run_id, Fail(failure_reason)):
+        return
+    async with souk.session() as session:
+        events = await repo.get_run_events(session, run_id)
+        if any(e.get("type") == "RUN_ERROR" for e in events):
+            return
+        seq = await repo.get_last_event_seq(session, run_id) + 1
+        await repo.append_run_event(
+            session, run_id, seq, {"type": "RUN_ERROR", "message": failure_reason}
+        )
+        await session.commit()
 
 
 async def sweep_once(souk: "Souk") -> None:
@@ -30,7 +50,7 @@ async def sweep_once(souk: "Souk") -> None:
         if settings.paused_timeout_seconds is not None:
             stale_paused = await repo.fail_stale_paused_runs(session, settings.paused_timeout_seconds)
     for run_id in stalled:
-        await _close_with_terminal_event(souk, run_id, "stalled_no_activity")
+        await close_with_terminal_event(souk, run_id, "stalled_no_activity")
     if stalled:
         logger.warning(
             "health sweep: %d run(s) claimed but silent past %ds, marked failed: %s",
@@ -40,7 +60,7 @@ async def sweep_once(souk: "Souk") -> None:
         )
     for run_id in stale_paused:
         souk.broker.release_thread(run_id)
-        await _close_with_terminal_event(souk, run_id, "paused_no_resume")
+        await close_with_terminal_event(souk, run_id, "paused_no_resume")
     if stale_paused:
         logger.warning(
             "health sweep: %d run(s) paused (input-required) past %ds with no resume, marked failed: %s",

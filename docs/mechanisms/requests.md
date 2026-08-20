@@ -75,8 +75,11 @@ is the caller's decision, never the relay's.
 
 A run recorded `failed` that never emitted its own `RUN_ERROR` gets one
 synthesized, persisted and relayed, so a caller can tell failure from an
-agent with nothing to say. A run that already reported its own is left
-alone.
+agent with nothing to say — including runs the broker no longer tracks
+when the verdict lands (a stale pause reaped as `paused_no_resume`, an
+orphan reaped at startup), whose event is appended to the record
+directly since no stream is left to relay it to. A run that already
+reported its own is left alone.
 
 That holds for every run the broker still tracks. **It does not hold for
 a paused run failed as `paused_no_resume`**: the broker forgot the run
