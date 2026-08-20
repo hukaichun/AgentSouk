@@ -13,7 +13,11 @@ answers with one of three values:
 
 - **accepted** — the run is claimed and its events start flowing;
 - **declined** — "full right now"; souk keeps the run queued and offers
-  again when something changes;
+  again when something changes, for as long as the agent has a provider
+  attached. Only an agent left *unserved* past a grace window (a broker
+  argument, 45 s by default) has its queued runs given up on, failed as
+  `no_provider_took_it` — a timeout on the absence of anyone to ask, not
+  a judgment;
 - **refused** — permanent: this provider will never accept it (an agent
   it no longer serves, an input that can never validate). souk fails the
   run with the provider's own reason recorded verbatim and stops

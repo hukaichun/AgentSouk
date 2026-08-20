@@ -17,11 +17,12 @@ the subscriber's own query.
 run with no activity past the stall timeout is marked failed by a direct
 database update (it works even if the run's provider vanished), and a
 paused run past its resume deadline the same way, when that timeout is
-configured. A run queued longer than its window is failed as
-"no provider took it" by the dispatch loop itself, not this sweep —
-`expire_queued` in `broker.py`, where the window (a broker argument,
-45 s by default) lives. All of these write a reason and a terminal
-event; none
+configured. A queued run whose agent has been without a serving provider
+past its window is failed as "no provider took it" by the dispatch loop
+itself, not this sweep — `expire_queued` in `broker.py`, where the
+window (a broker argument, 45 s by default) lives; while a provider is
+attached, a queued run waits indefinitely. All of these write a reason
+and a terminal event; none
 guesses an outcome — the sweeps time out on the *absence* of one, which
 is itself an observation. `Souk.health()` is the companion snapshot:
 database reachable, schema at the expected revision, dispatch loop

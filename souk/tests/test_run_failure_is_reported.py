@@ -186,7 +186,7 @@ async def test_a_cancelled_run_gets_no_run_error(brisk):
 
 
 async def test_a_run_nobody_ever_comes_for_is_given_up_on(settings: CoreSettings):
-    souk = Souk(settings, broker=RunBroker(queued_timeout_seconds=0.05))
+    souk = Souk(settings, broker=RunBroker(unserved_timeout_seconds=0.05))
     await souk.start()
     try:
         _registration, identity = await _register(souk, "unserved")
