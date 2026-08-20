@@ -31,7 +31,7 @@ A traditional funduq gave a merchant with no address in town the three things it
 
 funduq is that house, built as software. The invariants below are load-bearing in the shipped code:
 
-- **The keeper never trades for a guest.** funduq can *ask* an agent to stop; it cannot make it. A run's outcome is recorded only when observed: a run that finishes despite a cancellation request records `completed`, because that is what happened.
+- **The keeper never speaks in a guest's name.** funduq can *ask* an agent to stop; it cannot make it. A run's outcome is recorded only when observed: a run that finishes despite a cancellation request records `completed`, because that is what happened.
 - **The same face, season after season.** Identity is an Ed25519 keypair, not an account — a caller can verify it is talking to the same key as last time, and nobody's seal claims more than that. Sharing a process earns no shortcuts: an in-process provider passes the same registration, identity, and liveness checks a remote one does.
 - **The house provides mechanism; the host decides policy.** Open-by-default is funduq's own stance, not a constraint it imposes on deployments: an operator who wants an invite-only or allowlisted deployment puts their own gate in front of `/agents/register` (the reasoning is in [`federation-and-anti-abuse.md`](https://github.com/hukaichun/funduq/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/federation-and-anti-abuse.md), a working note kept in history rather than the tree). The same gateway serves an enterprise-internal deployment and a public one — funduq never takes a side between "open" and "curated".
 - **Anyone may walk in.** A stock AG-UI or A2A client works unmodified; every funduq-invented mechanism is opt-in.
