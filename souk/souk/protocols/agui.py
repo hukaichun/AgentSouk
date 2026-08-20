@@ -1,10 +1,3 @@
-"""AG-UI translation: a RunAgentInput in, a stream of AG-UI events out.
-
-Extracted from what used to be protocols.agui's AGUIAdapter.run, minus everything that was
-about HTTP. It yields AG-UI event mappings; turning those into SSE frames,
-and these errors into status codes, belongs to whoever serves it.
-"""
-
 from __future__ import annotations
 
 import json
@@ -12,15 +5,19 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from ag_ui.core import RunAgentInput
+from ag_ui.core import RunAgentInput, RunErrorEvent, RunStartedEvent
 
 from souk import repo
-from souk.models import AgentRef
+from souk.models import AgentRef, LlmRef
 from souk.agui import build_run_agent_input, rewrite_message_ids
-from souk.errors import AgentNotFound, InvalidRunInput
+from souk.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound
 from souk.identity import verify_actor_chain
-from souk.kyok import issue_kyok_token
-from souk.pause import is_resuming
+from souk.kyok import (
+    KyokBinding,
+    parse_kyok_opt_in,
+    strip_kyok_context,
+)
+from souk.props import build_forwarded_props
 
 if TYPE_CHECKING:
     from souk.core import Souk
@@ -28,110 +25,90 @@ if TYPE_CHECKING:
 
 @dataclass
 class EventStream:
-    """A run is live; `events` yields its AG-UI events."""
+    """A live run's AG-UI events, addressable by thread and run id before they are consumed."""
 
     thread_id: str
     run_id: str
     events: AsyncIterator[dict[str, Any]]
 
     async def encode(self) -> AsyncIterator[str]:
-        """The events as SSE `data:` payloads.
-
-        Encoding lives here rather than in a route so that anyone serving
-        souk over their own framework gets the wire format right for free —
-        it is part of speaking AG-UI, not part of speaking HTTP. Framing
-        these strings into an actual response stays with whoever owns the
-        server.
-        """
         async for event in self.events:
             yield json.dumps(event)
 
 
 @dataclass
 class ThreadSnapshot:
-    """The thread already had an active run, so this call started nothing.
-
-    Rather than erroring or quietly queueing a duplicate, souk hands back the
-    thread's current state — including the pending run's real status — so the
-    caller can act on it. This doubles as the catch-up path for a run that has
-    since paused.
-    """
+    """Returned instead of a new run's `EventStream` when the target thread already has an
+    active run that the incoming request isn't resuming; carries the thread's current state,
+    including the in-flight run's id."""
 
     data: dict[str, Any]
 
 
 class AGUIAdapter:
-    """AG-UI semantics over a Souk. Construct one per souk; it holds no
-    per-request state."""
 
     def __init__(self, souk: "Souk") -> None:
         self._souk = souk
 
-    async def resolve_agent_id(self, name: str) -> str:
-        """A display name to an agent. Raises AgentNotFound for none and
-        AmbiguousAgentName for several — a name is not exclusive across
-        identities, so both are ordinary outcomes."""
-        from souk.errors import AmbiguousAgentName
-
-        candidates = await self._souk.resolve_agents_by_name(name)
-        if not candidates:
-            raise AgentNotFound(f"agent '{name}' is not registered")
-        if len(candidates) > 1:
-            raise AmbiguousAgentName(name, candidates)
-        return candidates[0]["agent"]
-
     async def run(self, agent: AgentRef, body: RunAgentInput) -> EventStream | ThreadSnapshot:
-        """Start a run for `agent` from a real `ag_ui.core.RunAgentInput`.
-
-        `body.run_id`, whatever the caller sent, is never used — souk always
-        mints its own; the field is only present because AG-UI's schema
-        requires it.
-        """
+        """Starts (or resumes) an AG-UI run for `agent`. An unseen `body.thread_id` gets a new
+        thread under a **souk-minted id** — the caller's own id is deliberately not adopted, and
+        the `threadId` on every returned event is the authoritative one to continue with (souk
+        owns its record's primary keys; a caller-chosen name has no caller identity to scope it
+        to yet — see the design record on conversation naming rights). The caller-supplied
+        `run_id` is likewise ignored in favour of souk's own. A run on a thread
+        that already has one in flight is accepted and queued behind it — one turn per thread at
+        a time — and its returned stream stays silent until its turn comes; an AG-UI client
+        normally holds one session per thread, so a second concurrent run is unusual but not
+        refused. A resume with no surviving paused run to target (another caller answered first)
+        gets a `ThreadSnapshot` instead of a stream. If the agent is registered but not currently
+        served, the run is recorded as failed and the returned stream carries a `RUN_ERROR` event
+        rather than hanging. Raises `AgentNotFound` if `agent` isn't registered,
+        `LlmProviderNotFound` if a KYOK opt-in names an unknown LLM provider, and
+        `InvalidRunInput` if the assembled AG-UI input is invalid."""
         souk = self._souk
         async with souk.session() as session:
-            agent = await repo.get_agent_by_id(session, agent)
-            if agent is None:
+            if await repo.get_agent(session, agent) is None:
                 raise AgentNotFound(f"agent '{agent}' is not registered")
 
-            # Not a declared field on ag_ui.core.RunAgentInput (extra="allow"
-            # — see that model), so it's absent rather than defaulted when
-            # the caller doesn't send one.
             metadata = getattr(body, "metadata", None) or {}
             resume = [r.model_dump(mode="json", by_alias=True) for r in body.resume] if body.resume else None
 
-            metadata, verified_subject, verified_actors, actor_chain = await _verify_caller(
+            metadata, verified_subject, verified_actors, actor_chain = await verify_caller(
                 session, metadata
             )
 
-            # AG-UI's `threadId` is minted by the *caller* (the schema
-            # requires it) and AG-UI has no separate "create thread" concept,
-            # so an id souk hasn't seen is indistinguishable from "this is a
-            # brand new conversation", not a caller error. create_if_missing
-            # mints a real, souk-generated thread_id in that case rather than
-            # 404ing — see souk-no-forced-protocol-deviation: a standard
-            # AG-UI client that has never heard of `POST /threads` must work.
+            kyok = parse_kyok_opt_in(metadata)
+            kyok_ref = kyok.llm_provider if kyok is not None else None
+            metadata = strip_kyok_context(metadata)
+            if kyok_ref is not None:
+                if await repo.get_llm_provider(session, kyok_ref) is None:
+                    raise LlmProviderNotFound(f"unknown KYOK LLM provider '{kyok_ref}'")
+
             thread_id = await repo.ensure_thread(
                 session, agent, body.thread_id, metadata=metadata, create_if_missing=True
             )
 
-            # A thread only ever has one active run at a time — a second
-            # concurrent one would fork its otherwise-linear history with no
-            # clean way to merge it back. (A freshly-minted thread_id has no
-            # active run, so this is a no-op for it.)
-            active = await repo.get_active_run_for_thread(session, thread_id)
-            if active is not None and not is_resuming(active, resume):
-                return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
-            resuming_run_id = active["run_id"] if active is not None else None
+            # A resume targets the thread's paused (input-required) run
+            # specifically — not "the latest active run", which with queued
+            # siblings on the thread may be a different, merely queued run.
+            paused = (
+                await repo.get_paused_run_for_thread(session, thread_id) if resume else None
+            )
 
             input_dump = body.model_dump(mode="json", by_alias=True)
-            if resuming_run_id is not None:
-                # Reopens the *same* run_id for another round rather than
-                # minting a new one — a stable identity across pause/resume
-                # rounds is what lets this run's own A2A Task.id, if it has
-                # one, stay valid without ever being retargeted.
-                run_id = resuming_run_id
+            if isinstance(input_dump.get("metadata"), dict):
+                input_dump["metadata"] = strip_kyok_context(input_dump["metadata"])
+            if paused is not None:
+                run_id = paused["run_id"]
+                # Status-guarded so two concurrent resumes resolve to one; the
+                # loser sees the thread as busy, same as any other caller.
+                if not await repo.reopen_run(
+                    session, run_id, input_dump, metadata=metadata,
+                    expected_status="input-required",
+                ):
+                    return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
                 starting_seq = await repo.get_last_event_seq(session, run_id)
-                await repo.reopen_run(session, run_id, input_dump, metadata=metadata)
             else:
                 created = await repo.create_run(
                     session, thread_id, agent, "ag-ui", input_dump, metadata=metadata
@@ -139,19 +116,10 @@ class AGUIAdapter:
                 run_id = created["run_id"]
                 starting_seq = 0
 
-            # append_thread_messages assigns each message its real
-            # souk-minted id (discarding whatever the caller sent) and hands
-            # back the same messages with `id` set to it — this return value,
-            # not body.messages, is what goes to the provider.
             raw_messages = [m.model_dump(mode="json", by_alias=True) for m in body.messages]
             messages = await repo.append_thread_messages(session, thread_id, run_id, raw_messages)
 
-            # Fast-fail (souk.health's queued-timeout sweep covers the race
-            # where the target goes offline *after* this check): if souk
-            # already knows the target is offline, don't queue at all — emit
-            # a terminal event and close, instead of opening a stream that
-            # would sit idle until the broker gave up on it.
-            if not souk.is_serving(AgentRef(provider_key=agent.provider_key, name=agent.name)):
+            if not souk.is_serving(agent):
                 await souk.mark_run_status(
                     session, run_id, "failed", metadata={"failureReason": "agent_offline"}
                 )
@@ -170,7 +138,7 @@ class AGUIAdapter:
                         souk.settings.token_signing_secret,
                         run_id,
                         agent,
-                        metadata,
+                        kyok_ref is not None,
                         body.forwarded_props,
                         verified_subject,
                         verified_actors,
@@ -183,48 +151,36 @@ class AGUIAdapter:
 
             await session.commit()
 
+        if kyok_ref is not None:
+            souk.kyok_relay.bind_run(
+                run_id,
+                KyokBinding(llm_provider=kyok_ref, context=kyok.context, actor_chain=actor_chain),
+            )
         souk.enqueue_run(run_id, agent, thread_id, input_json, "ag-ui", seq=starting_seq)
-        # Subscribed here, not inside _relay: an async generator's body does
-        # not run until it is first iterated, and a run that finishes before
-        # the caller starts reading would have nothing left to subscribe to.
         return EventStream(thread_id, run_id, _relay(souk.broker.subscribe(run_id)))
 
 
 async def _relay(events: AsyncIterator[Any]) -> AsyncIterator[dict[str, Any]]:
-    """The run's events, with provider-generated message ids remapped to
-    souk-assigned ones consistently across a message's START/CONTENT/END
-    (see souk.agui.rewrite_message_ids).
-
-    No `finally`, deliberately: this loop ending some other way than
-    the stream's natural end — the caller disconnected, or this generator was
-    closed — does not cancel the run. souk's own state is authoritative and
-    the run keeps going whether or not anyone is still watching this
-    particular stream; a dropped connection shouldn't throw away in-progress
-    work a reconnect could catch up on. Cancelling is an explicit act only.
-    """
     message_id_map: dict[str, str] = {}
     async for item in events:
         yield rewrite_message_ids(item, message_id_map)
 
 
 async def _offline_events(thread_id: str, run_id: str) -> AsyncIterator[dict[str, Any]]:
-    """A real run always announces its own ids via RUN_STARTED first (every
-    compliant AG-UI provider copies them from the RunAgentInput it was
-    given). This path never reaches a provider, so it synthesizes the same
-    standard, in-band announcement rather than relying on a souk-invented
-    header — RunErrorEvent's own schema has no thread_id/run_id field to
-    carry them otherwise."""
-    yield {"type": "RUN_STARTED", "threadId": thread_id, "runId": run_id}
-    yield {"type": "RUN_ERROR", "message": "agent is currently offline"}
+    yield RunStartedEvent(thread_id=thread_id, run_id=run_id).model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
+    yield RunErrorEvent(message="agent is currently offline").model_dump(
+        mode="json", by_alias=True, exclude_none=True
+    )
 
 
-async def _verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict], Any]:
-    """Optional, opt-in caller identity: `metadata.actorChain` is an ordered
-    list of compact JWTs (see souk.identity.verify_actor_chain). Unsigned
-    calls are still allowed; a chain that is present but fails to verify is
-    rejected outright rather than silently treated as anonymous, since that
-    is more likely tampering than a caller choosing not to send one.
-    """
+async def verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict], Any]:
+    """Verifies `metadata["actorChain"]` if present, resolving each actor's public key to a
+    registered agent name and returning `(metadata with a verifiedActorChain entry added,
+    verified subject, verified actors, raw actor chain)`. Raises `InvalidActorChain` if the
+    chain is tampered. Returns `metadata` unchanged with empty/`None` verification fields if
+    there is no actor chain to verify."""
     actor_chain = metadata.get("actorChain")
     if not actor_chain:
         return metadata, None, [], None
@@ -241,46 +197,3 @@ async def _verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict]
     return metadata, result.subject, verified_actors, actor_chain
 
 
-def build_forwarded_props(
-    signing_secret: str,
-    run_id: str,
-    agent: AgentRef,
-    metadata: dict,
-    caller_forwarded_props: Any,
-    verified_subject: Any = None,
-    verified_actors: list[dict] | None = None,
-    actor_chain: Any = None,
-) -> Any:
-    """souk's own additions to `forwardedProps`, merged into whatever the
-    caller already supplied (its own app-specific context is real AG-UI usage
-    too, so souk must not clobber it).
-
-    A KYOK token binds this run to the caller's bridge session; a provider
-    that doesn't look for `forwardedProps.kyok` simply never sees it and
-    calls its own configured LLM as always — KYOK is opt-in on both sides
-    independently, and souk forces neither.
-
-    Deliberately just the token, not a baseUrl too: the URL external callers
-    use to reach souk is often not reachable from inside a provider's own
-    network (see docker-compose.yml, where providers reach souk at
-    `http://souk:8000`). A provider already knows how it reaches souk — it is
-    the same URL it registers and polls against.
-    """
-    session_id = metadata.get("kyok", {}).get("sessionId") if isinstance(metadata.get("kyok"), dict) else None
-    extra: dict[str, Any] = {}
-    if session_id:
-        extra["kyok"] = {"token": issue_kyok_token(run_id, session_id, agent, signing_secret)}
-    if verified_subject is not None:
-        # The raw chain travels too, not just the resolved summary: a
-        # provider that wants to delegate further needs the actual prior JWTs
-        # to extend the chain, not souk's readable description of it.
-        extra["caller"] = {
-            "subject": verified_subject,
-            "actors": verified_actors or [],
-            "chain": actor_chain,
-        }
-    if not extra:
-        return caller_forwarded_props
-    if isinstance(caller_forwarded_props, dict):
-        return {**caller_forwarded_props, **extra}
-    return extra

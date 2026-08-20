@@ -1,52 +1,93 @@
-"""What a provider is, and what souk asks of it.
-
-One method. An agent is exactly what AG-UI says it is — a run input in,
-events out — and the only addition is the *name*, on the method rather than
-smuggled into the input, because AG-UI's RunAgentInput carries no agent
-identity and one provider serving a translator and a summarizer has to know
-which one a run is for.
-
-The name rather than an id: within one provider a name is unique, and the
-provider already knows its own key. souk mints no identifier for anyone to
-hold — souk mints no id for a provider to keep.
-"""
-
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+from ag_ui.core import RunAgentInput
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Provider(Protocol):
-    """One identity offering one or more agents."""
 
-    def run_stream(self, agent_name: str, run_input: dict[str, Any]) -> AsyncIterator[Any]: ...
+    def run_stream(self, agent_name: str, run_input: RunAgentInput) -> AsyncIterator[Any]: ...
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """A permanent decline of an offered run: this provider will never accept it, so souk should stop re-offering and fail the run.
+
+    `reason` is this provider's own words; souk records it verbatim on the
+    run's failure record. Return one from `SoukLink.offer` instead of `False`
+    (which means "full right now, offer again later"). souk reads the refusal
+    duck-typed by its `reason` attribute — the attribute name is the
+    contract."""
+
+    reason: str
+
+
+class DeliveredRun(BaseModel):
+    """The run data handed to a `SoukLink`, translated from souk's internal claimed-run representation — and the declared wire form of an offered run.
+
+    A transport carries exactly `model_dump(by_alias=True)` of this
+    (camelCase keys, `runInput` as AG-UI's own camelCase form) and rebuilds
+    it with `model_validate`; the canonical frame is published in
+    `docs/contract-vectors.json`, so no transport hand-writes the mapping.
+    `metadata` is part of the wire contract, defaulting to empty.
+    `run_input.forwarded_props` is the caller's free-form slot, plus the two
+    keys souk itself adds — `caller` and `kyok` — declared by this package's
+    own `CallerProps` and `KyokForwardedProps` (`souk_provider_sdk.props`);
+    validate with those rather than restating them. They are independent
+    twins of souk's models, pinned to them by the delivered-run frame in
+    `docs/contract-vectors.json`.
+    """
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
+
+    run_id: str = Field(alias="runId")
+    agent_name: str = Field(alias="agentName")
+    run_input: RunAgentInput = Field(alias="runInput")
+    thread_id: str | None = Field(default=None, alias="threadId")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_claimed(cls, run: Any) -> "DeliveredRun":
+        """Translates souk's claimed-run object (read by attribute, never imported) into the delivered form.
+
+        Raises pydantic's `ValidationError` if the input doesn't validate as
+        a `RunAgentInput` — a permanent condition, not a transient one.
+        """
+        return cls(
+            run_id=run.run_id,
+            agent_name=run.agent.name,
+            run_input=RunAgentInput.model_validate(run.run_input),
+            thread_id=run.thread_id,
+        )
 
 
 @dataclass
 class AgentHandle:
-    """One agent, declared the way AG-UI defines one."""
 
     name: str
-    run_stream: Callable[[dict[str, Any]], AsyncIterator[Any]]
+    run_stream: Callable[[RunAgentInput], AsyncIterator[Any]]
     description: str = ""
+    agent_card_extra: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def as_registration(self) -> dict[str, Any]:
-        return {"name": self.name, "description": self.description}
+        registration: dict[str, Any] = {"name": self.name, "description": self.description}
+        if self.agent_card_extra:
+            registration["agent_card_extra"] = self.agent_card_extra
+        if self.metadata:
+            registration["metadata"] = self.metadata
+        return registration
 
 
 class HandleProvider:
-    """A provider that routes by name to the handles it was given.
-
-    The routing every provider serving several agents needs, done once here
-    rather than in each agent. Subclass or replace `run_stream` to route
-    differently — a dynamic roster, a shared model pool, a dispatch table of
-    your own — and nothing else changes.
-    """
+    """A `Provider` that dispatches `run_stream` by agent name to the matching `AgentHandle`'s callable."""
 
     def __init__(self, agents: list[AgentHandle]) -> None:
         self.agents = {agent.name: agent for agent in agents}
 
-    def run_stream(self, agent_name: str, run_input: dict[str, Any]) -> AsyncIterator[Any]:
+    def run_stream(self, agent_name: str, run_input: RunAgentInput) -> AsyncIterator[Any]:
         return self.agents[agent_name].run_stream(run_input)

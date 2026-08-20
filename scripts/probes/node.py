@@ -1,6 +1,7 @@
 """One souk process, reachable over a unix socket. A probe fixture, not a gateway.
 
-The horizontal-scaling work (docs/broker-horizontal-scaling.md) is about what
+The horizontal-scaling work (design/broker-horizontal-scaling.md, kept in git
+history at d78d063 rather than in the tree) is about what
 happens when several souk processes share one database, and CLAUDE.md's rule
 is that this gets found by running something rather than by reading. Running
 it needs two things souk itself deliberately does not have: a way to reach a
@@ -77,7 +78,7 @@ async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
 
     if op == "start_run":
         handle = await souk.start_run(_agent(req), req["run_input"])
-        return {"run_id": handle.run_id, "thread_id": handle.thread_id, "is_live": handle.is_live}
+        return {"run_id": handle.run_id, "thread_id": handle.thread_id}
 
     if op == "claim_work":
         claimed = await souk.claim_work(

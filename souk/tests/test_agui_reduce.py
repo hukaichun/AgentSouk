@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from souk.agui_reduce import reduce_events_to_messages

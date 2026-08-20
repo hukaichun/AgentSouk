@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from souk import repo
@@ -92,3 +91,16 @@ async def test_append_thread_messages_never_deduplicates_by_content(session, new
     persisted = await repo.get_thread_messages(session, thread_id)
     assert len(persisted) == 2
     assert persisted[0]["id"] != persisted[1]["id"]
+
+
+async def test_create_if_missing_keeps_the_parent_it_was_given(session, new_identity):
+    identity = new_identity()
+    registered = await repo.register_agents(session, identity.public_key, [{"name": "a"}])
+    parent = await repo.create_thread(session, registered["a"])
+
+    child = await repo.ensure_thread(
+        session, registered["a"], "never-seen", parent, create_if_missing=True
+    )
+
+    stored = await repo.get_thread(session, child)
+    assert stored["parent_thread_id"] == parent

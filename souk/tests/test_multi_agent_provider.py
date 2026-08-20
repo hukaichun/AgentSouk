@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import time
@@ -15,13 +14,13 @@ class TwoAgentProvider:
     def __init__(self) -> None:
         self.seen: list[str] = []
 
-    async def run_stream(self, agent_id: str, run_input: dict):
+    async def run_stream(self, agent_id: str, run_input):
         self.seen.append(agent_id)
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": f"handled by {agent_id}"}
         yield {"type": "TEXT_MESSAGE_END", "messageId": "m1"}
-        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
 
 async def _register(souk, *names: str):
@@ -58,13 +57,13 @@ async def test_the_run_input_itself_still_carries_no_agent_id(souk, attach):
     seen: dict = {}
 
     class Recorder:
-        async def run_stream(self, agent_id: str, run_input: dict):
+        async def run_stream(self, agent_id: str, run_input):
             seen["agent_name"] = agent_id
-            seen["keys"] = set(run_input)
+            seen["keys"] = set(run_input.model_dump(by_alias=True))
             yield {
                 "type": "RUN_FINISHED",
-                "threadId": run_input["threadId"],
-                "runId": run_input["runId"],
+                "threadId": run_input.thread_id,
+                "runId": run_input.run_id,
             }
 
     await attach(identity, Recorder(), [agent_id.name])

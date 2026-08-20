@@ -1,72 +1,127 @@
-"""A provider's identity, and what it signs — the provider's own copy.
-
-**This file must not import souk, and that is the whole point of it.**
-
-A provider's identity is an Ed25519 keypair; souk issues no account. What it
-signs — the exact bytes of a registration or a deletion — is an interop
-surface between two codebases, and an interop surface only stays honest if
-both sides state it independently. Import souk's builder here and the two can
-never disagree, which sounds like safety and is the opposite: a change to the
-payload moves both sides at once and every test stays green while every real
-provider stops being able to register.
-
-That is not hypothetical. souk added an operation prefix to its registration
-payload while its test suite signed with souk's own builder; 219 tests passed
-and no provider in the world could register any more. Nothing in the tree
-noticed, because nothing in the tree held a second opinion.
-
-souk's suite holds one now — it registers through this module — so a payload
-change fails there, at merge time, instead of downstream at deploy time. The
-duplication is deliberate and load-bearing. Do not 'clean it up' by importing
-`souk.identity`; that deletes the check.
-
-(The same device already guards the actor-chain hop format, where souk's
-conftest reimplements the SDK's signing rather than calling it.)
-"""
-
 from __future__ import annotations
 
 import hashlib
+import secrets
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import jwt
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
-# How long one freshly-signed delegation hop stays usable. Only the last hop's
-# expiry is enforced by souk, so this bounds "who is using this chain right
-# now" rather than how long the provenance stays readable.
 ACTOR_CHAIN_TTL_SECONDS = 300
 
-# What a signed request is *for*. Without this, a registration for one agent
-# and a deletion of that agent are the same bytes, so observing the first
-# hands you the second — measured against souk before the prefixes existed.
 _REGISTER = "souk-register"
 _DELETE_AGENT = "souk-delete-agent"
+_KYOK_CALL = "souk-kyok-call"
+
+
+def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
+    """Returns True iff `signature_hex` is a valid Ed25519 signature over `payload` for `public_key_hex`.
+
+    Returns False (never raises) for a bad signature, a mismatched payload, a key from
+    another identity, or malformed hex/length input.
+    """
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
+        public_key.verify(bytes.fromhex(signature_hex), payload)
+        return True
+    except (InvalidSignature, ValueError):
+        return False
+
+
+def roster_registration_payload(tag: str, names: list[str], timestamp: int) -> bytes:
+    """One payload shape for registering any roster of served names: sorted (order-independent), joined with `timestamp`, under a domain `tag`.
+
+    Both rosters sign these bytes — agents under `souk-register`, LLM
+    offerings under `souk-register-llm` — and the tag is what keeps a
+    signature for one roster unreplayable as the other.
+    """
+    return f"{tag}:{','.join(sorted(names))}:{timestamp}".encode()
+
+
+def sign_roster_registration(
+    identity: "ProviderIdentity", tag: str, names: list[str], timestamp: int | None = None
+) -> tuple[str, int]:
+    """Signs a roster registration payload, defaulting the timestamp to now.
+
+    Returns the `(signature, timestamp)` pair actually signed over, so callers
+    can send both to the verifier.
+    """
+    timestamp = int(time.time()) if timestamp is None else timestamp
+    return identity.sign(roster_registration_payload(tag, names, timestamp)), timestamp
 
 
 def registration_payload(agent_names: list[str], timestamp: int) -> bytes:
-    """The names being claimed, sorted, and when. The identity is not in here
-    and need not be: the signature is checked against the public key presented
-    alongside it, so a captured payload cannot be re-presented under another
-    key."""
-    return f"{_REGISTER}:{','.join(sorted(agent_names))}:{timestamp}".encode()
+    """Builds the canonical bytes signed for registering agents: `roster_registration_payload` under the agent tag."""
+    return roster_registration_payload(_REGISTER, agent_names, timestamp)
 
 
 def deletion_payload(agent_name: str, timestamp: int) -> bytes:
-    """One name, never a batch: registering is declarative and idempotent,
-    deleting is neither."""
+    """Builds the canonical bytes signed to delete a single agent, distinct from a registration payload."""
     return f"{_DELETE_AGENT}:{agent_name}:{timestamp}".encode()
 
 
-class ProviderIdentity:
-    """The keypair a provider is.
+def kyok_call_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
+    return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
 
-    Persisted to disk, because restarting must not change who you are: an
-    agent is `(provider_key, name)`, so a fresh key is a fresh, unrelated
-    provider offering the same names, and anything pointing at the old pair
-    keeps pointing at an identity nobody holds.
+
+_CONNECT_PROVIDER = "souk-connect-provider"
+_CONNECT_SOUK = "souk-connect-souk"
+
+
+def new_nonce() -> str:
+    """A fresh 128-bit hex nonce for one side of a link-open challenge."""
+    return secrets.token_hex(16)
+
+
+def provider_connect_payload(
+    souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+) -> bytes:
+    """Builds the bytes a provider signs to authenticate opening a link.
+
+    `souk_nonce` is the challenge the souk being connected to chose — that is
+    what makes a recorded exchange worthless — and the names to be served are
+    bound in (sorted) so they cannot be altered in flight.
+    `souk_public_key` is the recipient: the souk key you pinned (empty
+    string for a souk with no identity). It is what stops a souk you
+    connect to from relaying your proof to attach elsewhere as you — the
+    verifying souk builds this payload with its own key, so a proof bound
+    to the wrong souk fails there. Do not substitute a timestamp for the
+    nonce: a self-chosen freshness is replayable for its whole window,
+    which is the hole this family exists to close.
+    `souk.identity.provider_connect_signing_payload` computes this same
+    payload independently on souk's side and both must agree byte-for-byte.
     """
+    return (
+        f"{_CONNECT_PROVIDER}:{souk_public_key}:{souk_nonce}:{provider_nonce}:"
+        f"{','.join(sorted(names))}".encode()
+    )
+
+
+class WrongSouk(Exception):
+    """The souk answering a link-open did not prove the key you pinned.
+
+    Raised before any run or event has crossed — the point of the pin is
+    refusing to produce anything worth stealing for an imposter."""
+
+
+def souk_connect_payload(souk_nonce: str, provider_nonce: str) -> bytes:
+    """Builds the bytes souk signs to prove itself to a connecting provider.
+
+    Verify it with `verify_signature` against the souk public key you
+    pinned, before sending anything worth stealing; `provider_nonce` is
+    yours, so the proof cannot be a recording. The role tag differs from
+    `provider_connect_payload`'s so neither proof can be reflected as the
+    other. `souk.identity.souk_connect_signing_payload` is the independent
+    twin.
+    """
+    return f"{_CONNECT_SOUK}:{souk_nonce}:{provider_nonce}".encode()
+
+
+class ProviderIdentity:
+    """An Ed25519 keypair identifying a provider; `public_key` is its 64-char hex-encoded public key."""
 
     def __init__(self, private_key: Ed25519PrivateKey) -> None:
         self._private_key = private_key
@@ -78,6 +133,11 @@ class ProviderIdentity:
 
     @classmethod
     def load_or_create(cls, path: str | Path) -> "ProviderIdentity":
+        """Loads the private key at `path` if it exists, else generates one and writes it there (mode 0600).
+
+        Calling this again with the same path yields an identity with the same `public_key`, so a
+        restarted process keeps its identity.
+        """
         path = Path(path)
         if path.exists():
             return cls(Ed25519PrivateKey.from_private_bytes(path.read_bytes()))
@@ -88,34 +148,35 @@ class ProviderIdentity:
         path.chmod(0o600)
         return identity
 
+    def sign(self, payload: bytes) -> str:
+        """Signs arbitrary bytes and returns the hex-encoded Ed25519 signature."""
+        return self._private_key.sign(payload).hex()
+
     def sign_registration(self, agent_names: list[str], timestamp: int | None = None) -> tuple[str, int]:
-        """Returns `(signature_hex, timestamp)` — both, because souk verifies
-        the signature *over* the timestamp and would otherwise be handed two
-        values that do not belong together."""
-        timestamp = int(time.time()) if timestamp is None else timestamp
-        return self._private_key.sign(registration_payload(agent_names, timestamp)).hex(), timestamp
+        """Signs `registration_payload(agent_names, timestamp)` (current time if `timestamp` is None) and returns (signature_hex, timestamp)."""
+        return sign_roster_registration(self, _REGISTER, agent_names, timestamp)
 
     def sign_deletion(self, agent_name: str, timestamp: int | None = None) -> tuple[str, int]:
         timestamp = int(time.time()) if timestamp is None else timestamp
         return self._private_key.sign(deletion_payload(agent_name, timestamp)).hex(), timestamp
 
-    # ---- Delegation provenance
-    #
-    # The third thing a provider signs, and one souk already treats as an
-    # interop surface: an agent inside souk and one across a wire must be able
-    # to appear in the same chain, so the hop format is stated on both sides
-    # rather than shared.
+    def sign_connect(
+        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
+    ) -> str:
+        """Signs `provider_connect_payload(...)`: this provider's answer to a souk's link-open challenge, bound to the souk key it means to connect to."""
+        return self.sign(
+            provider_connect_payload(souk_public_key, souk_nonce, provider_nonce, names)
+        )
+
 
     def sign_hop(
         self, subject: dict, prev_token: str | None = None, ttl: int = ACTOR_CHAIN_TTL_SECONDS
     ) -> str:
-        """One hop of an actor chain.
+        """Issues a JWT (EdDSA) hop binding `subject` to this identity's public key, optionally chained to `prev_token` via its sha256 in `prevHash`, expiring after `ttl` seconds.
 
-        `subject` is who the chain is fundamentally about — this agent acting
-        for itself, or a human it authenticated by means souk has no view of.
-        souk never verifies that claim, because it cannot; what it verifies is
-        that every actor signing a hop holds the key it claims, and that the
-        chain was not altered since.
+        `souk.identity.verify_actor_chain` is the verifier these hops must
+        satisfy; it builds the same claim format independently, and any
+        change here must stay verifiable by it.
         """
         now = int(time.time())
         return jwt.encode(
@@ -133,13 +194,89 @@ class ProviderIdentity:
         )
 
     def new_chain(self, subject: dict) -> list[str]:
+        """Starts a new actor chain: a one-element list holding a single signed hop for `subject`."""
         return [self.sign_hop(subject)]
 
     def extend_chain(self, prev_chain: list[str]) -> list[str]:
-        """Relay a chain onward, carrying its subject. Without this a hop is a
-        dead end: the callee learns who is calling now, but not on whose
-        behalf, with nothing tying the two together."""
+        """Appends a hop signed by this identity, carrying forward the subject of the chain's last hop.
+
+        Raises ValueError if `prev_chain` is empty — use `new_chain` to start one.
+        """
         if not prev_chain:
             raise ValueError("extend_chain requires a non-empty chain — use new_chain to start one")
         subject = jwt.decode(prev_chain[-1], options={"verify_signature": False})["subject"]
         return [*prev_chain, self.sign_hop(subject, prev_chain[-1])]
+
+
+class InvalidChain(Exception):
+    """An actor chain that fails verification: forged, reordered, truncated, spliced, expired, or malformed."""
+
+
+@dataclass(frozen=True)
+class VerifiedChain:
+    """What a verified chain vouches for: its subject, and each hop's signing key in order."""
+
+    subject: dict
+    actor_public_keys: list[str]
+
+
+def verify_chain(chain: list[str]) -> VerifiedChain:
+    """Verifies an actor chain without souk: each hop's signature under its own embedded key, `prevHash` linkage, one subject throughout, expiry enforced on the last hop only.
+
+    The independent twin of `souk.identity.verify_actor_chain` — same rules,
+    pinned to each other by interop tests. Unlike souk's, it does not resolve
+    keys to registered agent names (that needs souk's roster); it is the tool
+    an LLM provider uses to police a delegation chain itself, trusting no
+    summary of souk's. Raises `InvalidChain` on any failure.
+    """
+    if not chain:
+        raise InvalidChain("empty actor chain")
+
+    subject: dict | None = None
+    actor_public_keys: list[str] = []
+    prev_token: str | None = None
+
+    for i, token in enumerate(chain):
+        try:
+            unverified = jwt.decode(token, options={"verify_signature": False})
+        except jwt.PyJWTError as e:
+            raise InvalidChain(f"hop {i}: unparseable token: {e}") from e
+
+        actor_public_key = unverified.get("actorPublicKey")
+        if not isinstance(actor_public_key, str):
+            raise InvalidChain(f"hop {i}: missing actorPublicKey")
+        try:
+            public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(actor_public_key))
+        except ValueError as e:
+            raise InvalidChain(f"hop {i}: malformed actorPublicKey: {e}") from e
+
+        is_last_hop = i == len(chain) - 1
+        try:
+            payload = jwt.decode(
+                token,
+                key=public_key,
+                algorithms=["EdDSA"],
+                options={"verify_exp": is_last_hop},
+            )
+        except jwt.PyJWTError as e:
+            reason = "signature/expiry check failed" if is_last_hop else "signature check failed"
+            raise InvalidChain(f"hop {i}: {reason}: {e}") from e
+
+        expected_prev_hash = (
+            hashlib.sha256(prev_token.encode()).hexdigest() if prev_token is not None else None
+        )
+        if payload.get("prevHash") != expected_prev_hash:
+            raise InvalidChain(f"hop {i}: prevHash doesn't match — chain reordered, truncated, or spliced")
+
+        if i == 0:
+            subject = payload.get("subject")
+            if not isinstance(subject, dict):
+                raise InvalidChain("hop 0: missing subject")
+        elif payload.get("subject") != subject:
+            raise InvalidChain(f"hop {i}: subject changed partway through the chain")
+
+        actor_public_keys.append(actor_public_key)
+        prev_token = token
+
+    assert subject is not None
+    return VerifiedChain(subject=subject, actor_public_keys=actor_public_keys)

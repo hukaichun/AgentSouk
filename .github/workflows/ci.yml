@@ -47,7 +47,7 @@ jobs:
       # reproduces a specific failure and exits non-zero if the verdict has
       # not changed.
       #
-      # Two of the five probes are deliberately *not* here.
+      # Two of the six probes are deliberately *not* here.
       # `probe_multiprocess.py` is the target for the horizontal-scaling work
       # and currently fails 6/6 on purpose; `probe_broker_surface.py` reports
       # what escapes the broker rather than judging it. Listing them would
@@ -85,6 +85,20 @@ jobs:
       # lockfile, the boundary was not real.
       - run: uv run pytest -v
         working-directory: souk-provider-sdk
+
+  souk-llm-provider-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          python-version: "3.12"
+      - run: uv sync --group dev
+        working-directory: souk-llm-provider-sdk
+      # openai is types-only here (the wire shapes), and souk-provider-sdk
+      # supplies the keypair — still no transport this package uses itself.
+      - run: uv run pytest -v
+        working-directory: souk-llm-provider-sdk
 
   # Everything else — the gateway, both SDKs, the reference providers and
   # the directory UI — lives in AgentSoukServer, which carries its own CI,

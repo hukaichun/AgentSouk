@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -12,19 +11,19 @@ from souk.models import AgentRef
 
 class EchoProvider:
 
-    async def run_stream(self, agent_id: str, run_input: dict):
-        text = run_input["messages"][-1]["content"] if run_input.get("messages") else ""
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_id: str, run_input):
+        text = run_input.messages[-1].content if run_input.messages else ""
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": f"echo: {text}"}
         yield {"type": "TEXT_MESSAGE_END", "messageId": "m1"}
-        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
 
 class NeverFinishesProvider:
 
-    async def run_stream(self, agent_id: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+    async def run_stream(self, agent_id: str, run_input):
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
         await asyncio.Event().wait()
 
 
@@ -56,7 +55,6 @@ async def test_attach_start_and_read_back(souk, new_identity, attach):
 
     assert handle.run_id.startswith("run_")
     assert handle.thread_id.startswith("thread_")
-    assert handle.is_live
 
     events = [event async for event in handle.events()]
     assert [e["type"] for e in events][0] == "RUN_STARTED"
@@ -79,18 +77,12 @@ async def test_roster_and_agent_lookup(souk, new_identity, attach):
 
     roster = await souk.list_agents()
     assert [a.name for a in roster] == ["echo"]
-    # Registered is not reachable. `online` is whether somebody is serving it,
-    # not whether souk has heard from it lately.
     assert roster[0].online is False
 
     await attach(identity, EchoProvider(), ["echo"])
     assert (await souk.list_agents())[0].online is True
 
     assert (await souk.get_agent(agent_id)).name == "echo"
-    assert [
-        AgentRef(provider_key=a["provider_key"], name=a["name"])
-        for a in await souk.resolve_agents_by_name("echo")
-    ] == [agent_id]
     assert await souk.get_agent(AgentRef(provider_key=agent_id.provider_key, name="nope")) is None
 
 
@@ -114,15 +106,10 @@ async def test_cancel_a_running_agent(souk, new_identity, attach):
 
 
 class StubbornProvider:
-    """Takes runs, is asked to stop, and finishes anyway.
 
-    souk can ask; it cannot compel. Complying is the provider's choice, so
-    this one is written not to — the point is that souk records what the
-    stream actually did rather than what it requested.
-    """
-
-    def __init__(self, public_key: str) -> None:
-        self.public_key = public_key
+    def __init__(self, identity) -> None:
+        self.public_key = identity.public_key
+        self.sign_connect = identity.sign_connect
         self.max_concurrent_runs = None
         self.taken: list[str] = []
         self.asked_to_stop: list[str] = []
@@ -139,16 +126,13 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
     identity = new_identity()
     registration = await _register_with_token(souk, "stubborn", identity)
     agent_id = registration.agents["stubborn"]
-    provider = StubbornProvider(identity.public_key)
+    provider = StubbornProvider(identity)
     await souk.attach_provider(provider, ["stubborn"])
 
     handle = await souk.start_run(agent_id, {"messages": []})
     await _until(lambda: provider.taken == [handle.run_id])
 
     souk.cancel_run(handle.run_id)
-    # The flag flips synchronously so nothing hands the run out meanwhile;
-    # telling the provider happens on the run's own task, in order behind
-    # everything else about it.
     assert souk.broker.get(handle.run_id).cancel_requested is True
     await _until(lambda: provider.asked_to_stop == [handle.run_id])
     souk.report_event(

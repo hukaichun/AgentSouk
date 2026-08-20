@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -13,9 +12,6 @@ from souk.schema import agents, providers
 
 
 async def _listed(session, souk):
-    """The stored half of the roster. `online` is left False here and filled
-    in by `Souk.list_agents` from who the broker can actually reach — this
-    layer has no way to know, and used to guess from `last_seen_at`."""
     return await repo.list_agents(
         session, stale_hidden_window_seconds=souk.settings.stale_hidden_window_seconds
     )
@@ -53,22 +49,12 @@ async def test_the_same_name_under_two_identities_is_two_agents(session, new_ide
     assert result_a["greeter"] != result_b["greeter"]
     assert result_a["greeter"].name == result_b["greeter"].name == "greeter"
 
-    candidates = await repo.resolve_agents_by_name(session, "greeter")
-    assert {
-        AgentRef(provider_key=c["provider_key"], name=c["name"]) for c in candidates
-    } == {result_a["greeter"], result_b["greeter"]}
+    for identity, registered in ((a, result_a), (b, result_b)):
+        row = await repo.resolve_agent(session, identity.public_key, "greeter")
+        assert AgentRef(provider_key=row.provider_key, name=row.name) == registered["greeter"]
 
 
 async def test_omitting_an_agent_keeps_it_rather_than_removing_it(session, souk, new_identity):
-    """Absence from a batch is a withdrawal, not a deletion. It used to
-    de-list, which made re-registering the whole removal UX and turned a
-    partial batch — a config error, a flag off, half a deploy — into silent
-    data loss.
-
-    What *stops* is being served, and that is `Souk.register_agents`' half of
-    the job: it unregisters the withdrawn names from the broker, which is
-    where reachability lives. This layer only has to not destroy anything.
-    """
     identity = new_identity()
     both = [{"name": "greeter"}, {"name": "translator"}]
 
@@ -85,9 +71,6 @@ async def test_omitting_an_agent_keeps_it_rather_than_removing_it(session, souk,
 async def test_list_agents_excludes_an_agent_nothing_has_heard_from_in_weeks(
     session, souk, new_identity
 ):
-    """A different question from `online`, and the one this table can answer:
-    not "is anybody serving it" but "has it been away so long that listing it
-    is noise". Read-time filter only — it reappears the moment it registers."""
     identity = new_identity()
     await repo.register_agents(session, identity.public_key, [{"name": "greeter"}])
 
@@ -124,26 +107,15 @@ async def test_provider_name_defaults_to_none_and_is_sticky_across_registrations
     assert (await _listed(session, souk))[0].provider_name == "Ada's Stall"
 
 
-async def test_resolve_agents_by_name_zero_one_many(session, new_identity):
-    assert await repo.resolve_agents_by_name(session, "nobody") == []
-
-    a = new_identity()
-    await repo.register_agents(session, a.public_key, [{"name": "greeter"}])
-    assert len(await repo.resolve_agents_by_name(session, "greeter")) == 1
-
-    b = new_identity()
-    await repo.register_agents(session, b.public_key, [{"name": "greeter"}])
-    assert len(await repo.resolve_agents_by_name(session, "greeter")) == 2
-
-
 async def test_an_agent_is_addressable_by_whose_it_is_and_what_it_is_called(session, new_identity):
     a, b = new_identity(), new_identity()
     mine = await repo.register_agents(session, a.public_key, [{"name": "translator"}])
     theirs = await repo.register_agents(session, b.public_key, [{"name": "translator"}])
 
-    assert AgentRef(**{k: (await repo.resolve_agent(session, a.public_key, "translator"))[k] for k in ("provider_key", "name")}) == mine["translator"]
-    assert AgentRef(**{k: (await repo.resolve_agent(session, b.public_key, "translator"))[k] for k in ("provider_key", "name")}) == theirs["translator"]
-    assert len(await repo.resolve_agents_by_name(session, "translator")) == 2
+    resolved_a = await repo.resolve_agent(session, a.public_key, "translator")
+    resolved_b = await repo.resolve_agent(session, b.public_key, "translator")
+    assert AgentRef(provider_key=resolved_a.provider_key, name=resolved_a.name) == mine["translator"]
+    assert AgentRef(provider_key=resolved_b.provider_key, name=resolved_b.name) == theirs["translator"]
 
 
 async def test_resolving_an_agent_a_provider_never_registered_is_a_miss(session, new_identity):
@@ -173,7 +145,7 @@ async def test_a_provider_is_addressable_by_its_fingerprint(session, new_identit
 
     assert by_fingerprint == by_key
     assert AgentRef(
-        provider_key=by_fingerprint["provider_key"], name=by_fingerprint["name"]
+        provider_key=by_fingerprint.provider_key, name=by_fingerprint.name
     ) == ids["translator"]
 
 

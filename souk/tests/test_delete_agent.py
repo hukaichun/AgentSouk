@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -17,8 +16,8 @@ from souk.models import AgentRef
 
 class _Provider:
     async def run_stream(self, agent_name: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
-        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
 
 
 class _Identity(ProviderIdentity):
@@ -38,14 +37,6 @@ class _Identity(ProviderIdentity):
     def registration_signature(self, names: list[str], timestamp: int) -> str:
         signature, _ = self.sign_registration(names, timestamp)
         return signature
-
-
-# There used to be an `souk` fixture here, a whole second Souk with
-# `online_window_seconds=0`, because registering marked an agent seen and
-# "seen recently" was what `online` meant — so every test in this file would
-# otherwise have had to wait out the window it had just started. Deleting is
-# refused for an agent a provider is *serving*, which registering does not
-# make true, so the plain souk works and the fixture is gone.
 
 
 async def test_a_registration_signature_is_not_a_deletion_order(souk):
@@ -113,12 +104,7 @@ async def test_deleting_an_agent_that_never_existed_is_not_found(souk):
         )
 
 
-
-
 async def test_an_agent_someone_is_serving_is_refused(souk, attach):
-    """One refusal where there were two. `online` and `attached` were separate
-    reasons only because souk could not see reachability and had to infer it
-    from when the provider was last heard from. It can see it now."""
     identity = _Identity()
     await identity.register(souk, "local")
     await attach(identity, _Provider(), ["local"])
@@ -153,7 +139,7 @@ async def test_an_agent_that_has_held_a_conversation_is_refused(souk, attach):
 
     handle = await souk.start_run(registered["worked"], {"messages": []})
     assert [e["type"] async for e in handle.events()][-1] == "RUN_FINISHED"
-    await souk.detach_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
 
     signature, timestamp = identity.deletion("worked")
     with pytest.raises(AgentInUse) as refused:
