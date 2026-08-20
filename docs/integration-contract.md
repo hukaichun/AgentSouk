@@ -112,9 +112,12 @@ across the pause.
 These are not design positions. They are what the code does today, and a
 client author needs them.
 
-- **Answering a paused task over A2A rides `taskId`, not
+- **Addressing a paused task over A2A rides `taskId`, not
   `elicitationId`.** A message whose `taskId` names the thread's
-  `input-required` task resumes it; who may do so is gated by nothing
+  `input-required` task resumes it with whatever the message says —
+  souk never checks that it answers the question; a redirection or an
+  overrule rides the same road, and the provider judges it from the
+  thread's shape. Who may do so is gated by nothing
   more than knowing the id, the same capability-by-identifier trust
   every thread reference carries today (a recorded contradiction, not a
   position). When A2A v1.1's `elicitationId` lands, that is the marker

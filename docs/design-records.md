@@ -310,8 +310,18 @@ conflating two lanes. The **queue lane** carries ordinary utterances and
 is state-independent: a caller may speak while the provider is working,
 while a run is paused, or on a quiet thread; delivery is always
 accepted, and *handling* is scheduled by the provider. The **reply lane**
-carries the bound answer to a specific paused run's `input-required`
-question.
+carries an utterance addressed to a specific paused run's
+`input-required` question — and "addressed to" is the whole condition:
+souk resumes the paused run with whatever the caller said and never
+checks that it answers the question. "Forget the passport, book the
+train instead" rides this lane as legitimately as the passport number
+does; the provider reads the thread's shape — its own question is in
+the history, the interrupt is in the run's metadata — and decides for
+itself whether it was answered, redirected, or overruled. Whether an
+utterance answers a question is a semantic judgment, and souk does not
+make those. (This is also souk's answer to the upstream "the human
+doesn't want to answer, they want to keep talking" gap: address the
+paused task and say anything.)
 
 `input-required` is an explicit pause marker governing **only the reply
 lane**. It says nothing about whether the queue lane is open, because the

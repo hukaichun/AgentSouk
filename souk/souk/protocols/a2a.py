@@ -331,10 +331,12 @@ class A2AAdapter:
             run_input = {"thread_id": thread_id, "messages": messages}
 
             # Two lanes, one annotation. A message whose taskId names this
-            # thread's paused (input-required) task is the bound answer to
-            # its question and resumes that run (the reopen is status-guarded
-            # so two concurrent replies resolve to one resume; the loser
-            # lands in the queue lane like any other utterance). Every other
+            # thread's paused (input-required) task resumes that run with
+            # whatever it says — souk never checks that it answers the
+            # question; the provider judges answer-vs-redirect from the
+            # thread's shape (the reopen is status-guarded so two concurrent
+            # resumes resolve to one; the loser lands in the queue lane
+            # like any other utterance). Every other
             # message becomes a new queued run on the thread — and when its
             # taskId names the thread's *running* task, the run carries that
             # address as an annotation: the caller declared an interjection,
