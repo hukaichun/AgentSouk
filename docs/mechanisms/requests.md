@@ -38,3 +38,10 @@ outcome it has not observed. The one immediate cancellation is a run
 still queued: no provider has it, so there is no outcome souk could be
 pre-empting. The same rule holds everywhere: statuses are observations,
 not intentions.
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [Silence about a verdict souk has reached is a bug](../design-records.md#silence-about-a-verdict-souk-has-reached-is-a-bug)
+- [Enforcing cancellation produced a family of bugs](../design-records.md#enforcing-cancellation-produced-a-family-of-bugs)

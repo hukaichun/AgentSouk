@@ -58,3 +58,4 @@ nav:
       - sdks.md
       - souk-provider-sdk: sdks/provider-sdk.md
       - souk-llm-provider-sdk: sdks/llm-provider-sdk.md
+  - Design records: design-records.md

@@ -33,3 +33,12 @@ entitles a party to resume it.
 Answering is an auditable act: who resumed, under which edge's authority,
 is recorded — the same observed-not-asserted stance every souk record
 takes.
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [Rule zero: identifiers are never credentials](../design-records.md#rule-zero-identifiers-are-never-credentials)
+- [Anonymity means the key is unlinked, not that there is no key](../design-records.md#anonymity-means-the-key-is-unlinked-not-that-there-is-no-key)
+- [One question per delegation edge decides the whole tree](../design-records.md#one-question-per-delegation-edge-decides-the-whole-tree)
+- [Authorization is not disclosure](../design-records.md#authorization-is-not-disclosure)

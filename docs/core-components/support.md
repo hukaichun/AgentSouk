@@ -35,3 +35,9 @@ and schema, timeouts and sweep intervals, the token-signing secret,
 and souk's identity key. Attach authentication deliberately has no
 switch here: a link either proves its key or is refused, so the
 handshake is the same on every souk.
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [Background work is not a TaskGroup](../design-records.md#background-work-is-not-a-taskgroup)

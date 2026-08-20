@@ -88,3 +88,10 @@ counters. That table is extracted once as `LiveRoster` and composed by
 both hosts, so the two lanes cannot drift apart; the register / attach /
 detach ceremony above them is likewise stated once, in the facade's
 `_Roster` base.
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [Wrapping an unknown event in `RawEvent` is quiet corruption](../design-records.md#wrapping-an-unknown-event-in-rawevent-is-quiet-corruption)
+- [Liveness stopped being an inference](../design-records.md#liveness-stopped-being-an-inference)

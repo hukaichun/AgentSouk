@@ -60,3 +60,10 @@ because identity is identity). Each is pinned byte-for-byte in
 [`contract-vectors.json`](../contract-vectors.json), with deterministic
 signatures under a published test key. CI fails if a payload family goes
 unpublished.
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [The verifier chooses the freshness](../design-records.md#the-verifier-chooses-the-freshness)
+- [A provider is its key, and has no other id](../design-records.md#a-provider-is-its-key-and-has-no-other-id)

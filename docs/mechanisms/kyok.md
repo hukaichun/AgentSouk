@@ -52,3 +52,11 @@ own. Any other failure is an unstructured error. souk counts what it saw
 The full design record, including the two prior designs this replaced and
 why they failed, is
 [`design/keep-your-own-key.md`](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md).
+
+## Design records
+
+Why this is shaped the way it is, and what it was shaped like first:
+
+- [KYOK replaced two designs, both failing for one reason](../design-records.md#kyok-replaced-two-designs-both-failing-for-one-reason)
+- [An inter-chunk timeout kills slow models and blames the wrong side](../design-records.md#an-inter-chunk-timeout-kills-slow-models-and-blames-the-wrong-side)
+- ["Trustless" binding was rejected as false safety](../design-records.md#trustless-binding-was-rejected-as-false-safety)
