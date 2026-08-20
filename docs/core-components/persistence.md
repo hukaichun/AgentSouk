@@ -71,7 +71,8 @@ mode emits the DDL without contacting a database:
 alembic upgrade head --sql
 ```
 
-The output ends by stamping the version row itself, so a DBA who applies
+Run it from `souk/` — that is where `alembic.ini` lives, not the
+repository root. The output ends by stamping the version row itself, so a DBA who applies
 the script has a database souk recognizes without souk ever holding
 credentials. `alembic upgrade <from>:<to> --sql` narrows it to one step
 when you are upgrading in place.

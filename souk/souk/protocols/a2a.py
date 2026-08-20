@@ -104,7 +104,7 @@ class A2AAdapter:
             pb.AgentCard(
                 name=card.get("name", record.name),
                 description=card.get("description", ""),
-                version="0.1.0",
+                version=card.get("version", "0.1.0"),
                 supported_interfaces=[
                     pb.AgentInterface(
                         url=served.url,

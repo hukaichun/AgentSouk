@@ -55,7 +55,6 @@ async def test_attach_start_and_read_back(souk, new_identity, attach):
 
     assert handle.run_id.startswith("run_")
     assert handle.thread_id.startswith("thread_")
-    assert handle.is_live
 
     events = [event async for event in handle.events()]
     assert [e["type"] for e in events][0] == "RUN_STARTED"

@@ -86,7 +86,6 @@ class RunHandle:
 
     run_id: str
     thread_id: str
-    is_live: bool
     _broker: RunBroker | None = None
     _events: AsyncIterator[Any] | None = None
 
@@ -924,7 +923,6 @@ class Souk:
         return RunHandle(
             run_id=run_id,
             thread_id=resolved_thread_id,
-            is_live=True,
             _broker=self.broker,
             _events=self.broker.subscribe(run_id),
         )
@@ -953,7 +951,6 @@ class Souk:
         return RunHandle(
             run_id=run_id,
             thread_id=stored.thread_id,
-            is_live=True,
             _broker=self.broker,
             _events=self.broker.subscribe(run_id),
         )
