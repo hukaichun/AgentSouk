@@ -4,7 +4,7 @@ Part of [souk's mechanisms](../mechanisms.md).
 
 **Status: design, not implementation.** The design is settled and
 recorded; no code enforces it yet. This page states the mechanism;
-[`design/responsibility-chains.md`](https://github.com/hukaichun/AgentSouk/blob/main/design/responsibility-chains.md)
+[`design/responsibility-chains.md`](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md)
 is the full record, including what already exists in code and what is
 direction only.
 
