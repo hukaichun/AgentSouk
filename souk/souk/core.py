@@ -890,9 +890,17 @@ class Souk:
         input_json: dict[str, Any],
         protocol: str,
         seq: int = 0,
+        addressed_run_id: str | None = None,
     ) -> RunSnapshot:
         return self.broker.enqueue_run(
-            run_id, agent, thread_id, input_json, protocol, make_handlers(self), seq=seq
+            run_id,
+            agent,
+            thread_id,
+            input_json,
+            protocol,
+            make_handlers(self),
+            seq=seq,
+            addressed_run_id=addressed_run_id,
         )
 
     async def start_run(

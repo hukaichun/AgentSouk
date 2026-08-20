@@ -62,6 +62,7 @@ class DeliveredRun(BaseModel):
             agent_name=run.agent.name,
             run_input=RunAgentInput.model_validate(run.run_input),
             thread_id=run.thread_id,
+            metadata=dict(getattr(run, "metadata", None) or {}),
         )
 
 

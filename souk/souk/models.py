@@ -36,6 +36,11 @@ class ClaimedRun(BaseModel):
     agent: AgentRef
     thread_id: str
     run_input: dict[str, Any]
+    # Part of the delivered-run wire frame (default empty). souk's one key so
+    # far: "addressedRunId" — the in-flight run this utterance was addressed
+    # to, present only on a mid-turn offer. A provider that ignores it and
+    # declines gets the same run again as an ordinary next turn.
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class LlmSummary(BaseModel):

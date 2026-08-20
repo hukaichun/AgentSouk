@@ -356,3 +356,79 @@ async def test_answering_the_paused_question_is_never_refused_by_the_buffer(tigh
     assert reply["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
     third = await filler
     assert third["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+
+
+async def test_a_message_addressed_to_the_running_task_degrades_to_the_next_turn(souk, serve):
+    provider = GateAgent()
+    served = await serve(provider, "interject")
+    agent = served.agents["interject"]
+
+    first = asyncio.create_task(
+        _rpc(souk, agent, "SendMessage", {"message": _message("start")})
+    )
+    await _until(lambda: len(provider.runs) == 1)
+    first_run_id = provider.runs[0].run_id
+
+    async def _first_is_running() -> bool:
+        async with souk.session() as session:
+            stored = await repo.get_run(session, first_run_id)
+        return stored.status == "running"
+
+    await _until(_first_is_running)
+
+    second = asyncio.create_task(
+        _rpc(
+            souk,
+            agent,
+            "SendMessage",
+            {"message": {**_message("actually, in metric units"), "taskId": first_run_id}},
+        )
+    )
+
+    async def _second_recorded() -> bool:
+        async with souk.session() as session:
+            active = await repo.get_active_run_for_thread(
+                session, provider.runs[0].thread_id
+            )
+        return (
+            active is not None
+            and active["status"] == "queued"
+            and active["metadata"].get("addressedRunId") == first_run_id
+        )
+
+    await _until(_second_recorded)
+    await asyncio.sleep(0.1)
+    assert len(provider.runs) == 1, "the SDK runtime declines mid-turn offers by default"
+
+    provider.release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+    assert first_result["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert second_result["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert second_result["result"]["id"] != first_run_id
+    assert [r.run_id for r in provider.runs][0] == first_run_id
+    assert len(provider.runs) == 2, "declined mid-turn, the message became the plain next turn"
+
+
+async def test_addressing_the_paused_task_needs_no_answer_souk_relays_anything(souk, serve):
+    provider = AskingAgent()
+    served = await serve(provider, "overruled")
+    agent = served.agents["overruled"]
+
+    first = await _rpc(souk, agent, "SendMessage", {"message": _message("book the flight")})
+    task_id = first["result"]["id"]
+    assert first["result"]["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+
+    overrule = await _rpc(
+        souk,
+        agent,
+        "SendMessage",
+        {"message": {**_message("forget the passport, book the train instead"), "taskId": task_id}},
+    )
+
+    assert overrule["result"]["id"] == task_id, "a non-answer resumes the task just the same"
+    assert overrule["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    resumed_input = provider.rounds[1]
+    contents = [m.content for m in resumed_input.messages if getattr(m, "content", None)]
+    assert any("book the train instead" in c for c in contents), (
+        "the provider receives the utterance verbatim and judges it itself"
+    )

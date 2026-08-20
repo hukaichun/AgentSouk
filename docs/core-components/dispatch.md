@@ -77,7 +77,14 @@ arrives or capacity frees, and walks each agent's queue:
    or it is failed as stale, so no queued sibling overtakes an
    unanswered question; the gate is re-seeded from paused runs at
    startup, since dispatch state does not survive a restart but a
-   paused run does. The provider answers accepted / declined-full /
+   paused run does. One exemption: a run the caller addressed to the
+   run currently in flight (an interjection) is offered once mid-turn,
+   its address in the envelope's `metadata`; the provider's ordinary
+   answer is the whole negotiation, a decline drops it behind the gate
+   as a plain next turn (annotation stripped), and an exempt claim
+   never takes the thread gate — see
+   [the design record](../design-records.md#interjection-the-decline-is-the-whole-negotiation).
+   The provider answers accepted / declined-full /
    refused-permanently; timeouts and refusals are handled per
    [runs and cancels are requests](../mechanisms/requests.md).
 2. **Claim.** An accepted run is marked claimed by that provider's key

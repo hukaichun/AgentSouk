@@ -189,6 +189,47 @@ silently dropping `parent_thread_id`.
 See [The integration contract](integration-contract.md) →
 issue [#117](https://github.com/hukaichun/AgentSouk/issues/117)
 
+### Interjection: the decline is the whole negotiation
+
+Superseding an earlier design (a separate opt-in entry point whose
+rejection the caller answered by resending): the reasoning that
+collapsed it starts from the wire's shape. **Every run in the world is
+SSE-shaped** — request in, one-way event stream out — and one-way
+channels mean an interjection can only ever be *another channel
+injecting into the original channel's loop*. So any provider that has
+hand-rolled interjection already has a second channel, and souk's own
+delivery path *is* a second channel from the provider's point of view.
+No new entry point is needed; the one door souk already has suffices.
+
+The shape that shipped: an interjection is an **ordinary run, annotated**
+with the in-flight run it addresses (over A2A the annotation is A2A's
+own grammar — a message whose `taskId` names the thread's *running*
+task; no new field). The broker offers an annotated run **immediately,
+once**, exempt from the thread gate, and the provider's ordinary
+three-valued answer is the entire negotiation:
+
+- **accept** — the provider takes the full run, envelope intact
+  (caller props, KYOK, chain — identity was never a problem, because
+  delivery is the whole run), and injects it into its loop however it
+  likes. The run keeps its own stream, task id, and terminal status;
+  `task ≡ run` survives untouched.
+- **decline** — one shot only: the run drops behind the gate and is
+  re-offered as a plain next turn *with the annotation stripped* (a
+  stale annotation would make a default-declining provider refuse
+  forever). Degradation is the default physics: no resend, no fallback
+  policy, no capability advertisement anywhere — the SDK runtime
+  declines annotated offers until absorption machinery exists, and
+  nobody is told anything. The ack quietly reveals the implementation.
+
+Two implementation rules keep it race-free, both learned by walking the
+code before writing it: the immediate offer is an *eligibility
+exemption* inside the one deliverer (a second deliver call site would
+recreate the documented double-delivery race), and **an exempt claim
+never takes the thread gate** — if the interjection finished first while
+holding it, its forget would open the thread under the still-running
+holder. A paused target does not qualify: it holds its gate but has
+nothing in flight to absorb into.
+
 ## Designed, not built
 
 ### Rule zero: identifiers are never credentials
@@ -269,8 +310,18 @@ conflating two lanes. The **queue lane** carries ordinary utterances and
 is state-independent: a caller may speak while the provider is working,
 while a run is paused, or on a quiet thread; delivery is always
 accepted, and *handling* is scheduled by the provider. The **reply lane**
-carries the bound answer to a specific paused run's `input-required`
-question.
+carries an utterance addressed to a specific paused run's
+`input-required` question — and "addressed to" is the whole condition:
+souk resumes the paused run with whatever the caller said and never
+checks that it answers the question. "Forget the passport, book the
+train instead" rides this lane as legitimately as the passport number
+does; the provider reads the thread's shape — its own question is in
+the history, the interrupt is in the run's metadata — and decides for
+itself whether it was answered, redirected, or overruled. Whether an
+utterance answers a question is a semantic judgment, and souk does not
+make those. (This is also souk's answer to the upstream "the human
+doesn't want to answer, they want to keep talking" gap: address the
+paused task and say anything.)
 
 `input-required` is an explicit pause marker governing **only the reply
 lane**. It says nothing about whether the queue lane is open, because the
@@ -338,23 +389,6 @@ opens a second run mid-turn; souk accepts the unusual one rather than
 refusing it.
 
 [full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#queueing-delivery-is-the-protocols-timing-is-the-providers)
-
-### Interjection: the rejection is the capability signal
-
-An interjection payload is a plain `RunAgentInput` with a freshly minted
-`runId` and a `parentRunId` pointing at the run it wants to join —
-continuation and interjection differ by a single verb. A separate,
-opt-in entry point answers accepted or rejected, and **on rejection the
-caller resends the identical payload through the ordinary conversation
-surface**, because it was a valid run request all along. Degradation is
-one client-side resend, the server holds zero state for "unsupported",
-and no Agent Card or handshake is needed to advertise the capability.
-
-On absorption the response grows out of the original stream, pinned by
-one reference-style marker event carrying a reference and never content,
-so ownership of the message text stays with the call that submitted it.
-
-[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#interjection-joining-the-run-in-flight)
 
 ## Tried, measured, reversed
 
