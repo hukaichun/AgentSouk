@@ -302,6 +302,15 @@ async def test_a_full_thread_buffer_refuses_the_next_message_loudly(tight):
     await _until(lambda: len(provider.runs) == 1)
     thread_id = provider.runs[0].thread_id
 
+    async def _first_is_running() -> bool:
+        # The claim's status write is asynchronous; until it lands the first
+        # run still counts as pending and would itself fill the limit-1 buffer.
+        async with tight.session() as session:
+            stored = await repo.get_run(session, provider.runs[0].run_id)
+        return stored.status == "running"
+
+    await _until(_first_is_running)
+
     second = asyncio.create_task(
         _rpc(tight, agent, "SendMessage", {"message": {**_message("waits"), "contextId": thread_id}})
     )
