@@ -18,7 +18,6 @@ from souk.kyok import (
     strip_kyok_context,
 )
 from souk.props import build_forwarded_props
-from souk.pause import is_resuming
 
 if TYPE_CHECKING:
     from souk.core import Souk
@@ -53,12 +52,16 @@ class AGUIAdapter:
 
     async def run(self, agent: AgentRef, body: RunAgentInput) -> EventStream | ThreadSnapshot:
         """Starts (or resumes) an AG-UI run for `agent`. Creates a new thread if `body.thread_id`
-        is unseen, ignores the caller-supplied `run_id` and mints souk's own, and returns a
-        `ThreadSnapshot` instead of starting a run if the thread already has an unrelated active
-        run. If the agent is registered but not currently served, the run is recorded as failed
-        and the returned stream carries a `RUN_ERROR` event rather than hanging. Raises
-        `AgentNotFound` if `agent` isn't registered, `LlmProviderNotFound` if a KYOK opt-in names
-        an unknown LLM provider, and `InvalidRunInput` if the assembled AG-UI input is invalid."""
+        is unseen, ignores the caller-supplied `run_id` and mints souk's own. A run on a thread
+        that already has one in flight is accepted and queued behind it — one turn per thread at
+        a time — and its returned stream stays silent until its turn comes; an AG-UI client
+        normally holds one session per thread, so a second concurrent run is unusual but not
+        refused. A resume with no surviving paused run to target (another caller answered first)
+        gets a `ThreadSnapshot` instead of a stream. If the agent is registered but not currently
+        served, the run is recorded as failed and the returned stream carries a `RUN_ERROR` event
+        rather than hanging. Raises `AgentNotFound` if `agent` isn't registered,
+        `LlmProviderNotFound` if a KYOK opt-in names an unknown LLM provider, and
+        `InvalidRunInput` if the assembled AG-UI input is invalid."""
         souk = self._souk
         async with souk.session() as session:
             if await repo.get_agent(session, agent) is None:
@@ -82,18 +85,26 @@ class AGUIAdapter:
                 session, agent, body.thread_id, metadata=metadata, create_if_missing=True
             )
 
-            active = await repo.get_active_run_for_thread(session, thread_id)
-            if active is not None and not is_resuming(active, resume):
-                return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
-            resuming_run_id = active["run_id"] if active is not None else None
+            # A resume targets the thread's paused (input-required) run
+            # specifically — not "the latest active run", which with queued
+            # siblings on the thread may be a different, merely queued run.
+            paused = (
+                await repo.get_paused_run_for_thread(session, thread_id) if resume else None
+            )
 
             input_dump = body.model_dump(mode="json", by_alias=True)
             if isinstance(input_dump.get("metadata"), dict):
                 input_dump["metadata"] = strip_kyok_context(input_dump["metadata"])
-            if resuming_run_id is not None:
-                run_id = resuming_run_id
+            if paused is not None:
+                run_id = paused["run_id"]
+                # Status-guarded so two concurrent resumes resolve to one; the
+                # loser sees the thread as busy, same as any other caller.
+                if not await repo.reopen_run(
+                    session, run_id, input_dump, metadata=metadata,
+                    expected_status="input-required",
+                ):
+                    return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
                 starting_seq = await repo.get_last_event_seq(session, run_id)
-                await repo.reopen_run(session, run_id, input_dump, metadata=metadata)
             else:
                 created = await repo.create_run(
                     session, thread_id, agent, "ag-ui", input_dump, metadata=metadata

@@ -8,7 +8,10 @@ only ask, watch what happens, and record exactly that.
 
 ## Offering a run
 
-A queued run is *offered* to its agent's provider, and the provider
+A queued run is *offered* to its agent's provider — in order, one turn
+per thread at a time: a run whose thread already has a run in flight
+(claimed, or paused waiting for an answer) stays queued until that turn
+ends, without holding up runs on other threads — and the provider
 answers with one of three values:
 
 - **accepted** — the run is claimed and its events start flowing;
