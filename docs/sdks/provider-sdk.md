@@ -1,10 +1,10 @@
-# souk-provider-sdk
+# funduq-provider-sdk
 
 Part of [the SDKs](../sdks.md).
 
-What an agent provider and souk agree on, stated from the provider's
+What an agent provider and funduq agree on, stated from the provider's
 side. Dependencies are `cryptography`, `pyjwt`, `ag-ui-protocol` — no
-transport library, and no souk: not depending on souk is what makes this
+transport library, and no funduq: not depending on funduq is what makes this
 package a second opinion on the bytes rather than an echo, and a fitness
 test keeps it that way.
 
@@ -14,19 +14,19 @@ test keeps it that way.
 from a key file so a restarted process keeps its identity; `public_key`
 is the 64-char hex). Around it, builders for every payload the provider
 signs: registration and deletion (timestamped), the link-open connect
-proof (challenge-answered — `sign_connect` over the pinned souk key,
-souk's nonce, the provider's own nonce, and the names to serve, so the
-proof names its recipient and cannot be relayed to another souk), and
-the per-call KYOK signature. Each builder is the independent twin of souk's, and
+proof (challenge-answered — `sign_connect` over the pinned funduq key,
+funduq's nonce, the provider's own nonce, and the names to serve, so the
+proof names its recipient and cannot be relayed to another funduq), and
+the per-call KYOK signature. Each builder is the independent twin of funduq's, and
 reproduces the published vectors byte-for-byte, deterministic signatures
 included.
 
 ## The port and the worker
 
-`SoukLink` is the abstract port a transport implements: `offer` a
+`FunduqLink` is the abstract port a transport implements: `offer` a
 delivered run (answering accepted / declined / `Refusal`), `cancel`,
 `report_event`, `finish_run`, `thread_messages`. The base class states
-the one translation every transport needs — souk's claimed-run object
+the one translation every transport needs — funduq's claimed-run object
 becomes a `DeliveredRun`, and an input that doesn't validate is a
 permanent `Refusal`, not a transient decline. `InProcessLink` is the
 in-process transport (in-process is a transport, not a special case);
@@ -38,7 +38,7 @@ it is on.
 
 `DeliveredRun` is both what the runtime consumes and the declared wire
 frame (`model_dump(by_alias=True)` / `model_validate`); `CallerProps`,
-`VerifiedActor` and `KyokForwardedProps` declare souk's two
+`VerifiedActor` and `KyokForwardedProps` declare funduq's two
 forwarded-props additions so no provider restates them — a restated copy
 once drifted on one field's nullability and silently dropped verified
 caller identities.
@@ -46,6 +46,6 @@ caller identities.
 ## Chain machinery
 
 Both halves: `sign_hop` / `new_chain` / `extend_chain` to participate in
-an actor chain, and `verify_chain` to police one — the twin of souk's
+an actor chain, and `verify_chain` to police one — the twin of funduq's
 verifier, same rules, no roster resolution, so an LLM provider or any
-consumer can verify a delegation path without importing souk.
+consumer can verify a delegation path without importing funduq.

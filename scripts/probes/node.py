@@ -1,11 +1,11 @@
-"""One souk process, reachable over a unix socket. A probe fixture, not a gateway.
+"""One funduq process, reachable over a unix socket. A probe fixture, not a gateway.
 
 The horizontal-scaling work (design/broker-horizontal-scaling.md, kept in git
 history at d78d063 rather than in the tree) is about what
-happens when several souk processes share one database, and CLAUDE.md's rule
+happens when several funduq processes share one database, and CLAUDE.md's rule
 is that this gets found by running something rather than by reading. Running
-it needs two things souk itself deliberately does not have: a way to reach a
-souk from outside its process, and something to spread calls across several of
+it needs two things funduq itself deliberately does not have: a way to reach a
+funduq from outside its process, and something to spread calls across several of
 them.
 
 This is the first. It is the smallest possible stand-in for a serving layer:
@@ -16,13 +16,13 @@ the gateway's to make in its own repository, and making any of them here would
 be this repo growing a serving layer under a different name.
 
 What it must be honest about is the domain: every op below is a plain call
-into `Souk`, with no shortcut past `claim_work`'s identity checks or
+into `Funduq`, with no shortcut past `claim_work`'s identity checks or
 `report_event`'s ownership check. A probe that cheated on those would prove
 nothing about the thing being probed.
 
-    python scripts/probes/node.py --name a --socket /tmp/souk-a.sock
+    python scripts/probes/node.py --name a --socket /tmp/funduq-a.sock
 
-`SOUK_DATABASE_URL` and `SOUK_TOKEN_SIGNING_SECRET` come from the environment,
+`FUNDUQ_DATABASE_URL` and `FUNDUQ_TOKEN_SIGNING_SECRET` come from the environment,
 as they would anywhere else. Every node in a cluster must share both — the
 database because that is the whole point, the secret because a session token
 minted by one node is verified by whichever node the next call lands on.
@@ -39,35 +39,35 @@ import os
 import signal
 from typing import Any
 
-from souk import repo
-from souk.config import CoreSettings
-from souk.core import Souk
-from souk.models import AgentRef
+from funduq import repo
+from funduq.config import CoreSettings
+from funduq.core import Funduq
+from funduq.models import AgentRef
 
 logger = logging.getLogger("probe.node")
 
 
 def _agent(req: dict[str, Any]) -> AgentRef:
-    """An agent named the way souk names one — the pair, off the wire."""
+    """An agent named the way funduq names one — the pair, off the wire."""
     return AgentRef(provider_key=req["provider_key"], name=req["agent_name"])
 
 
-async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
-    """One domain call. Deliberately a flat table of `Souk`'s own methods —
+async def _dispatch(funduq: Funduq, req: dict[str, Any]) -> Any:
+    """One domain call. Deliberately a flat table of `Funduq`'s own methods —
     if an op here needed logic of its own, that logic would be a serving-layer
     decision this probe has no business making.
     """
     op = req["op"]
 
-    if op == "souk_start":
-        return {"reaped": await souk.start()}
+    if op == "funduq_start":
+        return {"reaped": await funduq.start()}
 
     if op == "register":
-        registration = await souk.register_agents(
+        registration = await funduq.register_agents(
             req["public_key"], req["signature"], req["timestamp"], req["agents"]
         )
         return {
-            # The pairs, indexed by name. Not ids: souk mints none, which is
+            # The pairs, indexed by name. Not ids: funduq mints none, which is
             # the point of retiring the surrogate id.
             "agents": {
                 name: {"provider_key": ref.provider_key, "agent_name": ref.name}
@@ -77,11 +77,11 @@ async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
         }
 
     if op == "start_run":
-        handle = await souk.start_run(_agent(req), req["run_input"])
+        handle = await funduq.start_run(_agent(req), req["run_input"])
         return {"run_id": handle.run_id, "thread_id": handle.thread_id}
 
     if op == "claim_work":
-        claimed = await souk.claim_work(
+        claimed = await funduq.claim_work(
             req["token"],
             req["agent_names"],
             max_claim=req.get("max_claim"),
@@ -99,44 +99,44 @@ async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
         ]
 
     if op == "report_event":
-        return souk.report_event(req["run_id"], req["event"], claimed_by=req["claimed_by"])
+        return funduq.report_event(req["run_id"], req["event"], claimed_by=req["claimed_by"])
 
     if op == "finish_run":
-        return souk.finish_run(req["run_id"], claimed_by=req["claimed_by"])
+        return funduq.finish_run(req["run_id"], claimed_by=req["claimed_by"])
 
     if op == "cancel_run":
-        return souk.cancel_run(req["run_id"])
+        return funduq.cancel_run(req["run_id"])
 
     if op == "get_run":
-        record = await souk.get_run(req["run_id"])
+        record = await funduq.get_run(req["run_id"])
         return record.model_dump(mode="json") if record is not None else None
 
     if op == "get_run_events":
-        return await souk.get_run_events(req["run_id"])
+        return await funduq.get_run_events(req["run_id"])
 
     if op == "active_runs":
-        return souk.active_runs()
+        return funduq.active_runs()
 
     if op == "list_agents":
-        return [agent.model_dump(mode="json") for agent in await souk.list_agents()]
+        return [agent.model_dump(mode="json") for agent in await funduq.list_agents()]
 
     if op == "sweep_once":
         # The health sweep on demand, so a probe can provoke it instead of
         # waiting out health_sweep_interval_seconds.
-        from souk.health import sweep_once
+        from funduq.health import sweep_once
 
-        await sweep_once(souk)
+        await sweep_once(funduq)
         return True
 
     if op == "touch_agent":
-        async with souk.session() as session:
+        async with funduq.session() as session:
             await repo.touch_agents(session, req["provider_key"], [req["agent_name"]])
         return True
 
     raise ValueError(f"unknown op: {op}")
 
 
-async def _handle(souk: Souk, name: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def _handle(funduq: Funduq, name: str, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     async def send(obj: Any) -> None:
         writer.write((json.dumps(obj) + "\n").encode())
         await writer.drain()
@@ -155,12 +155,12 @@ async def _handle(souk: Souk, name: str, reader: asyncio.StreamReader, writer: a
         # cross-node read problem the design has to solve.
         if req.get("op") == "subscribe":
             await send({"ok": True, "node": name, "streaming": True})
-            async for event in souk.broker.subscribe(req["run_id"]):
+            async for event in funduq.broker.subscribe(req["run_id"]):
                 await send({"event": event})
             await send({"end": True})
             return
 
-        await send({"ok": True, "node": name, "result": await _dispatch(souk, req)})
+        await send({"ok": True, "node": name, "result": await _dispatch(funduq, req)})
     except Exception as exc:
         logger.exception("op failed")
         with contextlib.suppress(Exception):
@@ -178,7 +178,7 @@ async def main() -> None:
     parser.add_argument(
         "--start",
         action="store_true",
-        help="call Souk.start() on boot (orphan reconciliation + health sweeps), as a "
+        help="call Funduq.start() on boot (orphan reconciliation + health sweeps), as a "
         "real deployment does. Off by default so a probe can choose when that happens — "
         "which node boots when is exactly what the design is about.",
     )
@@ -188,14 +188,14 @@ async def main() -> None:
         level=logging.INFO, format=f"%(levelname)s [{args.name}] %(name)s: %(message)s"
     )
 
-    souk = Souk(CoreSettings())
+    funduq = Funduq(CoreSettings())
     if args.start:
-        await souk.start()
+        await funduq.start()
 
     with contextlib.suppress(FileNotFoundError):
         os.unlink(args.socket)
     server = await asyncio.start_unix_server(
-        lambda r, w: _handle(souk, args.name, r, w), path=args.socket
+        lambda r, w: _handle(funduq, args.name, r, w), path=args.socket
     )
 
     stopped = asyncio.Event()
@@ -210,7 +210,7 @@ async def main() -> None:
     async with server:
         await stopped.wait()
 
-    await souk.aclose()
+    await funduq.aclose()
     with contextlib.suppress(FileNotFoundError):
         os.unlink(args.socket)
 

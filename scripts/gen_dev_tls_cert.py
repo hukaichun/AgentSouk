@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generates a self-signed TLS cert+key pair for running souk with TLS on
-localhost during development/testing — see souk.config's grpc_tls_*/
+"""Generates a self-signed TLS cert+key pair for running funduq with TLS on
+localhost during development/testing — see funduq.config's grpc_tls_*/
 http_tls_* settings. Not for production: a real deployment needs a
 CA-issued certificate (or TLS terminated at a reverse proxy in front of
-souk), since a self-signed cert only works if every client is separately
-told to trust this exact file (souk_agent_sdk.SoukProvider's
+funduq), since a self-signed cert only works if every client is separately
+told to trust this exact file (funduq_agent_sdk.FunduqProvider's
 ca_cert_path), which doesn't scale past "everyone building against one
-souk you personally control".
+funduq you personally control".
 
 Usage: uv run python scripts/gen_dev_tls_cert.py [output_dir]
 """

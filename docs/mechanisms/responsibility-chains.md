@@ -1,10 +1,10 @@
 # Responsibility chains
 
-Part of [souk's mechanisms](../mechanisms.md).
+Part of [funduq's mechanisms](../mechanisms.md).
 
 **Status: design, not implementation.** The design is settled and
 recorded; no code enforces it yet. This page states the mechanism;
-[`design/responsibility-chains.md`](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md)
+[`design/responsibility-chains.md`](https://github.com/hukaichun/funduq/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md)
 is the full record, including what already exists in code and what is
 direction only.
 
@@ -31,7 +31,7 @@ Identifiers are never credentials: knowing a thread id is not what
 entitles a party to resume it.
 
 Answering is an auditable act: who resumed, under which edge's authority,
-is recorded — the same observed-not-asserted stance every souk record
+is recorded — the same observed-not-asserted stance every funduq record
 takes.
 
 ## Design records

@@ -2,22 +2,22 @@
 # (SQLite needs nothing at all — see CONTRIBUTING.md).
 #
 # The full demo stack — gateway + database + example agents + directory
-# UI — lives with the gateway, in the AgentSoukServer repository. This
+# UI — lives with the gateway, in the funduq-server repository. This
 # compose deliberately carries no service that needs one: the serving
 # layer is not in this tree.
 services:
   paradedb:
     image: paradedb/paradedb:latest
     environment:
-      POSTGRES_USER: souk
-      POSTGRES_PASSWORD: souk
-      POSTGRES_DB: souk
+      POSTGRES_USER: funduq
+      POSTGRES_PASSWORD: funduq
+      POSTGRES_DB: funduq
     ports:
       - "5433:5432"
     volumes:
       - paradedb_data:/var/lib/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h localhost -U souk -d souk"]
+      test: ["CMD-SHELL", "pg_isready -h localhost -U funduq -d funduq"]
       interval: 2s
       timeout: 3s
       retries: 20

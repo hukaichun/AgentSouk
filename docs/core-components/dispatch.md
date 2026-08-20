@@ -16,8 +16,8 @@ currently served — an offline agent fails the run immediately with a
 terminal event rather than queueing into silence. Then the run input is
 built (below), handed to the broker, and the caller gets back a live
 **event stream**: an async iterator that yields each AG-UI event as the
-provider produces it — carrying **souk's** thread id, which is the
-authoritative one: a caller-supplied `threadId` souk does not know is
+provider produces it — carrying **funduq's** thread id, which is the
+authoritative one: a caller-supplied `threadId` funduq does not know is
 not adopted, and the substitution rides back on every event rather than
 happening silently (see
 [conversation naming rights](../design-records.md#conversation-naming-rights-wait-for-a-caller-to-own-them)).
@@ -53,7 +53,7 @@ merged, refused, or dropped.
 Both doors converge on one function that builds the AG-UI
 `RunAgentInput` the provider will see: thread id, run id, the folded
 message history, and `forwardedProps` — the caller's free-form slot plus
-souk's own two additions (`caller`, `kyok`), built by a single shared
+funduq's own two additions (`caller`, `kyok`), built by a single shared
 builder so a run's identity props are byte-identical whichever protocol
 dispatched it. An agent therefore becomes A2A-callable without its
 author writing any A2A: by the time the run reaches the provider, the
@@ -128,7 +128,7 @@ That is an invariant, not a coincidence of the current code. Two callers
 racing to offer the same head run both plausibly succeed, and the run is
 delivered twice or claimed by one provider while the other's ack arrives
 against a run already in flight — either way a run is lost or
-duplicated, and neither is recoverable from the outcome souk records.
+duplicated, and neither is recoverable from the outcome funduq records.
 Anything that needs a run dispatched sooner should wake the loop, never
 deliver on its own.
 
@@ -154,9 +154,9 @@ the run was queued and when the agent went unserved. While a provider is
 attached, a queued run waits indefinitely — the window times out the
 absence of anyone to ask, not a provider's slowness.
 
-A provider whose answer arrives after souk gave up can still recover the
+A provider whose answer arrives after funduq gave up can still recover the
 run, and the way it does so is by behaving as though it holds it:
-reporting an event for a run it does not own is read as a late ack. souk
+reporting an event for a run it does not own is read as a late ack. funduq
 accepts it only if the run is still unclaimed *and* the claimant is the
 provider currently serving that agent, then counts an `answered_late`
 and starts the pipeline. So a slow provider loses a quality counter, not
@@ -166,12 +166,12 @@ the work.
 
 The in-flight bucket is keyed by the provider's public key. One provider
 serving five agents has one budget across all five, which is the same
-answer souk gives everywhere else: the key is the identity, and how a
+answer funduq gives everywhere else: the key is the identity, and how a
 provider arranges itself behind it is its own business.
 
 A provider that declines while claiming to have room is counted
 `misdeclared` and then treated as full, because its own declaration is
-the only capacity figure souk has and the decline is the more recent
+the only capacity figure funduq has and the decline is the more recent
 fact. This is also what makes self-delegation deadlock — see
 [the design record](../design-records.md#self-delegation-deadlocks-a-capacity-capped-provider).
 
@@ -181,7 +181,7 @@ concurrency and then declines is counted `misdeclared` and re-offered
 immediately, every sweep, for as long as it keeps declining — the
 counter records the discourtesy, but nothing backs off. Declaring no
 limit and meaning it is the contract; declaring no limit and declining
-is the one misdeclaration souk cannot act on.
+is the one misdeclaration funduq cannot act on.
 
 ## One substrate under both
 

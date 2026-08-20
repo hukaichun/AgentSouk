@@ -1,41 +1,41 @@
-# Embedding souk
+# Embedding funduq
 
 Part of [core components](../core-components.md).
 
-souk is a library before it is a service. Everything a serving layer
+funduq is a library before it is a service. Everything a serving layer
 does over a wire, a Python process can do by calling methods — same
 objects, same guarantees, no socket. This page is that surface.
 
 ```python
-from souk.core import Souk
+from funduq.core import Funduq
 ```
 
-The package exports only `migrate` at the top level; `Souk` comes from
-`souk.core`.
+The package exports only `migrate` at the top level; `Funduq` comes from
+`funduq.core`.
 
 ## The object
 
-`Souk(settings=None, broker=None)` builds the engine and the dispatch
+`Funduq(settings=None, broker=None)` builds the engine and the dispatch
 machinery. Both arguments are injection points: settings default to
 `CoreSettings()` read from the environment (see
 [Support](support.md)), and passing your own `RunBroker` is how you
 change dispatch timeouts, which are broker constructor arguments rather
 than settings.
 
-`await souk.start()` must be called before any run is enqueued —
+`await funduq.start()` must be called before any run is enqueued —
 enqueueing on a stopped broker raises rather than silently accepting
 work nothing would dispatch. It returns the ids of runs it reaped: runs
 left `queued` or `running` by a previous process, which no longer have
-anyone to finish them. `await souk.aclose()` stops dispatch, cancels
+anyone to finish them. `await funduq.aclose()` stops dispatch, cancels
 tracked background tasks, and disposes the engine.
 
-`await souk.health()` is the readiness probe: database reachable, schema
+`await funduq.health()` is the readiness probe: database reachable, schema
 at the expected revision, dispatch loop alive.
 
 ## Starting a run
 
 ```python
-handle = await souk.start_run(agent, run_input, thread_id=None, metadata=None)
+handle = await funduq.start_run(agent, run_input, thread_id=None, metadata=None)
 ```
 
 `agent` is an `AgentRef` — a `(provider_key, name)` pair, because a name
@@ -54,16 +54,16 @@ start result plus a broker lookup.
 ## Resuming and cancelling
 
 ```python
-handle = await souk.resume_run(run_id, run_input, metadata=None)
+handle = await funduq.resume_run(run_id, run_input, metadata=None)
 ```
 
 A resumed run **keeps its id**. It is the same run being invoked again
 with the caller's answer, not a successor — which is why an A2A task id
 stays valid across a pause. An unknown run id raises `LookupError`.
 
-`souk.cancel_run(run_id)` requests a cancel. It is synchronous and
+`funduq.cancel_run(run_id)` requests a cancel. It is synchronous and
 returns whether the request was passed on, not whether the run stopped —
-souk asks, and records only what it then observes. See
+funduq asks, and records only what it then observes. See
 [runs and cancels are requests](../mechanisms/requests.md).
 
 ## Three ways to address a run
@@ -89,7 +89,7 @@ this process did not dispatch.
 ## Watching for change
 
 ```python
-unsubscribe = souk.on_change(callback)
+unsubscribe = funduq.on_change(callback)
 ```
 
 Three event types exist, and they are deliberately coarse:
@@ -105,7 +105,7 @@ rather than failing the operation that fired it. Keep them short.
 
 `list_agents()` and `list_llm_providers()` return what is registered,
 each entry carrying `online` — meaning a provider is serving it right
-now, which is a fact souk holds rather than an inference from a
+now, which is a fact funduq holds rather than an inference from a
 timestamp. `is_serving(agent)` answers the same question for one agent.
 Entries whose provider has not checked in within
 `stale_hidden_window_seconds` are hidden from the listings.

@@ -1,5 +1,5 @@
 {
-  "comment": "Authoritative byte-level vectors for the payloads souk verifies signatures over. souk's own test suites consume this file, so it cannot drift from the implementation; an external implementation in any language replays it: build each payload from `inputs`, assert the exact `payload_utf8` bytes, and check `signature_hex` verifies (or, since Ed25519 is deterministic, reproduce it) under the published test key. The test key is for vectors only \u2014 never accept it in a real deployment.",
+  "comment": "Authoritative byte-level vectors for the payloads funduq verifies signatures over. funduq's own test suites consume this file, so it cannot drift from the implementation; an external implementation in any language replays it: build each payload from `inputs`, assert the exact `payload_utf8` bytes, and check `signature_hex` verifies (or, since Ed25519 is deterministic, reproduce it) under the published test key. The test key is for vectors only \u2014 never accept it in a real deployment.",
   "test_key": {
     "algorithm": "Ed25519",
     "private_key_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
@@ -16,8 +16,8 @@
         "timestamp": 1755500000,
         "note": "names are sorted before joining; order in this list must not matter"
       },
-      "payload_utf8": "souk-register:summarizer,translator:1755500000",
-      "signature_hex": "7f34cb373b288ab1e3e8b1a98ecd3db86ac05b248811e9d46217bbb087e10ad61cfd9a92ec5a18798c0e2305b848f8227f16285a4d9bc9c031321999fe067904"
+      "payload_utf8": "funduq-register:summarizer,translator:1755500000",
+      "signature_hex": "60ee9ce2bac96827c83622628d2096fe1e0d2727490647f10ec8c9efce232703907beb7d211fc87710bb3226dd356d5c97eeb6817e76d8ef3db5022026d6350e"
     },
     {
       "kind": "llm-registration",
@@ -29,8 +29,8 @@
         "timestamp": 1755500000,
         "note": "names are sorted before joining; order in this list must not matter"
       },
-      "payload_utf8": "souk-register-llm:claude,gpt-4:1755500000",
-      "signature_hex": "f48f0b3c648a6246c59aa0614724755d80ca77a5b7e7578023eb560c000cb8a63b84331064508dfa6535e1521ecae19bc89634d337a1dd3a56aacc1a0bb84200"
+      "payload_utf8": "funduq-register-llm:claude,gpt-4:1755500000",
+      "signature_hex": "84fe54f7324a4deed03ad9410fde8b8580bfbdbadb604e3d7ea8e649de153b58989baac73d1f15970dd9f893fc9da808a1ad09a272f0d4037c692f7dee671700"
     },
     {
       "kind": "agent-deletion",
@@ -38,8 +38,8 @@
         "agent_name": "translator",
         "timestamp": 1755500000
       },
-      "payload_utf8": "souk-delete-agent:translator:1755500000",
-      "signature_hex": "d83f85c4c85b9ee8674bd929da745d2bdcf7075071c073b0a1c223e9560e1c729f39278d1b1913f34670cd66d79b10afb168708e402269e99b0b54330379b602"
+      "payload_utf8": "funduq-delete-agent:translator:1755500000",
+      "signature_hex": "fa0305367b9302c4b00fcc52d76f6ad62614bdbfd1b5620a8e0db84e75404f616c19e3219bc182bd2bef2b17d26e7ca19e03b306618b2d53da8c079e92bb8209"
     },
     {
       "kind": "llm-deletion",
@@ -47,8 +47,8 @@
         "name": "gpt-4",
         "timestamp": 1755500000
       },
-      "payload_utf8": "souk-delete-llm:gpt-4:1755500000",
-      "signature_hex": "172d618169c0c699a66139e52c5efc90bda814844d3e1656ea5d308bd40f454c8d0ae3626a67d776111d51cee050c06fe9db0bc4aaccf091563625c4aa0ac200"
+      "payload_utf8": "funduq-delete-llm:gpt-4:1755500000",
+      "signature_hex": "afc362ed6e38e59bc50eac5535738d8da223790531afac27e0f3f77571d7cce81641be0d16a5770759735418612925b162d79c9cdd87795157ff2b45d2183503"
     },
     {
       "kind": "kyok-call",
@@ -58,39 +58,39 @@
         "body_utf8": "{\"model\":\"gpt-4\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
         "body_sha256_hex": "aafe81911c246dac10c95e15f6e50babce5f562d691953e0185c372e973940e1"
       },
-      "payload_utf8": "souk-kyok-call:bearer-token-abc:1755500000:aafe81911c246dac10c95e15f6e50babce5f562d691953e0185c372e973940e1",
-      "signature_hex": "e8d7f35d277f5fbd0ba2d631039c09cca3b9e3af479f29ea760be6b8188755fc4313766513f2669852227665217bd62655b55e69817f2cc63ad7105c32d58d0f"
+      "payload_utf8": "funduq-kyok-call:bearer-token-abc:1755500000:aafe81911c246dac10c95e15f6e50babce5f562d691953e0185c372e973940e1",
+      "signature_hex": "99d08f65fde307d001beb3ffdae7a24df033d70324e29cfabf0d177ea98e118abe6e50182223968ae733dc95fb293885f9a5639e230190ea03a42f469dcd4f05"
     },
     {
       "kind": "provider-connect",
       "inputs": {
-        "souk_public_key": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
-        "souk_nonce": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7",
+        "funduq_public_key": "d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "funduq_nonce": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7",
         "provider_nonce": "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
         "names": [
           "translator",
           "summarizer"
         ],
-        "note": "souk_public_key is the recipient — the souk key the provider pinned (empty string for a souk with no identity), so a proof cannot be relayed to a different souk; souk_nonce is chosen by the souk being connected to; names are sorted before joining"
+        "note": "funduq_public_key is the recipient \u2014 the funduq key the provider pinned (empty string for a funduq with no identity), so a proof cannot be relayed to a different funduq; funduq_nonce is chosen by the funduq being connected to; names are sorted before joining"
       },
-      "payload_utf8": "souk-connect-provider:d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9:summarizer,translator",
-      "signature_hex": "fdc0e84c7837e6aaefc70d96f7dea089b52c3e4bebc3e505be92796809270af86704cbf5faa5d6d77739302143d1d5df477ec8ffd18d834885e8016c6f20050c"
+      "payload_utf8": "funduq-connect-provider:d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9:summarizer,translator",
+      "signature_hex": "4df787e86206fecc663c4de418b302990c60bca9b907162147aa905052810a7274297517f92a3f6ca9cef8a683061aead166788383773a7582f6c5aae3c3370e"
     },
     {
-      "kind": "souk-connect",
+      "kind": "funduq-connect",
       "inputs": {
-        "souk_nonce": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7",
+        "funduq_nonce": "b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7",
         "provider_nonce": "c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
-        "note": "signed by souk's own identity key; the test key stands in for it here"
+        "note": "signed by funduq's own identity key; the test key stands in for it here"
       },
-      "payload_utf8": "souk-connect-souk:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
-      "signature_hex": "61cdcc66101b30e0a4587623fb63f54f10b05d21681e4dc151a79aa60838bb8637bbb993f1284ab6ee131ce0c794493ab30277e6ab324764fd3f337cc528be02"
+      "payload_utf8": "funduq-connect-funduq:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
+      "signature_hex": "52eb6a978325e7da8a67844eece4a801f85c0a4eaea0e692830ad277353efe64da3b8dba45e2bc10107ba3a447798144d6af606aa710e0bf15496d5781536d0e"
     }
   ],
   "wire": [
     {
       "kind": "delivered-run",
-      "note": "the frame a transport carries for an offered run: DeliveredRun.model_dump(by_alias=True); rebuild with model_validate. forwardedProps carries both souk-invented keys \u2014 caller (CallerProps; note chain may be null) and kyok (KyokForwardedProps; the token here is a fixed opaque example, real ones are minted per run) \u2014 each side's twin must validate them.",
+      "note": "the frame a transport carries for an offered run: DeliveredRun.model_dump(by_alias=True); rebuild with model_validate. forwardedProps carries both funduq-invented keys \u2014 caller (CallerProps; note chain may be null) and kyok (KyokForwardedProps; the token here is a fixed opaque example, real ones are minted per run) \u2014 each side's twin must validate them.",
       "frame": {
         "runId": "run-1",
         "agentName": "translator",
@@ -156,7 +156,7 @@
   "chains": [
     {
       "kind": "actor-chain",
-      "note": "a two-hop actor chain both verifiers (souk.identity.verify_actor_chain and souk_provider_sdk.verify_chain) must accept, yielding exactly this subject and these actors in order. exp is far-future so the vector stays valid; iat is fixed; EdDSA is deterministic, so an implementation with the second key can reproduce the hops byte-for-byte. Hop keys: a5*32 (the test key) and b6*32.",
+      "note": "a two-hop actor chain both verifiers (funduq.identity.verify_actor_chain and funduq_provider_sdk.verify_chain) must accept, yielding exactly this subject and these actors in order. exp is far-future so the vector stays valid; iat is fixed; EdDSA is deterministic, so an implementation with the second key can reproduce the hops byte-for-byte. Hop keys: a5*32 (the test key) and b6*32.",
       "inputs": {
         "subject": {
           "type": "user",

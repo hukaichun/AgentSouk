@@ -30,7 +30,7 @@ The likely reviewer community; this section is the handshake with it.
 
 | Entry | Supports |
 |---|---|
-| Smith, *The Contract Net Protocol* (IEEE Trans. Computers, 1980) | Ancestor of delegation/task allocation; souk's offer/decline/refuse broker is its descendant |
+| Smith, *The Contract Net Protocol* (IEEE Trans. Computers, 1980) | Ancestor of delegation/task allocation; funduq's offer/decline/refuse broker is its descendant |
 | Finin et al., *KQML* (CIKM 1994); FIPA-ACL specifications | Two generations of ACLs; the "states defined, authority not" pattern begins here |
 | Singh, commitment protocols (1998–); Yolum & Singh (AAMAS 2002) | Break/extend declarations read as commitments; Strabo's Langshaw is this school |
 | Esteva et al., electronic institutions / ISLANDER (2001–); AMELI | **Academic ancestor of mechanism/policy separation** — institution provides the rule space, participants stay autonomous |
@@ -84,7 +84,7 @@ The theorem-3 (interjection) conversation partners; richest 2026 harvest.
 
 ## §7 Federation precedents (one sentence each, from domain knowledge)
 
-SMTP, XMPP, Matrix, ActivityPub — outbound-connection + federated-identity precedents supporting the `agent@souk` direction.
+SMTP, XMPP, Matrix, ActivityPub — outbound-connection + federated-identity precedents supporting the `agent@funduq` direction.
 
 ## Pre-writing checklist
 

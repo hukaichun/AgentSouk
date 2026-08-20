@@ -1,4 +1,4 @@
-"""What two souk processes behind a load balancer actually do, today.
+"""What two funduq processes behind a load balancer actually do, today.
 
 The baseline the horizontal-scaling work is measured against (see
 design/broker-horizontal-scaling.md, kept in git history at d78d063 rather
@@ -8,10 +8,10 @@ the design says should happen instead, so the same script becomes the pass/fail
 check as each phase lands rather than being thrown away.
 
     python scripts/probes/probe_multiprocess.py
-    SOUK_DATABASE_URL=postgresql+psycopg://… python scripts/probes/probe_multiprocess.py
+    FUNDUQ_DATABASE_URL=postgresql+psycopg://… python scripts/probes/probe_multiprocess.py
 
 Two real OS processes, one database, and an LB that round-robins every call
-(scripts/probes/cluster.py). An earlier version of this probe ran two `Souk`
+(scripts/probes/cluster.py). An earlier version of this probe ran two `Funduq`
 objects in one process, which shares an event loop and therefore proves less
 than it appears to.
 """
@@ -26,8 +26,8 @@ from cluster import Cluster
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 # Only for building a real signed registration — the probe proves nothing if
-# it takes a shortcut past the identity souk checks on every claim.
-from souk.identity import registration_signing_payload
+# it takes a shortcut past the identity funduq checks on every claim.
+from funduq.identity import registration_signing_payload
 
 RUN_INPUT = {"messages": [{"id": "m1", "role": "user", "content": "hello"}], "state": {}}
 
@@ -101,7 +101,7 @@ async def scenario_new_replica_reaps(cluster: Cluster, findings: Findings) -> No
     running it never learns, so it keeps persisting events into a run the
     database says is over.
 
-    The booting node must genuinely be fresh: `Souk.start()` runs once per
+    The booting node must genuinely be fresh: `Funduq.start()` runs once per
     process by design, so calling it again on a node that already started is a
     no-op and proves nothing. (It quietly made an earlier version of this
     scenario pass.)
@@ -120,7 +120,7 @@ async def scenario_new_replica_reaps(cluster: Cluster, findings: Findings) -> No
     await asyncio.sleep(0.3)
 
     cluster.spawn("c")
-    reaped = await cluster.call({"op": "souk_start"}, node="c")
+    reaped = await cluster.call({"op": "funduq_start"}, node="c")
     record = await cluster.call({"op": "get_run", "run_id": run["run_id"]}, node="c")
     still_dispatching = run["run_id"] in await cluster.call({"op": "active_runs"}, node="a")
 
@@ -152,7 +152,7 @@ async def scenario_new_replica_reaps(cluster: Cluster, findings: Findings) -> No
 
 
 async def scenario_report_to_wrong_node(cluster: Cluster, findings: Findings) -> None:
-    """A worker reconnects and its next call lands on the other node. souk
+    """A worker reconnects and its next call lands on the other node. funduq
     answers False and nothing is persisted — and the worker, which pushed and
     moved on, never finds out.
     """
@@ -263,13 +263,13 @@ async def scenario_owner_dies(cluster: Cluster, findings: Findings) -> None:
 
 async def main() -> int:
     findings = Findings()
-    database_url = os.environ.get("SOUK_DATABASE_URL")
-    print(f"two souk processes, one database ({(database_url or 'sqlite, throwaway file').split('://')[0]})")
+    database_url = os.environ.get("FUNDUQ_DATABASE_URL")
+    print(f"two funduq processes, one database ({(database_url or 'sqlite, throwaway file').split('://')[0]})")
     print("every call is round-robined unless a scenario names a node\n")
 
     async with Cluster(nodes=["a", "b"], database_url=database_url) as cluster:
-        await cluster.call({"op": "souk_start"}, node="a")
-        await cluster.call({"op": "souk_start"}, node="b")
+        await cluster.call({"op": "funduq_start"}, node="a")
+        await cluster.call({"op": "funduq_start"}, node="b")
         await scenario_cross_node_claim(cluster, findings)
         await scenario_new_replica_reaps(cluster, findings)
         await scenario_report_to_wrong_node(cluster, findings)

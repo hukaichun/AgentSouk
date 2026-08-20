@@ -1,4 +1,4 @@
-# Working on souk
+# Working on funduq
 
 Notes that were expensive to learn. Everything here comes from a mistake
 actually made in this repo, not from general principle.
@@ -40,10 +40,10 @@ times over.
 - `docker compose up` didn't start, a provider failure reached callers as an
   empty 200, and A2A answered `-32601` to every spec-current client. All
   three were live the whole time 204 tests were green — see Testing below
-- souk's own logging was disabled for the entire test session, and had been
+- funduq's own logging was disabled for the entire test session, and had been
   for a long time. `alembic/env.py` calls `fileConfig`, whose default is
-  `disable_existing_loggers=True`; conftest migrates after importing souk, so
-  every `souk.*` logger created by then was switched off. Found because a
+  `disable_existing_loggers=True`; conftest migrates after importing funduq, so
+  every `funduq.*` logger created by then was switched off. Found because a
   test asserting a logged warning failed while a throwaway script proved the
   code logged it — reading the code would never have found this
 
@@ -53,26 +53,26 @@ transport-specific", write eight lines that prove it instead.
 ## Testing
 
 - Run the suite on **both** backends. SQLite is the default;
-  `SOUK_DATABASE_URL=postgresql+psycopg://…` for the other. A throwaway
+  `FUNDUQ_DATABASE_URL=postgresql+psycopg://…` for the other. A throwaway
   Postgres container is enough. Dialect bugs only appear on one side.
 - **A green suite does not mean the app starts.** The lesson came from the
-  serving layer (now the AgentSoukServer repo): nothing imported its
+  serving layer (now the funduq-server repo): nothing imported its
   `server.py` at test time, and a rename sweep once left an import there
   that doesn't even parse, with 167 tests passing. The app-builds probe
   lives in that repo's CI now; the lesson applies to any bootstrap no test
   imports.
 - `tests/test_core_is_network_free.py` is a hard constraint, not a
   suggestion. If it fails, the fix is almost never to widen its allow-list.
-- **Every test provider is a stub, so nothing here proves souk works.** The
+- **Every test provider is a stub, so nothing here proves funduq works.** The
   suite has never called a model. The check that does is the demo stack —
   `docker compose up` with a real key in `.env` — which now lives in
-  AgentSoukServer (this repo's compose carries only a Postgres); the first
+  funduq-server (this repo's compose carries only a Postgres); the first
   time it was run it found three defects in a row: the stack wouldn't start
   (host `.venv` copied into the image, so `uv` re-downloaded everything at
   container start), a failing provider reached callers as a 200 with zero
   events, and A2A only answered to method names the spec had renamed. Run
   it from there after touching the wire.
-- **A protocol souk hand-writes will silently rot, and reading the package
+- **A protocol funduq hand-writes will silently rot, and reading the package
   is not enough on its own — check *which version* you are reading.** A2A had
   moved twice; the first fix landed on v0.3 because its shapes were read out
   of a module called `a2a.compat.v0_3` without asking what it was
@@ -93,16 +93,16 @@ These are load-bearing; breaking one has caused a real bug here.
   and `AgentSession` until the transport changed and every one of those
   sentences became a lie. The contract is `claim_work` / `report_event` /
   `finish_run` plus a cancel notification; a transport frames those.
-- **souk never decides on a provider's behalf.** It can *ask* an agent to
-  stop; it cannot make it. Never record an outcome souk hasn't observed —
+- **funduq never decides on a provider's behalf.** It can *ask* an agent to
+  stop; it cannot make it. Never record an outcome funduq hasn't observed —
   recording `cancelled` at request time was a lie the run's own output could
   contradict.
 - **In-process is not trusted.** Sharing a process is not a reason to skip
   registration, identity, or liveness. Any shortcut for in-process that a
   remote provider doesn't get is a bug in the making.
 - **Don't force protocol deviations.** A standard AG-UI or A2A client must
-  work unmodified. If souk seems to need a new field or endpoint, check
-  whether the protocol already has one — see `souk-no-forced-protocol-deviation`.
+  work unmodified. If funduq seems to need a new field or endpoint, check
+  whether the protocol already has one — see `funduq-no-forced-protocol-deviation`.
 
 ## Where the design lives
 
