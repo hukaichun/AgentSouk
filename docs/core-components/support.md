@@ -94,30 +94,30 @@ prove itself never learns whether a name is registered.
 
 ## Starting and stopping
 
-`Funduq.start()` runs once, and it does two things a restart needs. It
-fails the runs a previous process left `queued` or `running`, and it
-re-acquires the thread gate for every run left `input-required` — a
-paused question survives a restart, so the turn it is holding has to be
-re-taken, or a queued sibling would overtake an unanswered question.
-A second call returns immediately, because a second pass cannot reap
-runs queued after the first. It is a guard, not a permanent latch:
-`aclose()` clears it, so a closed funduq can be started again.
+`Funduq.start()` runs once, and it does the one thing a restart needs:
+it fails the runs a previous process left `queued` or `running` (a
+paused `input-required` run survives untouched — it is waiting on a
+caller, not on dispatch state). A second call returns immediately,
+because a second pass cannot reap runs queued after the first. It is a
+guard, not a permanent latch: `aclose()` clears it, so a closed funduq
+can be started again.
 
-`mark_run_status` is the single funnel for every status change, and it
-now does three things: it writes through the repository, releases the
-thread gate when the status is terminal, and fires `RunStatusChanged`.
-The gate release is why the funnel matters more than it used to — a
-status written around it would strand a thread, not just a
-notification. It is enforced rather than asked for: a test walks the AST
-of every module in the package except the repository and the funnel
-itself, and fails on any direct call to the repository's
-`mark_run_status`.
+`mark_run_status` is the single funnel for every status change, and the
+status machine lives in it: the repository's legal-transition table
+rides in the UPDATE's own WHERE clause, so a write from a state the new
+status can't legally follow matches zero rows — the database arbitrates
+racing writers, in one process or many. A refused transition is logged,
+returns False, and fires nothing; `RunStatusChanged` fires only for the
+transition that actually won the row. The funnel is enforced rather
+than asked for: a test walks the AST of every module in the package
+except the repository and the funnel itself, and fails on any direct
+call to the repository's `mark_run_status`.
 
-One nuance worth knowing before you build on the hook: writing a status
-equal to the one already stored still fires an event. Detaching
-something not attached fires nothing. Subscribers are called
-synchronously, before the causing call returns, and an exception one
-raises is logged and swallowed.
+One nuance worth knowing before you build on the hook: since only a
+winning transition fires, a repeated or illegal write is silent to
+subscribers. Detaching something not attached fires nothing.
+Subscribers are called synchronously, before the causing call returns,
+and an exception one raises is logged and swallowed.
 
 ## Design records
 

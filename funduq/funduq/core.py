@@ -456,8 +456,6 @@ class Funduq:
         self._started = True
         async with self.session() as session:
             orphaned = await repo.fail_orphaned_runs(session)
-            for paused in await repo.get_paused_runs(session):
-                self.broker.hold_thread(paused["thread_id"], paused["run_id"])
         for run_id in orphaned:
             await close_with_terminal_event(self, run_id, "orphaned_by_funduq_restart")
         if orphaned:
@@ -781,11 +779,14 @@ class Funduq:
 
     async def mark_run_status(
         self, session: AsyncSession, run_id: str, status: str, metadata: dict[str, Any] | None = None
-    ) -> None:
-        await repo.mark_run_status(session, run_id, status, metadata=metadata)
-        if status in ("completed", "failed", "cancelled"):
-            self.broker.release_thread(run_id)
-        self._notify_change(RunStatusChanged(run_id=run_id, status=status))
+    ) -> bool:
+        """Applies the status transition (see `repo.LEGAL_STATUS_TRANSITIONS`) and
+        notifies change subscribers only when it actually applied. Returns whether
+        it did — a refused transition means another, legal one won the row."""
+        applied = await repo.mark_run_status(session, run_id, status, metadata=metadata)
+        if applied:
+            self._notify_change(RunStatusChanged(run_id=run_id, status=status))
+        return applied
 
     async def list_agents(self) -> list[AgentSummary]:
         """List registered agents with `online` set to whether a provider is currently serving each."""
@@ -890,7 +891,6 @@ class Funduq:
         input_json: dict[str, Any],
         protocol: str,
         seq: int = 0,
-        addressed_run_id: str | None = None,
     ) -> RunSnapshot:
         return self.broker.enqueue_run(
             run_id,
@@ -900,7 +900,6 @@ class Funduq:
             protocol,
             make_handlers(self),
             seq=seq,
-            addressed_run_id=addressed_run_id,
         )
 
     async def start_run(

@@ -14,7 +14,7 @@ from funduq import repo
 from funduq.agui import build_run_agent_input
 from funduq.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound, RunNotFound
 from funduq.kyok import KyokBinding, parse_kyok_opt_in, strip_kyok_context
-from funduq.props import build_forwarded_props
+from funduq.props import ADDRESSED_RUN_METADATA_KEY, build_forwarded_props
 from funduq.models import AgentRef
 from funduq.protocols.a2a_translate import (
     a2a_message_to_agui_messages,
@@ -297,8 +297,9 @@ class A2AAdapter:
         """Resolves `params` (a `contextId`/`taskId`/message envelope) to a thread and run,
         creating or reopening whichever is needed, and returns `(run_id, thread_id, is_live)`.
         A message addressed (via `taskId`) to the thread's paused `input-required` task resumes
-        it; any other message becomes a new queued run — dispatched one per thread at a time —
-        so a message sent while a run is active is queued, never dropped. `is_live` is False
+        it; any other message becomes a new queued run, offered to the provider in arrival
+        order — a message sent while a run is active is delivered alongside it, never merged
+        or dropped; how the provider sequences its turns is the provider's own business. `is_live` is False
         only if the agent isn't currently served (in which case the run is
         recorded as failed). A `metadata.kyok` opt-in binds the run to the named LLM offering
         (raising `LlmProviderNotFound` for an unknown one), the same road AG-UI callers use.
@@ -330,20 +331,20 @@ class A2AAdapter:
             messages = a2a_message_to_agui_messages(params.get("message", {}))
             run_input = {"thread_id": thread_id, "messages": messages}
 
-            # Two lanes, one annotation. A message whose taskId names this
-            # thread's paused (input-required) task resumes that run with
-            # whatever it says — funduq never checks that it answers the
-            # question; the provider judges answer-vs-redirect from the
-            # thread's shape (the reopen is status-guarded so two concurrent
-            # resumes resolve to one; the loser lands in the queue lane
-            # like any other utterance). Every other
-            # message becomes a new queued run on the thread — and when its
-            # taskId names the thread's *running* task, the run carries that
-            # address as an annotation: the caller declared an interjection,
-            # and the broker will offer it once mid-turn, the provider's
-            # ordinary accept/decline being the whole negotiation. A declined
-            # or unannotated run waits its turn — one per thread at a time —
-            # never merged, refused, or dropped.
+            # Two lanes. A message whose taskId names this thread's paused
+            # (input-required) task resumes that run with whatever it says —
+            # funduq never checks that it answers the question; the provider
+            # judges answer-vs-redirect from the thread's shape (the reopen
+            # is status-guarded so two concurrent resumes resolve to one;
+            # the loser lands in the queue lane like any other utterance).
+            # Every other message becomes a new queued run on the thread.
+            # taskId carries no further meaning here — v1.0 defines none for
+            # a task that isn't asking, and funduq doesn't invent one.
+            # Asking to join a turn already in flight is a different verb and
+            # an explicit one: the interjection extension
+            # (ADDRESSED_RUN_METADATA_KEY, copied into forwardedProps below).
+            # Intent is declared by the caller, never inferred from the
+            # target's state.
             task_id = params.get("taskId")
             addressed = await repo.get_run(session, task_id) if task_id else None
             reopened = (
@@ -358,16 +359,6 @@ class A2AAdapter:
                     expected_status="input-required",
                 )
             )
-            addressed_run_id = (
-                task_id
-                if (
-                    not reopened
-                    and addressed is not None
-                    and addressed.thread_id == thread_id
-                    and addressed.status == "running"
-                )
-                else None
-            )
             if reopened:
                 run_id = task_id
                 starting_seq = await repo.get_last_event_seq(session, run_id)
@@ -375,13 +366,8 @@ class A2AAdapter:
                 await repo.ensure_queue_room(
                     session, thread_id, funduq.settings.thread_queue_limit
                 )
-                run_metadata = (
-                    {**metadata, "addressedRunId": addressed_run_id}
-                    if addressed_run_id is not None
-                    else metadata
-                )
                 created = await repo.create_run(
-                    session, thread_id, agent, "a2a", run_input, metadata=run_metadata
+                    session, thread_id, agent, "a2a", run_input, metadata=metadata
                 )
                 run_id = created["run_id"]
                 starting_seq = 0
@@ -410,6 +396,14 @@ class A2AAdapter:
                 verified_subject,
                 verified_actors,
                 actor_chain,
+                # The extension convention puts the key in the Message's own
+                # metadata map; the request-level map is accepted too.
+                addressed_run_id=(
+                    (params.get("message", {}).get("metadata") or {}).get(
+                        ADDRESSED_RUN_METADATA_KEY
+                    )
+                    or metadata.get(ADDRESSED_RUN_METADATA_KEY)
+                ),
             )
 
             try:
@@ -426,15 +420,7 @@ class A2AAdapter:
                 run_id,
                 KyokBinding(llm_provider=kyok_ref, context=kyok.context, actor_chain=actor_chain),
             )
-        funduq.enqueue_run(
-            run_id,
-            agent,
-            thread_id,
-            agui_input,
-            "a2a",
-            seq=starting_seq,
-            addressed_run_id=addressed_run_id,
-        )
+        funduq.enqueue_run(run_id, agent, thread_id, agui_input, "a2a", seq=starting_seq)
         return run_id, thread_id, True
 
 

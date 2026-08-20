@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -21,6 +22,8 @@ from funduq.schema import (
     thread_messages,
     threads,
 )
+
+logger = logging.getLogger("funduq.repo")
 
 
 ACTIVE_RUN_STATUSES = ["queued", "running", "cancelling", "input-required"]
@@ -594,15 +597,44 @@ async def reopen_run(
     return result.rowcount > 0
 
 
+# The run-status state machine: which statuses each `mark_run_status` write
+# may legally come from. The transition itself is the guard — a conditional
+# UPDATE whose WHERE carries the legal predecessors — so ordering holds under
+# any concurrency, in-process or across processes: of two racing writers, the
+# database picks one winner and the loser's update matches zero rows.
+# "queued" is deliberately absent: a run is born queued (`create_run`) or put
+# back by `reopen_run`, never by this function.
+LEGAL_STATUS_TRANSITIONS: dict[str, tuple[str, ...]] = {
+    "running": ("queued",),
+    "input-required": ("running", "cancelling"),
+    "cancelling": ("running",),
+    "completed": ("running", "cancelling"),
+    "cancelled": ("queued", "running", "cancelling"),
+    "failed": ("queued", "running", "cancelling", "input-required"),
+}
+
+
 async def mark_run_status(
     session: AsyncSession, run_id: str, status: str, metadata: dict[str, Any] | None = None
-) -> None:
-    """Sets a run's status (any string, e.g. "input-required"), merging in `metadata` if given.
+) -> bool:
+    """Moves a run to `status` if its current status legally precedes it
+    (`LEGAL_STATUS_TRANSITIONS`), merging in `metadata` if given, and returns
+    whether the transition applied. A refused transition — the run already
+    moved somewhere the requested status can't follow, e.g. a late `failed`
+    after `completed` — changes nothing, is logged, and returns False: the
+    record keeps the transition that actually won. Raises `RunRowMissing` if
+    `run_id` doesn't match any row, and `ValueError` for a status this
+    function never writes.
 
     Setting "running", "completed", "failed", or "cancelled" also stamps
-    the matching `started_at`/`completed_at` column. Raises
-    `RunRowMissing` if `run_id` doesn't match any row.
+    the matching `started_at`/`completed_at` column.
     """
+    legal_from = LEGAL_STATUS_TRANSITIONS.get(status)
+    if legal_from is None:
+        raise ValueError(
+            f"run {run_id}: '{status}' is not a status mark_run_status may write — "
+            "runs are created 'queued' and reopened via reopen_run"
+        )
     timestamp_col = {
         "running": "started_at",
         "completed": "completed_at",
@@ -616,14 +648,28 @@ async def mark_run_status(
     if metadata:
         values["metadata"] = await _merge_run_metadata(session, run_id, metadata)
     result = await session.execute(
-        update(runs).where(runs.c.run_id == str(run_id)).values(**values)
+        update(runs)
+        .where(runs.c.run_id == str(run_id), runs.c.status.in_(legal_from))
+        .values(**values)
     )
     await session.commit()
-    if result.rowcount == 0:
+    if result.rowcount > 0:
+        return True
+    current = (
+        await session.execute(select(runs.c.status).where(runs.c.run_id == str(run_id)))
+    ).scalar_one_or_none()
+    if current is None:
         raise RunRowMissing(
             f"run {run_id}: no such run in the database — funduq is dispatching a run "
             "this database does not have"
         )
+    logger.warning(
+        "run %s: refused illegal status transition %r -> %r; the recorded status stands",
+        run_id,
+        current,
+        status,
+    )
+    return False
 
 
 async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
@@ -689,17 +735,6 @@ async def get_paused_run_for_thread(session: AsyncSession, thread_id: str) -> di
         )
     ).mappings().first()
     return dict(row) if row else None
-
-
-async def get_paused_runs(session: AsyncSession) -> list[dict[str, Any]]:
-    """Every `input-required` run's (run_id, thread_id), for re-seeding the
-    broker's thread gate at startup."""
-    rows = (
-        await session.execute(
-            select(runs.c.run_id, runs.c.thread_id).where(runs.c.status == "input-required")
-        )
-    ).all()
-    return [{"run_id": row.run_id, "thread_id": row.thread_id} for row in rows]
 
 
 async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:

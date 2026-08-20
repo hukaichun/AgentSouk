@@ -11,6 +11,8 @@ from funduq.schema import agents, runs
 async def _make_paused_run(session, agent, thread_id, seconds_stale: int) -> str:
     created = await repo.create_run(session, thread_id, agent, "ag-ui", {"messages": []})
     run_id = created["run_id"]
+    # The legal road to a pause: a run is claimed (running) before it can ask.
+    await repo.mark_run_status(session, run_id, "running")
     await repo.mark_run_status(session, run_id, "input-required", metadata={"interrupts": []})
     await session.execute(
         update(runs)

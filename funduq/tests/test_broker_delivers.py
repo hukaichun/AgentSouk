@@ -349,122 +349,56 @@ async def test_a_provider_returning_within_the_window_keeps_the_run():
         b.stop()
 
 
-async def test_two_runs_on_one_thread_go_one_at_a_time(broker):
+async def test_a_threads_runs_are_offered_in_arrival_order_without_waiting(broker):
+    """funduq imposes no turn-taking: a thread's second utterance is offered
+    while the first is still in flight — whether to run, hold, or absorb it
+    is the provider's decision, not the relay's."""
+    provider = Recording()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_1", thread_id="thread_shared")
+    _enqueue(broker, "run_2", thread_id="thread_shared")
+
+    await _until(lambda: provider.offered == ["run_1", "run_2"])
+    assert broker.get("run_1").is_claimed and broker.get("run_2").is_claimed
+
+
+async def test_a_declined_head_is_not_overtaken_by_its_sibling():
+    """Arrival order is the one sequencing funduq does own: while the head of
+    the queue stands declined, a later utterance of the same thread must not
+    reach the provider first. (A decline is re-offered on the next sweep
+    wakeup, hence the short unserved timeout here.)"""
+    b = RunBroker(deliver_timeout_seconds=0.05, unserved_timeout_seconds=0.1)
+    b.start()
+    try:
+        provider = Recording(answers=[True, False, False, True, True])
+        b.register_provider({AGENT: provider})
+        _enqueue(b, "run_1", thread_id="thread_shared")
+        _enqueue(b, "run_2", thread_id="thread_shared")
+        _enqueue(b, "run_3", thread_id="thread_shared")
+
+        await _until(lambda: "run_3" in provider.offered, timeout=3.0)
+        first_run_3 = provider.offered.index("run_3")
+        assert provider.offered.index("run_2") < first_run_3, "run_3 overtook run_2"
+        assert provider.offered[:first_run_3].count("run_2") >= 3, (
+            "run_3 was offered before its declined sibling was finally accepted"
+        )
+    finally:
+        b.stop()
+
+
+async def test_a_paused_run_does_not_hold_back_its_siblings(broker):
+    """A pause is between the provider and the asker; the thread's next
+    utterance still reaches the provider, which knows its own paused run and
+    decides how to sequence."""
     from funduq.broker import FinishStream
 
     provider = Recording()
     broker.register_provider({AGENT: provider})
-    _enqueue(broker, "run_1", thread_id="thread_shared")
-    _enqueue(broker, "run_2", thread_id="thread_shared")
-
+    _enqueue(broker, "run_1", thread_id="t-paused")
     await _until(lambda: provider.offered == ["run_1"])
-    await asyncio.sleep(0.05)
-    assert provider.offered == ["run_1"], "a thread's second run overtook its first"
-
-    broker.push("run_1", FinishStream())
-    await _until(lambda: provider.offered == ["run_1", "run_2"], timeout=2.0)
-
-
-async def test_a_held_thread_does_not_block_other_threads(broker):
-    provider = Recording()
-    broker.register_provider({AGENT: provider})
-    _enqueue(broker, "run_1", thread_id="thread_shared")
-    _enqueue(broker, "run_2", thread_id="thread_shared")
-    _enqueue(broker, "run_3", thread_id="thread_other")
-
-    await _until(lambda: set(provider.offered) == {"run_1", "run_3"})
-    await asyncio.sleep(0.05)
-    assert "run_2" not in provider.offered
-
-
-async def test_a_paused_run_keeps_its_thread_until_released(broker):
-    from funduq.broker import FinishStream
-
-    provider = Recording()
-    broker.register_provider({AGENT: provider})
-    _enqueue(broker, "run_1", thread_id="thread_shared")
-    _enqueue(broker, "run_2", thread_id="thread_shared")
-    await _until(lambda: provider.offered == ["run_1"])
-
     broker._runs["run_1"].pause_payload = {"interrupts": []}
     broker.push("run_1", FinishStream())
     await _until(lambda: broker.get("run_1") is None, timeout=2.0)
-    await asyncio.sleep(0.05)
-    assert provider.offered == ["run_1"], "a paused run's thread was given away before the answer"
 
-    broker.release_thread("run_1")
+    _enqueue(broker, "run_2", thread_id="t-paused")
     await _until(lambda: provider.offered == ["run_1", "run_2"], timeout=2.0)
-
-
-async def test_an_addressed_run_is_offered_mid_turn_and_does_not_take_the_gate(broker):
-    from funduq.broker import FinishStream
-
-    provider = Recording()
-    broker.register_provider({AGENT: provider})
-    _enqueue(broker, "run_x", thread_id="t-shared")
-    await _until(lambda: provider.offered == ["run_x"])
-
-    broker.enqueue_run(
-        "run_r", AGENT, "t-shared", {"messages": []}, "ag-ui", {}, addressed_run_id="run_x"
-    )
-    await _until(lambda: provider.offered == ["run_x", "run_r"])
-
-    _enqueue(broker, "run_q", thread_id="t-shared")
-    await asyncio.sleep(0.05)
-    assert "run_q" not in provider.offered, "a plain sibling must stay behind the gate"
-
-    broker.push("run_r", FinishStream())
-    await _until(lambda: broker.get("run_r") is None, timeout=2.0)
-    await asyncio.sleep(0.05)
-    assert "run_q" not in provider.offered, "the interjection's end must not open the holder's gate"
-
-    broker.push("run_x", FinishStream())
-    await _until(lambda: "run_q" in provider.offered, timeout=2.0)
-
-
-async def test_a_declined_mid_turn_offer_falls_back_to_a_plain_next_turn(broker):
-    from funduq.broker import FinishStream
-
-    envelopes: list = []
-
-    class Choosy(Recording):
-        async def deliver(self, run) -> bool:
-            envelopes.append(dict(run.metadata))
-            self.offered.append(run.run_id)
-            return not run.metadata.get("addressedRunId")
-
-    provider = Choosy()
-    broker.register_provider({AGENT: provider})
-    _enqueue(broker, "run_x", thread_id="t-fallback")
-    await _until(lambda: provider.offered == ["run_x"])
-
-    broker.enqueue_run(
-        "run_r", AGENT, "t-fallback", {"messages": []}, "ag-ui", {}, addressed_run_id="run_x"
-    )
-    await _until(lambda: provider.offered == ["run_x", "run_r"])
-    assert envelopes[1] == {"addressedRunId": "run_x"}, "the mid-turn offer names its address"
-
-    await asyncio.sleep(0.1)
-    assert provider.offered == ["run_x", "run_r"], "one shot only — no mid-turn re-offer"
-
-    broker.push("run_x", FinishStream())
-    await _until(lambda: provider.offered == ["run_x", "run_r", "run_r"], timeout=2.0)
-    assert envelopes[2] == {}, "behind the gate it is a plain next turn, annotation gone"
-
-
-async def test_a_run_addressed_to_a_paused_holder_waits_like_anyone_else(broker):
-    from funduq.broker import FinishStream
-
-    provider = Recording()
-    broker.register_provider({AGENT: provider})
-    _enqueue(broker, "run_x", thread_id="t-paused")
-    await _until(lambda: provider.offered == ["run_x"])
-    broker._runs["run_x"].pause_payload = {"interrupts": []}
-    broker.push("run_x", FinishStream())
-    await _until(lambda: broker.get("run_x") is None, timeout=2.0)
-
-    broker.enqueue_run(
-        "run_r", AGENT, "t-paused", {"messages": []}, "ag-ui", {}, addressed_run_id="run_x"
-    )
-    await asyncio.sleep(0.1)
-    assert provider.offered == ["run_x"], "a paused target has nothing in flight to absorb into"

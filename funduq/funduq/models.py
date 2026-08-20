@@ -36,10 +36,10 @@ class ClaimedRun(BaseModel):
     agent: AgentRef
     thread_id: str
     run_input: dict[str, Any]
-    # Part of the delivered-run wire frame (default empty). funduq's one key so
-    # far: "addressedRunId" — the in-flight run this utterance was addressed
-    # to, present only on a mid-turn offer. A provider that ignores it and
-    # declines gets the same run again as an ordinary next turn.
+    # Part of the delivered-run wire frame; funduq currently writes no keys
+    # into it (a caller's addressing rides inside the run input itself, as the
+    # message's own A2A `taskId`). The slot stays in the contract for
+    # envelope-level data a future dispatch mechanism may need.
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

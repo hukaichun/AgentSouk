@@ -1,10 +1,11 @@
 """Caller metadata cannot wear funduq's handwriting.
 
 funduq writes a small set of keys into a run's metadata record
-(`verifiedActorChain`, `addressedRunId`, `interrupts`, `failureReason`).
-A caller-supplied value under any of them is stripped at the doors —
-otherwise a caller could plant a forged verification summary, or a fake
-failure reason, that later readers would take for funduq's own record.
+(`verifiedActorChain`, `interrupts`, `failureReason`). A caller-supplied
+value under any of them is stripped at the doors — otherwise a caller could
+plant a forged verification summary, or a fake failure reason, that later
+readers would take for funduq's own record. Keys funduq does not write are
+plain caller data and pass through untouched.
 """
 
 from __future__ import annotations
@@ -57,7 +58,7 @@ async def test_a_real_actor_chain_still_earns_its_summary(funduq, serve, new_ide
     assert stored.metadata["verifiedActorChain"]["subject"] == {"userId": "u-1"}
 
 
-async def test_a_caller_supplied_address_annotation_is_stripped(funduq, serve):
+async def test_only_funduq_written_keys_are_stripped(funduq, serve):
     served = await serve(EchoAgent(), "unannotated")
     agent = served.agents["unannotated"]
 
@@ -69,5 +70,7 @@ async def test_a_caller_supplied_address_annotation_is_stripped(funduq, serve):
 
     async with funduq.session() as session:
         stored = await repo.get_run(session, sent["id"])
-    assert "addressedRunId" not in stored.metadata
-    assert "failureReason" not in stored.metadata
+    assert "failureReason" not in stored.metadata, "funduq writes this key; forgery is stripped"
+    assert stored.metadata.get("addressedRunId") == "run_i_made_up", (
+        "funduq does not write this key into run records, so it is plain caller data"
+    )

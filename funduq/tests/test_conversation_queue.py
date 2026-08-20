@@ -1,10 +1,14 @@
-"""A message sent while a run is active is queued and handled next — never dropped.
+"""A message sent while a run is active is delivered alongside it — never dropped.
 
 The A2A door used to answer a mid-run message with the in-flight task and
-silently discard the message. These tests pin the two lanes that replaced
-that: an ordinary utterance becomes a new queued run dispatched after the
-active one (one turn per thread at a time), and a message addressed via
-`taskId` to the thread's paused `input-required` task resumes that task.
+silently discard the message. These tests pin what replaced that: every
+utterance becomes its own run, offered to the provider in arrival order —
+funduq imposes no turn-taking; sequencing a conversation is the provider's
+own decision. Two special lanes ride on explicit declarations: a message
+whose `taskId` names the thread's paused `input-required` task resumes that
+task (the reply lane), and a run declaring `addressedRunId` (the
+interjection extension) asks to join a turn in flight — intent the caller
+states, never inferred from the target's state, judged by the agent alone.
 """
 
 from __future__ import annotations
@@ -96,15 +100,10 @@ async def test_a_message_sent_mid_run_is_queued_not_dropped(funduq, serve):
         )
     )
 
-    async def _second_is_queued() -> bool:
-        async with funduq.session() as session:
-            messages = await repo.get_thread_messages(session, thread_id)
-            snapshot = await repo.get_thread_snapshot(session, thread_id)
-        texts = [m.get("content") for m in messages]
-        return "one more thing" in texts and snapshot["active_run"] is not None
-
-    await _until(_second_is_queued)
-    assert len(provider.runs) == 1, "the second message must wait its turn, not join mid-run"
+    # No turn-taking: the second utterance reaches the provider while the
+    # first is still open. It is its own run — not merged — and what to do
+    # with the overlap is the provider's decision.
+    await _until(lambda: len(provider.runs) == 2)
 
     provider.release.set()
     first_result, second_result = await asyncio.gather(first, second)
@@ -138,7 +137,7 @@ async def test_a_reply_addressed_to_the_paused_task_resumes_it(funduq, serve):
     assert provider.rounds[1].run_id == provider.rounds[0].run_id
 
 
-async def test_an_unaddressed_message_waits_for_the_paused_task(funduq, serve):
+async def test_an_unaddressed_message_does_not_resume_the_paused_task(funduq, serve):
     provider = AskingAgent()
     served = await serve(provider, "patient")
     agent = served.agents["patient"]
@@ -156,23 +155,21 @@ async def test_an_unaddressed_message_waits_for_the_paused_task(funduq, serve):
         )
     )
 
-    async def _it_is_queued() -> bool:
-        async with funduq.session() as session:
-            latest_active = await repo.get_active_run_for_thread(session, thread_id)
-        return latest_active is not None and latest_active["status"] == "queued"
+    # The unaddressed message does not resume the paused task — it is its
+    # own run, delivered and answered while the question stays open.
+    third = await unaddressed
+    assert third["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert third["result"]["id"] != task_id
 
-    await _until(_it_is_queued)
-    await asyncio.sleep(0.1)
-    assert len(provider.rounds) == 1, "the paused question holds the thread; nothing overtakes it"
+    async with funduq.session() as session:
+        paused = await repo.get_run(session, task_id)
+    assert paused.status == "input-required", "only an addressed reply may resume the question"
 
     reply = await _rpc(
         funduq, agent, "SendMessage", {"message": {**_message("the answer"), "taskId": task_id}}
     )
+    assert reply["result"]["id"] == task_id
     assert reply["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
-
-    third = await unaddressed
-    assert third["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
-    assert third["result"]["id"] != task_id
     assert len(provider.rounds) == 3
 
 
@@ -193,26 +190,7 @@ async def test_reopen_run_refuses_a_run_that_is_not_in_the_expected_status(sessi
     assert stored.status == "queued"
 
 
-async def test_start_reseeds_the_thread_gate_from_paused_runs(settings, session, new_identity):
-    from funduq.core import Funduq
-
-    identity = new_identity()
-    registered = await repo.register_agents(session, identity.public_key, [{"name": "s"}])
-    agent = registered["s"]
-    thread_id = await repo.create_thread(session, agent)
-    created = await repo.create_run(session, thread_id, agent, "ag-ui", {})
-    await session.commit()
-    await repo.mark_run_status(session, created["run_id"], "input-required")
-
-    reborn = Funduq(settings)
-    try:
-        await reborn.start()
-        assert reborn.broker._thread_holder.get(thread_id) == created["run_id"]
-    finally:
-        await reborn.aclose()
-
-
-async def test_an_agui_run_queued_behind_another_flows_when_its_turn_comes(funduq, serve):
+async def test_two_agui_runs_on_one_thread_flow_side_by_side(funduq, serve):
     from ag_ui.core import RunAgentInput, UserMessage
 
     from funduq.protocols.agui import AGUIAdapter
@@ -242,9 +220,9 @@ async def test_an_agui_run_queued_behind_another_flows_when_its_turn_comes(fundu
 
     second = await adapter.run(agent, _body(first.thread_id, "one more"))
     second_events = asyncio.create_task(_drain(second))
-    await asyncio.sleep(0.1)
-    assert len(provider.runs) == 1, "the queued run must not start while the first is in flight"
-    assert not second_events.done(), "its stream stays open, silent until its turn"
+    # No turn-taking: the second run reaches the provider while the first is
+    # still open; both streams are live.
+    await _until(lambda: len(provider.runs) == 2)
 
     provider.release.set()
     assert {e["type"] for e in await first_events} >= {"RUN_STARTED", "RUN_FINISHED"}
@@ -275,7 +253,10 @@ async def tight(settings):
         registration = await funduq.register_agents(
             identity.public_key, signature, timestamp, [{"name": name}]
         )
-        runtime = ProviderRuntime(identity, provider)
+        # One run at a time: with the provider's capacity full, further
+        # utterances stay in funduq's own buffer — which is what these tests
+        # bound. (funduq itself imposes no turn-taking.)
+        runtime = ProviderRuntime(identity, provider, max_concurrent_runs=1)
         runtimes.append(runtime)
         runtime.start()
         await funduq.attach_provider(InProcessLink(funduq, runtime), [name])
@@ -330,8 +311,33 @@ async def test_a_full_thread_buffer_refuses_the_next_message_loudly(tight):
     assert all(r["result"]["status"]["state"] == "TASK_STATE_COMPLETED" for r in results)
 
 
+class AskThenHold:
+    """Pauses its first round on a question; later rounds hold open until `release`."""
+
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.rounds: list = []
+
+    async def run_stream(self, agent_name: str, run_input):
+        self.rounds.append(run_input)
+        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
+        yield {"type": "RUN_STARTED", **ids}
+        if len(self.rounds) == 1:
+            yield {
+                "type": "RUN_FINISHED",
+                **ids,
+                "outcome": {
+                    "type": "interrupt",
+                    "interrupts": [{"id": "int_1", "reason": "question", "message": "which?"}],
+                },
+            }
+        else:
+            await self.release.wait()
+            yield {"type": "RUN_FINISHED", **ids}
+
+
 async def test_answering_the_paused_question_is_never_refused_by_the_buffer(tight):
-    provider = AskingAgent()
+    provider = AskThenHold()
     agent = await tight.serve_one(provider, "asks")
 
     first = await _rpc(tight, agent, "SendMessage", {"message": _message("go")})
@@ -339,8 +345,14 @@ async def test_answering_the_paused_question_is_never_refused_by_the_buffer(tigh
     thread_id = first["result"]["contextId"]
     assert first["result"]["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
 
+    # A filler takes the provider's one slot and holds it; a second filler
+    # then fills the thread's whole pending buffer (limit 1).
     filler = asyncio.create_task(
         _rpc(tight, agent, "SendMessage", {"message": {**_message("filler"), "contextId": thread_id}})
+    )
+    await _until(lambda: len(provider.rounds) == 2)
+    filler_2 = asyncio.create_task(
+        _rpc(tight, agent, "SendMessage", {"message": {**_message("more filler"), "contextId": thread_id}})
     )
 
     async def _buffer_full() -> bool:
@@ -348,17 +360,34 @@ async def test_answering_the_paused_question_is_never_refused_by_the_buffer(tigh
             return await repo.count_queued_runs_for_thread(session, thread_id) == 1
 
     await _until(_buffer_full)
-    reply = await _rpc(
-        tight, agent, "SendMessage", {"message": {**_message("the answer"), "taskId": task_id}}
+
+    # The reply lane never competes for buffer room: answering the question
+    # is how the thread drains.
+    reply = asyncio.create_task(
+        _rpc(tight, agent, "SendMessage", {"message": {**_message("the answer"), "taskId": task_id}})
     )
+    async def _reopened() -> bool:
+        async with tight.session() as session:
+            stored = await repo.get_run(session, task_id)
+        return stored.status != "input-required"
 
-    assert reply["result"]["id"] == task_id
-    assert reply["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
-    third = await filler
-    assert third["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    await _until(_reopened)
+
+    provider.release.set()
+    reply_result, filler_result, filler_2_result = await asyncio.gather(reply, filler, filler_2)
+    assert reply_result["result"]["id"] == task_id
+    assert reply_result["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert filler_result["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert filler_2_result["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
 
 
-async def test_a_message_addressed_to_the_running_task_degrades_to_the_next_turn(funduq, serve):
+async def test_a_declared_interjection_reaches_the_agent_while_the_turn_is_open(funduq, serve):
+    """The interjection extension: the caller *declares* the intent to join a
+    turn in flight (never inferred from the target's state), funduq relays it
+    as `forwardedProps.addressedRunId`, and the agent — sole holder of the
+    live truth — judges what to do with it."""
+    from funduq.props import ADDRESSED_RUN_METADATA_KEY
+
     provider = GateAgent()
     served = await serve(provider, "interject")
     agent = served.agents["interject"]
@@ -368,45 +397,67 @@ async def test_a_message_addressed_to_the_running_task_degrades_to_the_next_turn
     )
     await _until(lambda: len(provider.runs) == 1)
     first_run_id = provider.runs[0].run_id
-
-    async def _first_is_running() -> bool:
-        async with funduq.session() as session:
-            stored = await repo.get_run(session, first_run_id)
-        return stored.status == "running"
-
-    await _until(_first_is_running)
+    thread_id = provider.runs[0].thread_id
 
     second = asyncio.create_task(
         _rpc(
             funduq,
             agent,
             "SendMessage",
-            {"message": {**_message("actually, in metric units"), "taskId": first_run_id}},
+            {
+                "message": {
+                    **_message("actually, in metric units"),
+                    "contextId": thread_id,
+                    "metadata": {ADDRESSED_RUN_METADATA_KEY: first_run_id},
+                }
+            },
         )
     )
 
-    async def _second_recorded() -> bool:
-        async with funduq.session() as session:
-            active = await repo.get_active_run_for_thread(
-                session, provider.runs[0].thread_id
-            )
-        return (
-            active is not None
-            and active["status"] == "queued"
-            and active["metadata"].get("addressedRunId") == first_run_id
-        )
-
-    await _until(_second_recorded)
-    await asyncio.sleep(0.1)
-    assert len(provider.runs) == 1, "the SDK runtime declines mid-turn offers by default"
+    # The declared interjection reaches the agent while its target is open,
+    # wearing the caller's intent.
+    await _until(lambda: len(provider.runs) == 2)
+    assert provider.runs[1].forwarded_props == {"addressedRunId": first_run_id}
 
     provider.release.set()
     first_result, second_result = await asyncio.gather(first, second)
     assert first_result["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
     assert second_result["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
-    assert second_result["result"]["id"] != first_run_id
-    assert [r.run_id for r in provider.runs][0] == first_run_id
-    assert len(provider.runs) == 2, "declined mid-turn, the message became the plain next turn"
+    assert second_result["result"]["id"] != first_run_id, "an interjection is still its own run"
+
+
+async def test_a_task_id_naming_a_running_task_declares_nothing(funduq, serve):
+    """taskId's only defined meaning at this door is the reply lane. Naming a
+    running task starts an ordinary next run on its thread — no interjection
+    is inferred, because intent is the caller's to declare, not funduq's to
+    guess from the target's state."""
+    provider = GateAgent()
+    served = await serve(provider, "literal")
+    agent = served.agents["literal"]
+
+    first = asyncio.create_task(
+        _rpc(funduq, agent, "SendMessage", {"message": _message("start")})
+    )
+    await _until(lambda: len(provider.runs) == 1)
+    first_run_id = provider.runs[0].run_id
+
+    second = asyncio.create_task(
+        _rpc(
+            funduq,
+            agent,
+            "SendMessage",
+            {"message": {**_message("and another thing"), "taskId": first_run_id}},
+        )
+    )
+    await _until(lambda: len(provider.runs) == 2)
+    assert not (provider.runs[1].forwarded_props or {}), (
+        "no declaration, no interjection — the run arrives unmarked"
+    )
+    assert provider.runs[1].thread_id == provider.runs[0].thread_id
+
+    provider.release.set()
+    results = await asyncio.gather(first, second)
+    assert {r["result"]["status"]["state"] for r in results} == {"TASK_STATE_COMPLETED"}
 
 
 async def test_addressing_the_paused_task_needs_no_answer_funduq_relays_anything(funduq, serve):

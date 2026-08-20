@@ -22,7 +22,14 @@ from funduq_provider_sdk.identity import (
     WrongFunduq,
 )
 from funduq_provider_sdk.props import CallerProps, KyokForwardedProps, VerifiedActor
-from funduq_provider_sdk.provider import AgentHandle, DeliveredRun, HandleProvider, Provider, Refusal
+from funduq_provider_sdk.provider import (
+    AgentHandle,
+    DeliveredRun,
+    HandleProvider,
+    Provider,
+    Refusal,
+    serialize_per_thread,
+)
 from funduq_provider_sdk.runtime import ProviderRuntime
 
 __all__ = [
@@ -46,6 +53,7 @@ __all__ = [
     "AgentHandle",
     "DeliveredRun",
     "Refusal",
+    "serialize_per_thread",
     "HandleProvider",
     "Provider",
     "ProviderIdentity",

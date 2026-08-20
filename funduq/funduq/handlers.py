@@ -107,8 +107,8 @@ async def _handle_finish(funduq: "Funduq", run: Run, cmd: FinishStream) -> None:
     )
 
     async with funduq.session() as session:
-        await funduq.mark_run_status(session, run.run_id, status, metadata=metadata)
-        if status in ("completed", "input-required"):
+        settled = await funduq.mark_run_status(session, run.run_id, status, metadata=metadata)
+        if settled and status in ("completed", "input-required"):
             round_events = await repo.get_run_events(session, run.run_id, since_seq=run.round_starting_seq)
             reply_messages = reduce_events_to_messages(round_events)
             if reply_messages:

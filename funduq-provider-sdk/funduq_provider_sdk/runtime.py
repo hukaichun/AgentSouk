@@ -43,15 +43,17 @@ class ProviderRuntime:
     async def deliver(self, run: DeliveredRun) -> bool:
         """Queues `run` for execution; returns False (without queuing) if not started, at `max_concurrent_runs`, or the queue is full.
 
-        A run whose `metadata` carries `addressedRunId` is a mid-turn offer:
-        the caller declared it an interjection into a run this provider has
-        in flight. This runtime has no absorption machinery yet, so it
-        declines — the decline is the whole negotiation, and funduq re-offers
-        the same run as an ordinary next turn once the addressed run ends.
-        Nothing here signals capability to anyone; the answer is the answer.
+        Every accepted run goes to the agent callable as it arrives — the
+        runtime imposes no ordering of its own. A run whose
+        `forwardedProps.addressedRunId` names another run is a declared
+        *interjection*: the caller asks to join that run's turn in flight
+        (distinct from `parentRunId`, which is plain continuation). Whether
+        and how to honour it — absorb it into the named turn, treat it as
+        the next turn, ignore it — is the agent author's decision, made in
+        the agent's own code against its own live loop.
+        `serialize_per_thread` is an off-the-shelf wrapper for authors who
+        want one-turn-at-a-time per thread.
         """
-        if run.metadata.get("addressedRunId"):
-            return False
         if not self._running:
             return False
         if self.max_concurrent_runs is not None and len(self._in_flight) >= self.max_concurrent_runs:

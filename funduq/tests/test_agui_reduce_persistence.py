@@ -13,6 +13,7 @@ async def test_a_tool_call_reply_is_persisted_as_real_thread_history_messages(se
     agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
+    await repo.mark_run_status(session, created["run_id"], "running")
     run_id = created["run_id"]
     await session.commit()
 
@@ -58,6 +59,7 @@ async def test_a_plain_text_only_reply_is_still_persisted(session, funduq, new_i
     agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
+    await repo.mark_run_status(session, created["run_id"], "running")
     run_id = created["run_id"]
     await session.commit()
 
@@ -88,6 +90,7 @@ async def test_a_failed_run_persists_nothing_to_thread_history(session, funduq, 
     agent_b = registered["b"]
     thread_b = await repo.create_thread(session, agent_b)
     created = await repo.create_run(session, thread_b, agent_b, "ag-ui", {})
+    await repo.mark_run_status(session, created["run_id"], "running")
     run_id = created["run_id"]
     await session.commit()
 
