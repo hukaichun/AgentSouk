@@ -139,7 +139,7 @@ async def test_an_agent_that_has_held_a_conversation_is_refused(souk, attach):
 
     handle = await souk.start_run(registered["worked"], {"messages": []})
     assert [e["type"] async for e in handle.events()][-1] == "RUN_FINISHED"
-    await souk.detach_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
 
     signature, timestamp = identity.deletion("worked")
     with pytest.raises(AgentInUse) as refused:

@@ -205,7 +205,7 @@ async def test_an_identityless_souk_answers_nothing_and_only_a_pin_objects(setti
 
         answer = await souk.attach_provider(_link(souk, identity), ["trusting"])
         assert answer is None
-        await souk.detach_provider(identity.public_key)
+        souk.detach_all_for(identity.public_key)
 
         pinned = ProviderIdentity.generate().public_key
         with pytest.raises(WrongSouk):

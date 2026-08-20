@@ -32,10 +32,10 @@ async def test_a_replaced_agent_connections_cleanup_leaves_the_replacement_servi
     await souk.attach_provider(new, ["worker"])
     assert souk.broker.serving(ref) is new
 
-    await souk.detach_provider(key, connection=old)
+    souk.detach_provider(key, connection=old)
     assert souk.broker.serving(ref) is new
 
-    await souk.detach_provider(key, connection=new)
+    souk.detach_provider(key, connection=new)
     assert souk.broker.serving(ref) is None
 
 
@@ -56,3 +56,23 @@ async def test_a_replaced_llm_connections_cleanup_leaves_the_replacement_serving
 
     souk.detach_llm_provider(identity.public_key, connection=new)
     assert souk.kyok_relay.serving(ref) is None
+
+
+async def test_detach_all_for_evicts_the_key_from_both_rosters(souk, register):
+    served = await register("evictee")
+    identity = served.identity
+    key = identity.public_key
+    agent_ref = AgentRef(provider_key=key, name="evictee")
+    signature, timestamp = sign_llm_registration(identity, ["gpt4"])
+    await souk.register_llm_providers(key, signature, timestamp, ["gpt4"])
+    llm_ref = LlmRef(provider_key=key, name="gpt4")
+
+    await souk.attach_provider(_StubConnection(identity), ["evictee"])
+    await souk.attach_llm_provider(InProcessLLMProvider(identity, StubLLM()), ["gpt4"])
+    assert souk.broker.serving(agent_ref) is not None
+    assert souk.kyok_relay.serving(llm_ref) is not None
+
+    souk.detach_all_for(key)
+
+    assert souk.broker.serving(agent_ref) is None
+    assert souk.kyok_relay.serving(llm_ref) is None

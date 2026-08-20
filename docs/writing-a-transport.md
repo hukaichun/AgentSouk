@@ -85,17 +85,22 @@ is no way to switch any of this off: a connection that exposes no
 ## Reconnecting without killing your replacement
 
 ```python
-await souk.detach_provider(public_key, connection=old_link)
+souk.detach_provider(public_key, connection=old_link)
 ```
 
-Pass the old connection. Without it, **every** name that key serves goes
-offline — including a replacement connection that has already
-re-attached, which is exactly the case a reconnect produces. Cleanup
-that does not name what it is cleaning up takes down the thing that
-replaced it.
+Naming the connection is required, because cleanup that does not name
+what it is cleaning up takes down the thing that replaced it: souk holds
+one connection per role, so a re-attach replaces the old link, and a
+whole-key detach fired by the old link's teardown would take the live
+replacement offline — exactly the case a reconnect produces. Scoped to
+the connection, the cleanup of a replaced link is a no-op. The compare
+and the withdraw run with no await between them, so a replacement
+cannot slip in mid-detach.
 
-Note the asymmetry: `detach_provider` is a coroutine and must be
-awaited, while `detach_llm_provider` is synchronous.
+Evicting a key outright — every agent and offering, whichever
+connections serve them — is a different, deliberately louder verb:
+`souk.detach_all_for(public_key)`. Both detach forms, and
+`detach_llm_provider`, are synchronous.
 
 ## Carrying a run down, and the ack back
 

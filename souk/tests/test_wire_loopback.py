@@ -173,7 +173,7 @@ async def test_a_completion_travels_as_byte_frames(souk):
     )
     chunks = [chunk async for chunk in serving.complete(request)]
 
-    souk.detach_llm_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
     assert chunks[0].choices[0].delta.content == "for wired-agent"
 
 

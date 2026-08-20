@@ -75,7 +75,7 @@ async def test_detaching_marks_it_offline_immediately(souk, attach):
     await attach(identity, LocalProvider(), [agent_id.name])
     assert (await souk.list_agents())[0].online is True
 
-    await souk.detach_provider(identity.public_key)
+    souk.detach_all_for(identity.public_key)
 
     roster = await souk.list_agents()
     assert roster[0].online is False

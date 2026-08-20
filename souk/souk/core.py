@@ -277,19 +277,33 @@ class _Roster(abc.ABC):
     @abc.abstractmethod
     def live(self, ref: Any) -> Any: ...
 
-    def detach(self, public_key: str, connection: Any = None) -> None:
-        """Take everything served by `public_key` offline; a no-op (no change event) if nothing is.
+    def detach(self, public_key: str, connection: Any) -> None:
+        """Take offline the names of `public_key` that `connection` currently serves;
+        a no-op (no change event) if it serves none.
 
         souk holds one connection per role: a re-attach under the same key
         replaces the old connection, and replicas are the provider's own
-        concern behind its single connection. `connection` is how a caller
-        cleaning up a *replaced* connection avoids taking the replacement
-        down with it: when given, only names whose current connection is
-        that object (by identity) are withdrawn.
+        concern behind its single connection. Naming the connection is what
+        makes cleanup after a *replaced* link safe — only names whose current
+        connection is that object (by identity) are withdrawn, so a
+        replacement that already re-attached stays serving. The compare and
+        the withdraw run without an await between them, so nothing can slip
+        a replacement in between. Taking a key offline regardless of which
+        connection serves it is a different, deliberately louder verb:
+        `detach_all`.
         """
+        attached = [r for r in self.served_by(public_key) if self.live(r) is connection]
+        if not attached:
+            return
+        self.withdraw(attached)
+        self._souk._notify_change(self.changed())
+
+    def detach_all(self, public_key: str) -> None:
+        """Take every name served by `public_key` offline, whichever connection
+        serves it; a no-op (no change event) if nothing is. The eviction form —
+        cleanup after one closed link belongs to `detach`, which cannot take
+        down a replacement."""
         attached = self.served_by(public_key)
-        if connection is not None:
-            attached = [r for r in attached if self.live(r) is connection]
         if not attached:
             return
         self.withdraw(attached)
@@ -714,23 +728,39 @@ class Souk:
             link, model_names, challenge=challenge, provider_nonce=provider_nonce, proof=proof
         )
 
-    def detach_llm_provider(self, public_key: str, connection: Any = None) -> None:
-        """Remove every model offering served by `public_key`; a no-op (no change event) if none.
+    def detach_llm_provider(self, public_key: str, connection: Any) -> None:
+        """Take offline the model offerings that `connection` serves for `public_key`;
+        a no-op (no change event) if it serves none.
 
-        Pass `connection` when cleaning up after a specific link (a closed
-        socket): a replaced connection's cleanup then leaves its replacement
-        serving. See `_Roster.detach`.
+        Naming the connection is required: it is what keeps cleanup after a
+        replaced link (a closed socket) from taking down the replacement that
+        already re-attached. To evict a key outright, whichever connection
+        serves it, call `detach_all_for`. See `_Roster.detach`.
         """
         self._llm_roster.detach(public_key, connection)
 
-    async def detach_provider(self, provider_public_key: str, connection: Any = None) -> None:
-        """Take every agent served by `provider_public_key` offline; a no-op if it's serving nothing.
+    def detach_provider(self, provider_public_key: str, connection: Any) -> None:
+        """Take offline the agents that `connection` serves for `provider_public_key`;
+        a no-op if it serves none.
 
-        Pass `connection` when cleaning up after a specific link (a closed
-        socket): a replaced connection's cleanup then leaves its replacement
-        serving. See `_Roster.detach`.
+        Naming the connection is required: it is what keeps cleanup after a
+        replaced link (a closed socket) from taking down the replacement that
+        already re-attached. To evict a key outright, whichever connection
+        serves it, call `detach_all_for`. See `_Roster.detach`.
         """
         self._agent_roster.detach(provider_public_key, connection)
+
+    def detach_all_for(self, public_key: str) -> None:
+        """Take `public_key` offline entirely — every agent and every model offering,
+        whichever connections serve them; a no-op where it serves nothing.
+
+        This is the eviction form, per identity, and it is deliberately a
+        different name: cleanup after one closed link belongs to
+        `detach_provider` / `detach_llm_provider`, which cannot take down a
+        replacement. The dangerous operation only answers to its full name.
+        """
+        self._agent_roster.detach_all(public_key)
+        self._llm_roster.detach_all(public_key)
 
 
     def on_change(self, callback: Callable[[ChangeEvent], None]) -> Callable[[], None]:
