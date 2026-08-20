@@ -79,7 +79,7 @@ instead, and the quality counters record it as `failed` rather than
 
 The full design record, including the two prior designs this replaced and
 why they failed, is
-[`design/keep-your-own-key.md`](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md).
+[`design/keep-your-own-key.md`](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/keep-your-own-key.md).
 
 ## Design records
 

@@ -138,7 +138,7 @@ await souk.start()
 identity = ProviderIdentity.generate()          # or .load_or_create(path)
 
 # 2. Register the names, signed. Sharing souk's process is not a reason to
-#    skip this — see "In-process is not trusted" in design/library-architecture.md.
+#    skip this — see "In-process is not trusted" in docs/mechanisms/identity.md.
 signature, timestamp = identity.sign_registration(["greeter"])
 registered = await souk.register_agents(
     identity.public_key, signature, timestamp, [{"name": "greeter"}]
@@ -259,10 +259,11 @@ their tasks raced.
 
 ## Further
 
-- `design/agent-provider-guide.md` — the situations a live provider runs into:
-  sub-agent calls that are still pending, session continuity, what souk does
-  and does not do for you.
-- `design/library-architecture.md` — why the loop is the provider's, why
-  in-process is not trusted, and where the core/serving boundary is.
+- `docs/writing-a-transport.md` — the connect handshake in order, and what
+  souk deliberately leaves to you.
+- `docs/mechanisms/requests.md` — what an offer's three-valued answer means,
+  and what souk records when a run ends.
+- `docs/design-records.md` — why the loop is the provider's, why in-process
+  is not trusted, and the decisions that were reversed getting here.
 - AgentSoukServer's `docs/server-mode.md` — the wire contract, if you are
   writing a binding rather than using one.

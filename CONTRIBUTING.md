@@ -8,8 +8,8 @@ that section before assuming a change belongs where you'd first guess.
 ## What lives here, and what doesn't
 
 This tree is the library (`souk/`), the two provider-side contract
-packages (`souk-provider-sdk/`, `souk-llm-provider-sdk/`), the published
-site (`docs/`) and the working design record (`design/`).
+packages (`souk-provider-sdk/`, `souk-llm-provider-sdk/`) and the published
+site (`docs/`), which carries the design records too.
 Everything else — the gateway, the transport SDKs, the reference
 providers and the directory UI — lives in
 [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer),

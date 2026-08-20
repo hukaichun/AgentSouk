@@ -64,7 +64,7 @@ promise that replaces opt-in is threefold:
 ## LLM providers: serve OpenAI shapes, souk exposes the endpoint
 
 The same pattern, one seam over. An LLM provider (the party holding a
-real key — see [Keep your own key](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md)) also connects
+real key — see [Keep your own key](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/keep-your-own-key.md)) also connects
 out and also promises only a shape: receive a completion request, stream
 back OpenAI chat-completion chunks. The OpenAI-compatible endpoint that
 agents call is souk's to expose; the provider behind it is resolved per

@@ -45,9 +45,9 @@ rewrite.
 The byte-level authority behind all of it is
 [`contract-vectors.json`](contract-vectors.json), consumed by souk's own
 test suites and replayable by an implementation in any language. The
-working design record lives in the repository under
-[`design/`](https://github.com/hukaichun/AgentSouk/tree/main/design),
-which each design record links into; pages graduate from there to this
-site deliberately. Serving — HTTP, WebSockets, deployment — lives
+working notes these pages were distilled from are no longer in the
+tree; each design record links into them at
+[the commit before they were removed](https://github.com/hukaichun/AgentSouk/tree/d78d0638c0ec2126167240c62471651b5468d35b/design).
+Serving — HTTP, WebSockets, deployment — lives
 downstream in
 [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer).

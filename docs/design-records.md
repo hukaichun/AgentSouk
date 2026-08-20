@@ -5,10 +5,12 @@ shaped that way — including the shapes it had first and stopped having.
 
 Every entry here was argued from something that happened: a probe that
 returned the wrong answer, a bug that reached a caller, a measurement
-taken before a rewrite. The full record of each lives in the repository
-under [`design/`](https://github.com/hukaichun/AgentSouk/tree/main/design),
-and each entry links to its section there. What is on this page is the
-part worth reading before changing the code near it.
+taken before a rewrite. This page *is* the record now: the `design/`
+working notes it was distilled from have been removed from the tree, and
+each entry links to the section it came from at
+[the commit before the removal](https://github.com/hukaichun/AgentSouk/tree/d78d0638c0ec2126167240c62471651b5468d35b/design).
+Those links are pinned to a commit, so they keep resolving; nothing new
+will be written there.
 
 Three kinds of record: rules that shipped and whose reasoning is easy to
 undo by accident; designs settled but not built; and decisions that were
@@ -27,7 +29,7 @@ money: an agent whose chain does not match gets no completions. Signing
 is not compelled, it is **priced**.
 
 See [Actor chain](mechanisms/actor-chain.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/trust-and-identity.md#actor-chains-provenance-hop-by-hop)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/trust-and-identity.md#actor-chains-provenance-hop-by-hop)
 
 ### The verifier chooses the freshness
 
@@ -43,7 +45,7 @@ from the only worked example then visible (#75). Hence the
 challenge-response: the verifier contributes the nonce.
 
 See [Identity](mechanisms/identity.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/trust-and-identity.md#opening-a-link-the-verifier-chooses-the-freshness)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/trust-and-identity.md#opening-a-link-the-verifier-chooses-the-freshness)
 
 ### Wrapping an unknown event in `RawEvent` is quiet corruption
 
@@ -78,7 +80,7 @@ plain mapping on the port; that is not what the port does today, where
 this should start from why `RawEvent` was refused.
 
 See [The dispatch trunk](core-components/dispatch.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/library-architecture.md#typed-data-and-where-typing-stops)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#typed-data-and-where-typing-stops)
 
 ### A provider is its key, and has no other id
 
@@ -96,7 +98,7 @@ stream — needs no id in the protocol at all: every connection of that
 provider is asked, and the one without the run ignores it.
 
 See [Identity](mechanisms/identity.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/library-architecture.md#a-provider-is-its-key-and-has-no-other-id)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#a-provider-is-its-key-and-has-no-other-id)
 
 ### Liveness stopped being an inference
 
@@ -109,7 +111,7 @@ provider that had just completed a run was reported offline sixty
 seconds after attaching.
 
 See [The dispatch trunk](core-components/dispatch.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/library-architecture.md#dispatch-has-been-inverted-twice-and-the-reasons-differ)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#dispatch-has-been-inverted-twice-and-the-reasons-differ)
 
 ### Silence about a verdict souk has reached is a bug
 
@@ -127,7 +129,7 @@ event to send, and the only party who would read it is the one who asked
 for it.
 
 See [Runs and cancels are requests](mechanisms/requests.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/library-architecture.md#cancelling-a-request-with-the-outcome-decided-later)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#cancelling-a-request-with-the-outcome-decided-later)
 
 ## Designed, not built
 
@@ -145,7 +147,7 @@ Today's souk does not yet work this way — see
 [Open contradictions](#open-contradictions) below.
 
 See [Responsibility chains](mechanisms/responsibility-chains.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/responsibility-chains.md#rule-zero-identifiers-are-never-credentials)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md#rule-zero-identifiers-are-never-credentials)
 
 ### Anonymity means the key is unlinked, not that there is no key
 
@@ -162,7 +164,7 @@ Presenting a key stays opt-in, so no standard client is forced to
 deviate.
 
 See [Responsibility chains](mechanisms/responsibility-chains.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/responsibility-chains.md#binding-three-tiers-one-mechanism)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md#binding-three-tiers-one-mechanism)
 
 ### One question per delegation edge decides the whole tree
 
@@ -188,7 +190,7 @@ resulting break-point topology is an honest map of every provider's
 declared competence boundary.
 
 See [Responsibility chains](mechanisms/responsibility-chains.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/responsibility-chains.md#delegation-the-edge-declaration)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md#delegation-the-edge-declaration)
 
 ### Authorization is not disclosure
 
@@ -200,7 +202,7 @@ memory, never persisted, never volunteered. These are two switches by
 design: do not print the head key to the provider as a convenience.
 
 See [Responsibility chains](mechanisms/responsibility-chains.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/responsibility-chains.md#authorization-is-not-disclosure)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md#authorization-is-not-disclosure)
 
 ### The two lanes
 
@@ -216,7 +218,7 @@ question.
 lane**. It says nothing about whether the queue lane is open, because the
 queue lane is always open.
 
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/conversation-semantics.md#the-two-lanes)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#the-two-lanes)
 
 ### Queueing makes "may I speak?" always answerable with yes
 
@@ -233,7 +235,7 @@ messages belong together is the batch-correlation swamp that killed an
 earlier design; membership is only ever declared by the caller and
 absorbed by the provider, never assumed by the relay.
 
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/conversation-semantics.md#queueing-delivery-is-the-protocols-timing-is-the-providers)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#queueing-delivery-is-the-protocols-timing-is-the-providers)
 
 ### Interjection: the rejection is the capability signal
 
@@ -250,7 +252,7 @@ On absorption the response grows out of the original stream, pinned by
 one reference-style marker event carrying a reference and never content,
 so ownership of the message text stays with the call that submitted it.
 
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/conversation-semantics.md#interjection-joining-the-run-in-flight)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#interjection-joining-the-run-in-flight)
 
 ## Tried, measured, reversed
 
@@ -264,7 +266,7 @@ never runs, so the run never terminated. All of it disappeared once souk
 stopped deciding on the provider's behalf.
 
 See [Runs and cancels are requests](mechanisms/requests.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/library-architecture.md#cancelling-a-request-with-the-outcome-decided-later)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#cancelling-a-request-with-the-outcome-decided-later)
 
 ### KYOK replaced two designs, both failing for one reason
 
@@ -285,7 +287,7 @@ Both failed for the same reason: **an actor with no identity**. KYOK is
 now a real LLM provider on the same identity machinery.
 
 See [Keep your own key](mechanisms/kyok.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md#history-two-designs-this-replaced-and-why)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/keep-your-own-key.md#history-two-designs-this-replaced-and-why)
 
 ### An inter-chunk timeout kills slow models and blames the wrong side
 
@@ -296,7 +298,7 @@ provider's own HTTP timeout, or the serving layer cancelling the relay
 on disconnect.
 
 See [Keep your own key](mechanisms/kyok.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md#scope--limitations-known-not-oversights)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/keep-your-own-key.md#scope--limitations-known-not-oversights)
 
 ### "Trustless" binding was rejected as false safety
 
@@ -308,7 +310,7 @@ trust is irreducible in this architecture, and the ids are unlearnable at
 context-minting time anyway.
 
 See [Keep your own key](mechanisms/kyok.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/keep-your-own-key.md#delegation-the-binding-follows-the-run-tree)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/keep-your-own-key.md#delegation-the-binding-follows-the-run-tree)
 
 ### Background work is not a TaskGroup
 
@@ -318,7 +320,7 @@ failing run must not cancel its siblings. `Souk.spawn` holds strong
 references and isolates failures.
 
 See [Support](core-components/support.md) →
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/library-architecture.md#background-work-belongs-to-the-souk)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#background-work-belongs-to-the-souk)
 
 ### Self-delegation deadlocks a capacity-capped provider
 
@@ -333,7 +335,7 @@ budget.
 
 souk imposes no depth limit and performs no cycle detection.
 
-[full record](https://github.com/hukaichun/AgentSouk/blob/main/design/agent-provider-guide.md#multi-agent-topologies--verified-not-just-argued)
+[full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/agent-provider-guide.md#multi-agent-topologies--verified-not-just-argued)
 
 ## Open contradictions
 

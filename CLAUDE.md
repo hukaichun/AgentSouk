@@ -106,7 +106,15 @@ These are load-bearing; breaking one has caused a real bug here.
 
 ## Where the design lives
 
-`design/library-architecture.md`. It records decisions *and* the ones that
-turned out wrong, with the measurements behind them. Read it before changing
-the provider port, cancellation, or the core/serving boundary — and if the
-code contradicts it, one of them needs fixing, deliberately.
+`docs/design-records.md`. It records decisions *and* the ones that turned
+out wrong, with the measurements behind them. Read it before changing the
+provider port, cancellation, or the core/serving boundary — and if the code
+contradicts it, one of them needs fixing, deliberately.
+
+The `design/` directory it was distilled from is gone; each record links
+into it at the commit before removal. **Do not treat those notes as
+current.** They state designs in the present tense whether or not the code
+followed, and five were falsified against the code in one sitting — the ack
+signature, `A2AAdapter`'s arguments, `RunHandle.is_live`, two settings that
+never existed, and a whole event-typing mitigation that was never built.
+Grep for the identifier before repeating anything they say.

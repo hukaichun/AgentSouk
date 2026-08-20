@@ -17,7 +17,7 @@ def migrate(database_url: str | None = None, db_schema: str | None = None) -> No
 
     Deployments that manage the schema themselves — own credentials and
     timing, DBA-reviewed SQL, or no Alembic at all — are supported and
-    documented in `design/managing-the-schema-yourself.md`.
+    documented in `docs/core-components/persistence.md`.
     """
     cfg = Config()
     cfg.set_main_option("script_location", "souk:alembic")
