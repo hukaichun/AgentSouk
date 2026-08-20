@@ -203,3 +203,56 @@ async def test_a_run_nobody_ever_comes_for_is_given_up_on(settings: CoreSettings
         assert run.metadata["failureReason"] == "no_provider_took_it"
     finally:
         await souk.aclose()
+
+
+async def test_an_event_type_souk_does_not_know_is_relayed_untouched(brisk):
+    registration, identity = await _register(brisk, "futuristic")
+    agent_id = registration.agents["futuristic"]
+    future_event = {
+        "type": "SOME_FUTURE_EVENT",
+        "payload": {"nested": ["anything", 42]},
+        "rawEvent": None,
+    }
+
+    class SpeaksNewerAgUi:
+        async def run_stream(self, agent_id: str, run_input: dict):
+            ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
+            yield {"type": "RUN_STARTED", **ids}
+            yield dict(future_event)
+            yield {"type": "RUN_FINISHED", **ids}
+
+    await brisk.attach(identity, SpeaksNewerAgUi(), [agent_id.name])
+    handle = await brisk.start_run(agent_id, {"messages": []})
+
+    events = [e async for e in handle.events()]
+
+    assert [e["type"] for e in events] == ["RUN_STARTED", "SOME_FUTURE_EVENT", "RUN_FINISHED"]
+    assert events[1] == future_event, "the relay must not rewrite what it does not understand"
+
+    await _until(lambda: handle.run_id not in brisk.active_runs())
+    async with brisk.session() as session:
+        stored = await repo.get_run(session, handle.run_id)
+        persisted = await repo.get_run_events(session, handle.run_id)
+    assert stored.status == "completed"
+    assert [e["type"] for e in persisted] == ["RUN_STARTED", "SOME_FUTURE_EVENT", "RUN_FINISHED"]
+    assert persisted[1] == future_event
+
+
+async def test_an_event_with_no_type_string_is_malformation_not_version_skew(brisk):
+    registration, identity = await _register(brisk, "typeless")
+    agent_id = registration.agents["typeless"]
+
+    class SendsTypeless:
+        async def run_stream(self, agent_id: str, run_input: dict):
+            ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
+            yield {"type": "RUN_STARTED", **ids}
+            yield {"payload": "no type at all"}
+            yield {"type": "RUN_FINISHED", **ids}
+
+    await brisk.attach(identity, SendsTypeless(), [agent_id.name])
+    handle = await brisk.start_run(agent_id, {"messages": []})
+
+    events = [e async for e in handle.events()]
+
+    assert [e["type"] for e in events] == ["RUN_STARTED", "RUN_ERROR"]
+    assert events[-1]["message"] == "provider sent a malformed AG-UI event"
