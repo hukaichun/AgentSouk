@@ -148,11 +148,6 @@ def _snapshot(run: Run) -> RunSnapshot:
     )
 
 
-def _request_cancel(run: Run) -> None:
-    run.cancel_requested = True
-    run.in_queue.put_nowait(RequestCancel())
-
-
 async def _drain_run(run: Run) -> AsyncIterator[Any]:
     """Yields items placed on `run.out_queue` until the END_OF_STREAM sentinel
     (put there when the run's pipeline finishes), then returns."""

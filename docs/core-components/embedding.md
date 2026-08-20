@@ -45,14 +45,11 @@ one continues it.
 
 The `RunHandle` you get back carries `run_id`, `thread_id`, an
 `async events()` iterator yielding each AG-UI event as the provider
-produces it, and `cancel()`.
-
-!!! warning "`RunHandle.is_live` carries no information"
-    Every handle core constructs sets it `True`, and nothing ever
-    constructs one with `False`. Do not branch on it. The
-    live-versus-reconstructed distinction is real but lives in the A2A
-    adapter, which decides it from its own start result plus a broker
-    lookup — not from this field.
+produces it, and `cancel()`. It once carried an `is_live` flag too,
+which was dropped for carrying no information: every handle core
+constructed set it `True`. The live-versus-reconstructed distinction is
+real but belongs to the A2A adapter, which decides it from its own
+start result plus a broker lookup.
 
 ## Resuming and cancelling
 

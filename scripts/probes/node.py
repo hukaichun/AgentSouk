@@ -78,7 +78,7 @@ async def _dispatch(souk: Souk, req: dict[str, Any]) -> Any:
 
     if op == "start_run":
         handle = await souk.start_run(_agent(req), req["run_input"])
-        return {"run_id": handle.run_id, "thread_id": handle.thread_id, "is_live": handle.is_live}
+        return {"run_id": handle.run_id, "thread_id": handle.thread_id}
 
     if op == "claim_work":
         claimed = await souk.claim_work(
