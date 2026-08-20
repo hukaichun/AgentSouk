@@ -11,10 +11,11 @@ this in any language without reading souk's source.
 
 ## The opening handshake, in order
 
-Four steps, and the order is the security property. Getting it right
-matters more here than anywhere else in the contract, because this is
-the one exchange that decides whether either side is talking to who it
-thinks.
+Four steps, and the order is the security property. This is the one
+exchange that decides whether either side is talking to who it thinks.
+The payload bytes and why each field is in them are in
+[Contract and identity](core-components/contract-identity.md); what
+follows is the call sequence a transport has to relay.
 
 **1. souk mints a challenge.**
 
@@ -22,69 +23,64 @@ thinks.
 challenge = souk.issue_connect_challenge()
 ```
 
-A 128-bit hex nonce, single-use, valid for 60 seconds. It is souk's
-contribution to freshness, and it exists because a signature whose only
-liveness is a self-chosen timestamp is replayable by anyone on the path
-— see [the design record](design-records.md#the-verifier-chooses-the-freshness).
+A single-use nonce, valid for 60 seconds, consumed on verification. It is
+souk's contribution to freshness, and it exists because a signature whose
+only liveness is a self-chosen timestamp is replayable by anyone on the
+path — see [the design record](design-records.md#the-verifier-chooses-the-freshness).
 
-**2. The provider signs both nonces and its names.**
-
-```python
-proof = identity.sign_connect(souk_nonce, provider_nonce, names)
-```
-
-The provider contributes a nonce of its own. The signed bytes are
-`souk-connect-provider:{souk_nonce}:{provider_nonce}:{sorted names}` —
-the names are in the proof, so a captured signature cannot be replayed
-to serve a different agent.
-
-**3. souk answers, and the provider verifies before sending anything.**
-
-This is the step transports get wrong, so it is worth stating exactly.
-souk's answer is a signature over
-`souk-connect-souk:{souk_nonce}:{provider_nonce}` — a **distinct role
-tag**, so neither side's proof can be reflected back as the other's.
-
-There is no souk method that returns it. Compose it:
+**2. The provider signs, naming the souk it means to reach.**
 
 ```python
-from souk.identity import souk_connect_signing_payload
-answer = souk.sign(souk_connect_signing_payload(challenge, provider_nonce))
+proof = identity.sign_connect(souk_public_key, souk_nonce, provider_nonce, names)
 ```
 
-and the provider verifies it against its pinned souk key:
+The provider contributes a nonce of its own and **names the recipient**:
+the pinned souk key goes into the signed bytes, so a proof one souk
+coaxes out cannot be relayed to attach at another. The verifying souk
+builds the payload with its *own* key, and a mismatch simply fails the
+signature. The names are in there too, so a captured proof cannot be
+replayed to serve a different agent. Pass an empty string for a souk with
+no identity.
+
+**3. Attach, and relay souk's answer back.**
+
+```python
+answer = await souk.attach_provider(
+    provider, agent_names,
+    challenge=challenge, provider_nonce=provider_nonce, proof=proof,
+)
+```
+
+`attach_provider` returns souk's own signature over both nonces under a
+distinct role tag, so neither side's proof can be reflected back as the
+other's. **Relaying that answer to the provider is the transport's job** —
+it is the half of the handshake that protects the provider, and it is the
+whole point of souk having a keypair.
+
+A souk with no identity key configured answers `None`. It cannot prove
+itself, and only a provider that pinned a key treats that as a failure.
+
+**4. The provider checks the answer before producing anything.**
+
+A connection that exposes `confirm_connect(souk_nonce, provider_nonce, answer)`
+is handed the answer **before the attach commits**, so a provider that
+raises there never appears in the roster and never receives a run. The
+provider SDK raises `WrongSouk` for a mismatch. Both in-process links
+implement the hook, so in-process goes through the identical ceremony
+automatically — sharing a process is not a reason to skip identity.
+
+If your transport verifies out-of-band instead, verify before sending
+anything worth stealing:
 
 ```python
 from souk_provider_sdk import verify_signature, souk_connect_payload
 assert verify_signature(souk_public_key, answer, souk_connect_payload(challenge, provider_nonce))
 ```
 
-!!! warning "souk does not enforce this half"
-    Nothing in souk requires a provider to check the answer, and no
-    shipped transport in this repository does. Skipping it still gets
-    you a working connection — to *any* souk, including one that is not
-    the one you meant. This is the half of the handshake that protects
-    the provider, and it is yours to implement.
-
-    `Souk.sign` raises when souk has no identity key configured, so a
-    souk that cannot be pinned fails loudly rather than silently
-    answering nothing.
-
-**4. Attach.**
-
-```python
-await souk.attach_provider(
-    provider, agent_names,
-    challenge=challenge, provider_nonce=provider_nonce, proof=proof,
-)
-```
-
-The proof is verified **before** the registered-names check, so an
-attach that cannot prove itself never learns whether a name is
-registered. There is no way to switch this off: a connection that
-exposes no `sign_connect` and supplies no proof is refused. In-process
-connections take the same path — sharing a process is not a reason to
-skip identity.
+The proof is verified **before** the registered-names check, so an attach
+that cannot prove itself never learns whether a name is registered. There
+is no way to switch any of this off: a connection that exposes no
+`sign_connect` and supplies no proof is refused.
 
 ## Reconnecting without killing your replacement
 
