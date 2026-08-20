@@ -452,6 +452,40 @@ async def test_a_declined_mid_turn_offer_falls_back_to_a_plain_next_turn(broker)
     assert envelopes[2] == {}, "behind the gate it is a plain next turn, annotation gone"
 
 
+async def test_no_annotation_while_the_target_is_finished_but_not_yet_forgotten(broker):
+    """funduq#136: a finishing run opens its thread's gate (mark_run_status)
+    a beat before it leaves the broker's tracking (forget). An addressed run
+    swept up inside that window is an ordinary next turn — its envelope must
+    not name a run that already ended, or a provider that absorbs would
+    absorb into nothing and a default-declining one pays a spurious round."""
+    envelopes: list = []
+
+    class Choosy(Recording):
+        async def deliver(self, run) -> bool:
+            envelopes.append(dict(run.metadata))
+            self.offered.append(run.run_id)
+            return not run.metadata.get("addressedRunId")
+
+    provider = Choosy()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_x", thread_id="t-window")
+    await _until(lambda: provider.offered == ["run_x"])
+
+    broker.enqueue_run(
+        "run_r", AGENT, "t-window", {"messages": []}, "ag-ui", {}, addressed_run_id="run_x"
+    )
+    await _until(lambda: provider.offered == ["run_x", "run_r"])
+    assert envelopes[1] == {"addressedRunId": "run_x"}, "the live mid-turn offer is annotated"
+
+    # The window itself: the gate is open but run_x is still tracked and
+    # claimed — exactly the state between core's release_thread and forget.
+    broker.release_thread("run_x")
+    assert broker.get("run_x") is not None and broker.get("run_x").claimed_by is not None
+
+    await _until(lambda: provider.offered == ["run_x", "run_r", "run_r"], timeout=2.0)
+    assert envelopes[2] == {}, "inside the window the annotation must already be gone"
+
+
 async def test_a_run_addressed_to_a_paused_holder_waits_like_anyone_else(broker):
     from funduq.broker import FinishStream
 

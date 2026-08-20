@@ -409,8 +409,16 @@ class RunBroker:
         """Whether the run this one addresses is claimed and producing right
         now — the only moment a mid-turn offer means anything. A paused
         target still holds its thread's gate but has nothing in flight to
-        absorb into, so it does not qualify."""
+        absorb into, so it does not qualify. The gate check is load-bearing
+        too, not just the claim: a finishing target opens its thread's gate
+        (mark_run_status) a beat before it leaves `_runs` (forget), and in
+        that window an addressed run is offered as an ordinary next turn —
+        the envelope must not carry an annotation naming a run that already
+        ended. "Mid-turn" is what the gate says, so the annotation asks the
+        gate."""
         if run.addressed_run_id is None:
+            return False
+        if self._thread_holder.get(run.thread_id) != run.addressed_run_id:
             return False
         target = self._runs.get(run.addressed_run_id)
         return target is not None and target.claimed_by is not None

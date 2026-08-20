@@ -230,6 +230,16 @@ holding it, its forget would open the thread under the still-running
 holder. A paused target does not qualify: it holds its gate but has
 nothing in flight to absorb into.
 
+A third rule was learned from a probe, not a walk (funduq#136): **the
+annotation asks the gate, not the tracking table.** A finishing target
+opens its thread's gate (`mark_run_status`) a beat before it leaves the
+broker's `_runs` (`forget`), and an addressed run swept up inside that
+window was stamped with an annotation naming a run that had already
+ended — untrue at the moment of delivery, and a spurious decline round
+for every default-declining provider. "Mid-turn" *is* the gate, so
+`_addressed_target_in_flight` now requires the target to still hold its
+thread as well as its claim.
+
 ## Designed, not built
 
 ### Rule zero: identifiers are never credentials
