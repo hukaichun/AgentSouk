@@ -204,9 +204,9 @@ class _Roster(abc.ABC):
         can sign (it exposes `sign_connect`, as the in-process links do) is
         challenged and verified automatically; in-process is not trusted
         either. A connection that offers a proof has it verified; one that
-        offers none is admitted only while `require_connect_proof` is off —
-        the migration switch for transports that still authenticate at
-        their own edge.
+        offers none is rejected unless `require_connect_proof` was
+        explicitly switched off — the opt-out for a transport that still
+        authenticates at its own edge while it adopts the handshake.
         """
         if not names:
             raise ValueError(

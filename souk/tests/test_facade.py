@@ -108,8 +108,9 @@ async def test_cancel_a_running_agent(souk, new_identity, attach):
 
 class StubbornProvider:
 
-    def __init__(self, public_key: str) -> None:
-        self.public_key = public_key
+    def __init__(self, identity) -> None:
+        self.public_key = identity.public_key
+        self.sign_connect = identity.sign_connect
         self.max_concurrent_runs = None
         self.taken: list[str] = []
         self.asked_to_stop: list[str] = []
@@ -126,7 +127,7 @@ async def test_a_worker_that_ignores_the_cancel_still_completes(souk, new_identi
     identity = new_identity()
     registration = await _register_with_token(souk, "stubborn", identity)
     agent_id = registration.agents["stubborn"]
-    provider = StubbornProvider(identity.public_key)
+    provider = StubbornProvider(identity)
     await souk.attach_provider(provider, ["stubborn"])
 
     handle = await souk.start_run(agent_id, {"messages": []})

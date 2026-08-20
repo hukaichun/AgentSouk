@@ -75,12 +75,11 @@ async def test_a_challenge_is_single_use(souk):
         )
 
 
-async def test_requiring_proof_rejects_the_silent_and_admits_the_signer():
+async def test_the_default_rejects_the_silent_and_admits_the_signer():
     souk = Souk(
         CoreSettings(
             database_url=DATABASE_URL,
             token_signing_secret=TEST_SIGNING_SECRET,
-            require_connect_proof=True,
         )
     )
     try:
@@ -94,5 +93,23 @@ async def test_requiring_proof_rejects_the_silent_and_admits_the_signer():
         from souk.models import AgentRef
 
         assert souk.is_serving(AgentRef(provider_key=identity.public_key, name="strict"))
+    finally:
+        await souk.aclose()
+
+
+async def test_switching_the_requirement_off_is_an_explicit_opt_out():
+    souk = Souk(
+        CoreSettings(
+            database_url=DATABASE_URL,
+            token_signing_secret=TEST_SIGNING_SECRET,
+            require_connect_proof=False,
+        )
+    )
+    try:
+        identity = await _registered(souk, "edge-authed")
+        await souk.attach_provider(_Stub(identity.public_key), ["edge-authed"])
+        from souk.models import AgentRef
+
+        assert souk.is_serving(AgentRef(provider_key=identity.public_key, name="edge-authed"))
     finally:
         await souk.aclose()
