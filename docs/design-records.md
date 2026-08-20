@@ -302,7 +302,32 @@ not queued, not appended, invisible to the caller — and the AG-UI door
 refused a busy thread with a snapshot), with the dispatch half in the
 broker: one turn per thread at a time, and a paused `input-required` run
 holds its thread until answered, so nothing overtakes an unanswered
-question. Two deliberate narrowings. Enqueue order is arrival order —
+question.
+
+The queue is a **run queue, and every entry stays a run**: each is
+dispatched whole and never changes shape. A reading that tempted us and
+was rejected — "one buffer, two consumers", where interjection would be
+the provider reaching into the same queue and *reinterpreting* an entry
+— puts an entry's meaning in the hands of whoever picks it up: the
+batch-correlation swamp reborn. What survives instead: an entry's verb
+is declared by the caller at birth and never inferred, and an
+interjection-intended utterance is *still a run*, merely annotated with
+the in-flight run it addresses — see the interjection record below for
+how the annotation changes dispatch and nothing else. Nothing is ever
+dumped: absent that annotation the provider receives one run per turn
+(whose input carries the history folded at its arrival, with
+`thread_messages` as the authoritative read).
+
+The pending depth is bounded (`thread_queue_limit`, default 8, `None`
+opts out): a live conversation holds a few unconsumed utterances, not
+dozens — a depth in the tens is a runaway loop, not a caller. At the
+limit the door refuses **loudly** (`ThreadQueueFull`: the message was
+NOT accepted) — a resource guard, not a judgment, and honest refusal
+beats accepting into a queue that will only rot. The reply lane is
+never subject to it: answering the question is how the thread drains.
+The count-then-create at the door is deliberately unlocked; a rare
+concurrent overshoot by one is cheaper than locking a guard that is
+not accounting. Two deliberate narrowings. Enqueue order is arrival order —
 truly concurrent messages have no canonical order to preserve, and the
 gate serializes dispatch regardless. And an AG-UI run queued behind
 another holds its event stream open, silent, until its turn comes:

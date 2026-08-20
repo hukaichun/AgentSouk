@@ -126,6 +126,11 @@ client author needs them.
   [queueing record](design-records.md#queueing-makes-may-i-speak-always-answerable-with-yes)
   carries the reasoning; a paused task holds its thread, so queued
   messages wait until its question is answered.
+- **The thread's pending buffer is bounded** (`thread_queue_limit`,
+  default 8). At the limit a new message is refused loudly —
+  `ThreadQueueFull`, meaning NOT accepted, retry after the thread
+  drains — never accepted-then-expired. Answering a paused task via
+  `taskId` is exempt: the reply is how the buffer drains.
 - **souk mints every thread id, on both doors — the id in souk's reply
   is the one to continue with.** An unseen AG-UI `threadId` gets a new
   thread under souk's own id (carried on every returned event); the id

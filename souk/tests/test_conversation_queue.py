@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from souk import repo
 from souk.protocols.a2a import A2AAdapter
 
@@ -248,3 +250,109 @@ async def test_an_agui_run_queued_behind_another_flows_when_its_turn_comes(souk,
     assert {e["type"] for e in await first_events} >= {"RUN_STARTED", "RUN_FINISHED"}
     assert {e["type"] for e in await second_events} >= {"RUN_STARTED", "RUN_FINISHED"}
     assert [r.thread_id for r in provider.runs] == [first.thread_id, first.thread_id]
+
+
+@pytest.fixture
+async def tight(settings):
+    """A souk whose per-thread pending buffer holds exactly one run."""
+    from souk.config import CoreSettings
+    from souk.core import Souk
+    from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
+
+    souk = Souk(
+        CoreSettings(
+            database_url=settings.database_url,
+            token_signing_secret=settings.token_signing_secret,
+            thread_queue_limit=1,
+        )
+    )
+    await souk.start()
+    runtimes = []
+
+    async def _serve(provider, name):
+        identity = ProviderIdentity.generate()
+        signature, timestamp = identity.sign_registration([name])
+        registration = await souk.register_agents(
+            identity.public_key, signature, timestamp, [{"name": name}]
+        )
+        runtime = ProviderRuntime(identity, provider)
+        runtimes.append(runtime)
+        runtime.start()
+        await souk.attach_provider(InProcessLink(souk, runtime), [name])
+        return registration.agents[name]
+
+    souk.serve_one = _serve
+    try:
+        yield souk
+    finally:
+        for runtime in runtimes:
+            await runtime.aclose(cancel_in_flight=True)
+        await souk.aclose()
+
+
+async def test_a_full_thread_buffer_refuses_the_next_message_loudly(tight):
+    from souk.errors import ThreadQueueFull
+
+    provider = GateAgent()
+    agent = await tight.serve_one(provider, "guarded")
+
+    first = asyncio.create_task(
+        _rpc(tight, agent, "SendMessage", {"message": _message("start")})
+    )
+    await _until(lambda: len(provider.runs) == 1)
+    thread_id = provider.runs[0].thread_id
+
+    async def _first_is_running() -> bool:
+        # The claim's status write is asynchronous; until it lands the first
+        # run still counts as pending and would itself fill the limit-1 buffer.
+        async with tight.session() as session:
+            stored = await repo.get_run(session, provider.runs[0].run_id)
+        return stored.status == "running"
+
+    await _until(_first_is_running)
+
+    second = asyncio.create_task(
+        _rpc(tight, agent, "SendMessage", {"message": {**_message("waits"), "contextId": thread_id}})
+    )
+
+    async def _buffer_full() -> bool:
+        async with tight.session() as session:
+            return await repo.count_queued_runs_for_thread(session, thread_id) == 1
+
+    await _until(_buffer_full)
+    with pytest.raises(ThreadQueueFull, match="not accepted"):
+        await A2AAdapter(tight).send_task(
+            agent, _message("one too many"), context_id=thread_id
+        )
+
+    provider.release.set()
+    results = await asyncio.gather(first, second)
+    assert all(r["result"]["status"]["state"] == "TASK_STATE_COMPLETED" for r in results)
+
+
+async def test_answering_the_paused_question_is_never_refused_by_the_buffer(tight):
+    provider = AskingAgent()
+    agent = await tight.serve_one(provider, "asks")
+
+    first = await _rpc(tight, agent, "SendMessage", {"message": _message("go")})
+    task_id = first["result"]["id"]
+    thread_id = first["result"]["contextId"]
+    assert first["result"]["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+
+    filler = asyncio.create_task(
+        _rpc(tight, agent, "SendMessage", {"message": {**_message("filler"), "contextId": thread_id}})
+    )
+
+    async def _buffer_full() -> bool:
+        async with tight.session() as session:
+            return await repo.count_queued_runs_for_thread(session, thread_id) == 1
+
+    await _until(_buffer_full)
+    reply = await _rpc(
+        tight, agent, "SendMessage", {"message": {**_message("the answer"), "taskId": task_id}}
+    )
+
+    assert reply["result"]["id"] == task_id
+    assert reply["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    third = await filler
+    assert third["result"]["status"]["state"] == "TASK_STATE_COMPLETED"

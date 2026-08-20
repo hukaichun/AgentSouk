@@ -356,6 +356,9 @@ class A2AAdapter:
                 run_id = task_id
                 starting_seq = await repo.get_last_event_seq(session, run_id)
             else:
+                await repo.ensure_queue_room(
+                    session, thread_id, souk.settings.thread_queue_limit
+                )
                 created = await repo.create_run(
                     session, thread_id, agent, "a2a", run_input, metadata=metadata
                 )
