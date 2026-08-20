@@ -90,6 +90,13 @@ def provider_connect_payload(souk_nonce: str, provider_nonce: str, names: list[s
     return f"{_CONNECT_PROVIDER}:{souk_nonce}:{provider_nonce}:{','.join(sorted(names))}".encode()
 
 
+class WrongSouk(Exception):
+    """The souk answering a link-open did not prove the key you pinned.
+
+    Raised before any run or event has crossed — the point of the pin is
+    refusing to produce anything worth stealing for an imposter."""
+
+
 def souk_connect_payload(souk_nonce: str, provider_nonce: str) -> bytes:
     """Builds the bytes souk signs to prove itself to a connecting provider.
 

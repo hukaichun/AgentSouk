@@ -141,3 +141,76 @@ def test_a_provider_pinning_one_souk_rejects_another(settings: CoreSettings):
 
     assert sdk_verify(pinned.identity_public_key, pinned.sign(challenge), challenge)
     assert not sdk_verify(pinned.identity_public_key, impostor.sign(challenge), challenge)
+
+
+async def _register(souk: Souk, identity: ProviderIdentity, name: str) -> None:
+    signature, timestamp = identity.sign_registration([name])
+    await souk.register_agents(identity.public_key, signature, timestamp, [{"name": name}])
+
+
+def _link(souk: Souk, identity: ProviderIdentity, **kwargs):
+    from souk_provider_sdk import InProcessLink, ProviderRuntime
+
+    return InProcessLink(souk, ProviderRuntime(identity, object()), **kwargs)
+
+
+async def test_attach_answers_and_the_in_process_link_verifies_it(settings: CoreSettings):
+    from souk_provider_sdk import souk_connect_payload
+    from souk_provider_sdk import verify_signature as sdk_verify
+
+    souk = _souk_with_identity(settings)
+    try:
+        identity = ProviderIdentity.generate()
+        await _register(souk, identity, "mutual")
+
+        challenge = souk.issue_connect_challenge()
+        proof = identity.sign_connect(challenge, "pn", ["mutual"])
+        answer = await souk.attach_provider(
+            _link(souk, identity), ["mutual"], challenge=challenge, provider_nonce="pn", proof=proof
+        )
+
+        assert answer is not None
+        assert sdk_verify(souk.identity_public_key, answer, souk_connect_payload(challenge, "pn"))
+    finally:
+        await souk.aclose()
+
+
+async def test_a_pinning_link_refuses_the_wrong_souk(settings: CoreSettings):
+    from souk_provider_sdk import WrongSouk
+
+    souk = _souk_with_identity(settings)
+    try:
+        identity = ProviderIdentity.generate()
+        await _register(souk, identity, "wary")
+        elsewhere = ProviderIdentity.generate().public_key
+
+        with pytest.raises(WrongSouk):
+            await souk.attach_provider(
+                _link(souk, identity, souk_public_key=elsewhere), ["wary"]
+            )
+        from souk.models import AgentRef
+
+        assert not souk.is_serving(AgentRef(provider_key=identity.public_key, name="wary"))
+    finally:
+        await souk.aclose()
+
+
+async def test_an_identityless_souk_answers_nothing_and_only_a_pin_objects(settings: CoreSettings):
+    from souk_provider_sdk import WrongSouk
+
+    souk = Souk(settings)
+    try:
+        identity = ProviderIdentity.generate()
+        await _register(souk, identity, "trusting")
+
+        answer = await souk.attach_provider(_link(souk, identity), ["trusting"])
+        assert answer is None
+        await souk.detach_provider(identity.public_key)
+
+        pinned = ProviderIdentity.generate().public_key
+        with pytest.raises(WrongSouk):
+            await souk.attach_provider(
+                _link(souk, identity, souk_public_key=pinned), ["trusting"]
+            )
+    finally:
+        await souk.aclose()

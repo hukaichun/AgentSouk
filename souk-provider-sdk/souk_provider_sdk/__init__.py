@@ -19,6 +19,7 @@ from souk_provider_sdk.identity import (
     souk_connect_payload,
     verify_chain,
     verify_signature,
+    WrongSouk,
 )
 from souk_provider_sdk.props import CallerProps, KyokForwardedProps, VerifiedActor
 from souk_provider_sdk.provider import AgentHandle, DeliveredRun, HandleProvider, Provider, Refusal
@@ -34,6 +35,7 @@ __all__ = [
     "new_nonce",
     "provider_connect_payload",
     "souk_connect_payload",
+    "WrongSouk",
     "CONNECTED_PROVIDER_ATTRS",
     "InProcessLink",
     "SoukLink",
