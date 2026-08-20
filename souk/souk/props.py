@@ -8,6 +8,18 @@ from souk.kyok import kyok_forwarded_props
 from souk.models import AgentRef
 
 
+RESERVED_METADATA_KEYS = frozenset(
+    {"verifiedActorChain", "addressedRunId", "interrupts", "failureReason", "souk"}
+)
+"""Metadata keys souk itself writes into a run's record (plus "souk", held in
+reserve). A caller-supplied value under any of these is stripped at the doors
+before anything reads or stores the metadata — otherwise a caller could plant
+a forged `verifiedActorChain` (or a fake failure reason) that would sit in the
+record wearing souk's handwriting. The strip happens in one place,
+`protocols.agui.verify_caller`, because both doors funnel caller metadata
+through it."""
+
+
 class VerifiedActor(BaseModel):
     """One hop of a verified actor chain, resolved against the roster: the hop's signing key, and the agent name registered under it (None if unregistered)."""
 

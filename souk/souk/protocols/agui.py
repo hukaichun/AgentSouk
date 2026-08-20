@@ -17,7 +17,7 @@ from souk.kyok import (
     parse_kyok_opt_in,
     strip_kyok_context,
 )
-from souk.props import build_forwarded_props
+from souk.props import RESERVED_METADATA_KEYS, build_forwarded_props
 
 if TYPE_CHECKING:
     from souk.core import Souk
@@ -182,8 +182,15 @@ async def verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict],
     """Verifies `metadata["actorChain"]` if present, resolving each actor's public key to a
     registered agent name and returning `(metadata with a verifiedActorChain entry added,
     verified subject, verified actors, raw actor chain)`. Raises `InvalidActorChain` if the
-    chain is tampered. Returns `metadata` unchanged with empty/`None` verification fields if
-    there is no actor chain to verify."""
+    chain is tampered. Returns `metadata` with empty/`None` verification fields if there is
+    no actor chain to verify.
+
+    Both doors funnel caller metadata through here, which makes it the one
+    place to strip souk's reserved keys from the caller's input: without the
+    strip, a caller could plant a forged `verifiedActorChain` — no chain
+    attached, nothing to verify, yet the record would carry a verification
+    summary in souk's handwriting."""
+    metadata = {k: v for k, v in metadata.items() if k not in RESERVED_METADATA_KEYS}
     actor_chain = metadata.get("actorChain")
     if not actor_chain:
         return metadata, None, [], None
