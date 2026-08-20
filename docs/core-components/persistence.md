@@ -87,9 +87,11 @@ which revision they match. Two facts, both importable:
   into `alembic_version`. A test asserts it equals the chain's head, so
   it cannot drift from the migrations.
 
-!!! note "`health()` reports, it does not judge"
-    `Souk.health()` returns both the revision it found and the revision
-    it expected, and does **not** compare them. A deployment that wants
-    a mismatch to be fatal makes that comparison itself. (Note also that
+!!! note "`health()` checks the revision you wrote"
+    `Souk.health()` returns both the revision it found and the one souk
+    expected, and the `Health` it returns compares them:
+    `schema_current` is that comparison, and `ready` requires it. So a
+    Tier-3 database with the wrong revision row reports not-ready rather
+    than failing later in some unrelated place. (Note also that
     `Souk.health()` — the readiness probe — is a different thing from
     the `health` module, which runs the stalled-run sweeps.)

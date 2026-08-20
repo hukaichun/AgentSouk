@@ -64,8 +64,10 @@ so the run that stopped to ask a human is not filed as one that finished.
 
 Runs that never reach that funnel are failed with a reason instead: an
 agent with no attached provider (`agent_offline`), a queued run whose
-agent went unserved past its window (`no_provider_took_it`), a permanent
-refusal, and a malformed event — one whose known AG-UI `type` fails
+agent went unserved past its window (`no_provider_took_it`), a claimed
+run gone silent past the stall timeout (`stalled_no_activity`), a paused
+run nobody answered before its deadline (`paused_no_resume`), a
+permanent refusal, and a malformed event — one whose known AG-UI `type` fails
 validation, or one with no `type` string at all. An event whose `type`
 is a string souk merely does not recognise is not malformed: it is a
 newer AG-UI's event, and souk relays it untouched — whether to skip it
@@ -75,6 +77,14 @@ A run recorded `failed` that never emitted its own `RUN_ERROR` gets one
 synthesized, persisted and relayed, so a caller can tell failure from an
 agent with nothing to say. A run that already reported its own is left
 alone.
+
+That holds for every run the broker still tracks. **It does not hold for
+a paused run failed as `paused_no_resume`**: the broker forgot the run
+when it paused, so there is no stream left to push a terminal event
+onto, and the status changes in the database with nothing said. A caller
+watching the stream sees it simply stop after the `RUN_FINISHED` that
+asked the question. That is the same silence the synthesized `RUN_ERROR`
+exists to prevent, and it is a gap rather than a decision.
 
 ## Cancelling is not a state a caller can read as final
 

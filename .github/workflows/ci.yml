@@ -47,7 +47,7 @@ jobs:
       # reproduces a specific failure and exits non-zero if the verdict has
       # not changed.
       #
-      # Two of the five probes are deliberately *not* here.
+      # Two of the six probes are deliberately *not* here.
       # `probe_multiprocess.py` is the target for the horizontal-scaling work
       # and currently fails 6/6 on purpose; `probe_broker_surface.py` reports
       # what escapes the broker rather than judging it. Listing them would

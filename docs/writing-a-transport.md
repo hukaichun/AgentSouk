@@ -122,11 +122,18 @@ Dump typed events with `exclude_none=True`. A default dump injects
 that flag the round trip is byte-identical to the input. Read only the
 fields you are deciding on.
 
-Be aware of the open edge here: an event that does not validate as
-AG-UI ends the run, so a provider running a newer AG-UI than souk can be
-cut off by an event type souk has not heard of. See
+Validation is three-way, and a transport should not add a fourth. An
+event whose `type` souk knows is validated strictly, and a failure ends
+the run. An event carrying a `type` string souk does **not** know is
+relayed untouched — souk is a relay, and a provider on a newer AG-UI
+must not be cut off by an event type souk has not heard of. An event
+with no `type` string at all still ends the run, because there is
+nothing to relay it as.
+
+So do not filter unknown event types on the way through, and do not
+wrap them: see
 [the design record](design-records.md#wrapping-an-unknown-event-in-rawevent-is-quiet-corruption)
-before working around it.
+for why `RawEvent` is the wrong shape for this.
 
 ## Prove it against the vectors
 

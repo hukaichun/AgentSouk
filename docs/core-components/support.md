@@ -26,9 +26,12 @@ and a terminal event; none
 guesses an outcome — the sweeps time out on the *absence* of one, which
 is itself an observation. `Souk.health()` is the companion snapshot:
 whether the database is reachable, which schema revision it found
-alongside the one souk expected, and whether the dispatch loop is alive.
-It reports those facts and compares nothing — deciding that a revision
-mismatch is fatal is the caller's call.
+alongside the one souk expected, and two separate liveness facts —
+whether the sweep task is running and whether the dispatch loop is. The
+`Health` it returns draws the conclusions too: `schema_current` compares
+the two revisions, and `ready` is database *and* schema-current *and*
+dispatching. A deployment that wants a different bar reads the fields
+instead.
 
 **Settings** (`config.py`) — `CoreSettings`, a pydantic-settings object
 reading environment variables under the `SOUK_` prefix. Resolution
@@ -77,6 +80,11 @@ can advertise the same agent over several wires, and omitting
 `interfaces` omits the block from the card. The serving layer supplies
 what it alone knows, once, at the point it is needed.
 
+The card's `version` follows the same rule: it is read off the agent's
+own registered card, falling back to `0.1.0` only when the agent
+declared none. souk publishes what the agent said about itself rather
+than a number of its own.
+
 ## Attach authentication has no switch
 
 A link either proves its key or is refused, so the handshake is the same
@@ -86,18 +94,24 @@ prove itself never learns whether a name is registered.
 
 ## Starting and stopping
 
-`Souk.start()` runs once — a second call returns immediately, because
-its job is to fail runs left `queued` or `running` by a previous
-process, and a second pass cannot reap runs queued after the first. It
-is a guard, not a permanent latch: `aclose()` clears it, so a closed
-souk can be started again.
+`Souk.start()` runs once, and it does two things a restart needs. It
+fails the runs a previous process left `queued` or `running`, and it
+re-acquires the thread gate for every run left `input-required` — a
+paused question survives a restart, so the turn it is holding has to be
+re-taken, or a queued sibling would overtake an unanswered question.
+A second call returns immediately, because a second pass cannot reap
+runs queued after the first. It is a guard, not a permanent latch:
+`aclose()` clears it, so a closed souk can be started again.
 
-`mark_run_status` is the single funnel for every status change: it
-writes through the repository and then fires `RunStatusChanged`. That is
-enforced rather than asked for — a test walks the AST of every module in
-the package and fails on any direct call to the repository's own
-`mark_run_status`, so a new call site cannot quietly skip the
-notification.
+`mark_run_status` is the single funnel for every status change, and it
+now does three things: it writes through the repository, releases the
+thread gate when the status is terminal, and fires `RunStatusChanged`.
+The gate release is why the funnel matters more than it used to — a
+status written around it would strand a thread, not just a
+notification. It is enforced rather than asked for: a test walks the AST
+of every module in the package except the repository and the funnel
+itself, and fails on any direct call to the repository's
+`mark_run_status`.
 
 One nuance worth knowing before you build on the hook: writing a status
 equal to the one already stored still fires an event. Detaching

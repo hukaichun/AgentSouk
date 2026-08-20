@@ -16,18 +16,30 @@ currently served — an offline agent fails the run immediately with a
 terminal event rather than queueing into silence. Then the run input is
 built (below), handed to the broker, and the caller gets back a live
 **event stream**: an async iterator that yields each AG-UI event as the
-provider produces it. A run on a thread that already has one in flight
+provider produces it — carrying **souk's** thread id, which is the
+authoritative one: a caller-supplied `threadId` souk does not know is
+not adopted, and the substitution rides back on every event rather than
+happening silently (see
+[conversation naming rights](../design-records.md#conversation-naming-rights-wait-for-a-caller-to-own-them)).
+A run on a thread that already has one in flight
 is accepted and queued behind it, its stream silent until its turn —
 AG-UI has no "accepted, not yet worked on" state to answer with, and an
 AG-UI client holds one session per thread, so the unusual second run is
 queued rather than refused. Resuming a paused run is the same door with
 a `resume` payload — the run keeps its id and its provider is invoked
-again, targeting the thread's `input-required` run specifically.
+again, targeting the thread's `input-required` run specifically. Two
+callers answering the same question race, and the loser gets a
+`ThreadSnapshot` of the thread as it now stands rather than a stream:
+the question was already answered, so there is no second resume to
+watch.
 
 The A2A door (`protocols/a2a.py`) speaks JSON-RPC with method names read
 off the A2A service descriptor (nothing hand-written, so an upstream
-rename fails at import). `message/send` creates a thread and run the
-same way; task states are derived from run statuses; `referenceTaskIds`
+rename fails at import). `message/send` creates a thread and run through
+the same repository calls, with one deliberate difference: an unknown
+`contextId` is refused rather than replaced, because A2A's spec assigns
+that id server-side while AG-UI's is client-chosen and required. Task
+states are derived from run statuses; `referenceTaskIds`
 records lineage; `tasks/cancel` is the one external cancel path. Every
 message is kept: one whose `taskId` names the thread's paused
 `input-required` task is the answer to its question and resumes that
@@ -155,6 +167,14 @@ A provider that declines while claiming to have room is counted
 the only capacity figure souk has and the decline is the more recent
 fact. This is also what makes self-delegation deadlock — see
 [the design record](../design-records.md#self-delegation-deadlocks-a-capacity-capped-provider).
+
+Treating-as-full only has anything to set, though, when the provider
+declared a finite limit. A provider that declared **unlimited**
+concurrency and then declines is counted `misdeclared` and re-offered
+immediately, every sweep, for as long as it keeps declining — the
+counter records the discourtesy, but nothing backs off. Declaring no
+limit and meaning it is the contract; declaring no limit and declining
+is the one misdeclaration souk cannot act on.
 
 ## One substrate under both
 

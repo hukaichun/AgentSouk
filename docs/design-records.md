@@ -392,8 +392,9 @@ See [Support](core-components/support.md) →
 
 A provider with `max_concurrent_runs=1` that delegates to **its own**
 agent deadlocks: the outer run holds the slot while it waits, the inner
-run needs a slot from the same provider, souk offers it and the provider
-declines as full, and the outer run sits `running` until the stall sweep
+run needs a slot from the same provider, and souk — tracking that
+provider's budget itself — withholds the offer rather than asking. The
+outer run sits `running` until the stall sweep
 gives up on it — `run_stall_timeout_seconds`, 120s by default. A
 provider that recurses should stay on the default unlimited capacity.
 Delegating to a *different* provider is unaffected, since it has its own
@@ -405,9 +406,9 @@ souk imposes no depth limit and performs no cycle detection.
 
 ## Open contradictions
 
-Two things on this page disagree with each other or with the code. Both
-are recorded rather than resolved, because resolving either is a design
-decision nobody has made yet.
+One thing on this page still disagrees with the code. It is recorded
+rather than resolved, because resolving it is a design decision nobody
+has made yet.
 
 **`thread_id` is a credential today and a pure name under rule zero.**
 [Rule zero](#rule-zero-identifiers-are-never-credentials) says nothing
@@ -419,10 +420,15 @@ naming the thread and carrying non-empty resume entries gets through.
 Rule zero exists to replace that. Until it is built, both statements are
 true of different points in time.
 
-**AG-UI mints an unknown thread; A2A rejects an unknown context.** An
-AG-UI run naming a `thread_id` that does not exist creates a new thread
-(`protocols/agui.py` passes `create_if_missing=True`), while an A2A
-request naming an unknown `contextId` raises `ThreadNotFound`
-(`protocols/a2a.py` takes `repo.ensure_thread`'s default of `False`).
-The two protocol surfaces answer the same situation in opposite ways.
-Whether that asymmetry is intended has never been written down.
+Answering a paused A2A task rides `taskId`, so this contradiction now
+has money and authority behind it rather than just read access: knowing
+a task id is enough to answer someone else's paused question. That is
+the interim marker until A2A v1.1's `elicitationId` lands, and it is the
+sharpest reason rule zero needs a caller identity to scope names and
+rights to.
+
+The door asymmetry that used to be recorded here as unexplained — AG-UI
+minting an unknown thread while A2A refuses one — is no longer a
+contradiction: it is [each protocol's own
+grammar](#conversation-naming-rights-wait-for-a-caller-to-own-them),
+with one deliberate rule underneath both.
