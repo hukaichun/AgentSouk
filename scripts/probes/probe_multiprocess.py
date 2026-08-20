@@ -1,8 +1,7 @@
 """What two souk processes behind a load balancer actually do, today.
 
 The baseline the horizontal-scaling work is measured against (see
-design/broker-horizontal-scaling.md, kept in git history at d78d063 rather
-than in the tree). Everything here is expected to *fail* on
+docs/broker-horizontal-scaling.md). Everything here is expected to *fail* on
 current code — that is the point. Each scenario prints what happened and what
 the design says should happen instead, so the same script becomes the pass/fail
 check as each phase lands rather than being thrown away.

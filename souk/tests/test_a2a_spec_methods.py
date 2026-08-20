@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import pytest
@@ -121,20 +122,3 @@ async def test_a_card_for_a_souk_nobody_serves_advertises_nowhere(souk, callee):
 
     assert "supportedInterfaces" not in card
     assert card["capabilities"]["streaming"] is True
-
-
-async def test_the_agent_card_carries_the_agents_own_version(souk):
-    from tests.conftest import Identity
-
-    identity = Identity()
-    signature, timestamp = identity.sign_registration(["versioned"])
-    registered = await souk.register_agents(
-        identity.public_key,
-        signature,
-        timestamp,
-        [{"name": "versioned", "agent_card_extra": {"version": "3.1.4"}}],
-    )
-
-    card = await A2AAdapter(souk).agent_card(registered.agents["versioned"])
-
-    assert card["version"] == "3.1.4"

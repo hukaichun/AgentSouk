@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -26,8 +27,8 @@ async def _register(souk: Souk, name: str = "translator", provider_name: str | N
 
 class _Provider:
     async def run_stream(self, agent_id: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
-        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
 async def test_the_roster_is_agent_summaries(souk: Souk) -> None:

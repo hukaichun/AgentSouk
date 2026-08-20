@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +10,8 @@ AGENT = AgentRef(provider_key="sdk_1", name="agent_1")
 
 
 class _Taker:
+    """Takes the run and leaves it running, so there is something to report
+    against and an owner to check reports from."""
 
     public_key = "sdk_1"
     max_concurrent_runs = None
@@ -28,7 +31,7 @@ async def _delivered(broker: RunBroker, key: str = "sdk_1"):
     async with asyncio.timeout(1):
         while run.claimed_by is None:
             await asyncio.sleep(0)
-    run.in_queue.get_nowait()
+    run.in_queue.get_nowait()  # the Claim delivery queued
     return run
 
 
@@ -52,6 +55,8 @@ async def test_a_reported_event_lands_on_the_runs_own_queue_untouched(souk):
 
 
 async def test_an_event_for_someone_elses_run_is_refused(souk):
+    """Holding a connection is not the same as holding a particular run: a
+    provider may only speak for runs it was actually given."""
     broker = RunBroker()
     broker.start()
     souk.broker, original = broker, souk.broker

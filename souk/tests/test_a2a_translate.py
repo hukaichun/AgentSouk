@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from a2a.types import a2a_pb2 as pb
@@ -95,9 +96,7 @@ def test_inbound_parts_are_read_under_every_spec_version():
     v0_3 = a2a_message_to_agui_messages({"role": "user", "parts": [{"kind": "text", "text": "hi"}]})
     original = a2a_message_to_agui_messages({"role": "user", "parts": [{"type": "text", "text": "hi"}]})
 
-    as_content = [{"role": m["role"], "content": m["content"]} for m in (current[0], v0_3[0], original[0])]
-    assert as_content == [{"role": "user", "content": "hi"}] * 3
-    assert current[0]["id"] == "unset"
+    assert current == v0_3 == original == [{"role": "user", "content": "hi"}]
 
 
 def test_an_agent_role_is_recognised_under_either_spelling():

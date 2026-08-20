@@ -1,15 +1,29 @@
+"""Ports AG-UI's own reference client-side reconstruction logic
+(`@ag-ui/client`'s `defaultApplyEvents`) to Python: turns a run's raw
+event stream back into real `ag_ui.core.AssistantMessage`/`ToolMessage`
+objects, using only `messageId`/`toolCallId`/`parentMessageId` — the same
+fields any AG-UI-speaking provider is already guaranteed to send, so no
+provider-specific cooperation is needed (see souk/pause.py's neighboring
+module docstrings for the same "works for any AG-UI agent" principle).
+
+This is what makes `thread_history` (and therefore `GET /threads/
+{thread_id}`) an actual source of truth for the full conversation,
+including tool calls — not just caller-side messages, which is all it
+persisted before (see handlers._handle_finish, the one caller of
+this).
+"""
+
 from __future__ import annotations
 
 from typing import Any
 
 
 def reduce_events_to_messages(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Folds a stream of AG-UI events into the thread-history messages they represent, in the
-    order each message first appeared. Text-message events accumulate into one assistant
-    message per `messageId`; tool-call events accumulate into the parent message's `toolCalls`
-    (or their own standalone message if there is no parent); a `TOOL_CALL_RESULT` becomes its
-    own tool message. Lifecycle and state events (e.g. `RUN_STARTED`, `STATE_DELTA`) produce
-    nothing."""
+    """Returns the AssistantMessage/ToolMessage dicts implied by `events`,
+    in the order each first appeared. Ignores every other AG-UI event
+    type (RUN_STARTED, STATE_DELTA, STEP_*, ...) — those aren't
+    conversation content.
+    """
     messages: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     tool_call_parent: dict[str, str] = {}
@@ -31,6 +45,11 @@ def reduce_events_to_messages(events: list[dict[str, Any]]) -> list[dict[str, An
 
         elif etype == "TOOL_CALL_START":
             tool_call_id = event["toolCallId"]
+            # No parentMessageId means this tool call isn't attached to
+            # any text message already being streamed — it still needs
+            # some assistant message to live under, so it gets its own
+            # (keyed by its own tool_call_id, same as the reference
+            # client does for a standalone tool-call turn).
             parent_id = event.get("parentMessageId") or tool_call_id
             tool_call_parent[tool_call_id] = parent_id
             msg = assistant_message(parent_id)
@@ -62,5 +81,7 @@ def reduce_events_to_messages(events: list[dict[str, Any]]) -> list[dict[str, An
             }
             order.append(message_id)
 
+        # TEXT_MESSAGE_END / TOOL_CALL_END carry nothing not already
+        # implied by the START/CONTENT/ARGS events above — nothing to do.
 
     return [messages[message_id] for message_id in order]

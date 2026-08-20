@@ -1,3 +1,31 @@
+"""Minimal provider identity: proves whoever registers under a public_key
+actually holds the matching private key, and gates every worker call on a
+short-lived bearer token issued only after that proof.
+
+Deliberately not a full account system — no signup flow, no stored
+credentials beyond the public key itself. A provider's identity *is* its
+Ed25519 keypair (see souk_agent_sdk.identity, which generates and persists
+one on first run). This is enough to close the one gap that matters for a
+public, multi-tenant souk: nobody can act as a public_key they don't hold
+the private key for. A `name` on its own is deliberately *not* an identity —
+it is not exclusive, and two providers may both offer `translator`. What is
+owned is the pair: `PRIMARY KEY (provider_key, name)` in souk/schema.py.
+
+One check, at one point: registration must be signed with the private key
+matching the public_key it presents (see repo.register_agents).
+
+There used to be a second — a bearer token issued at registration and
+required on every worker call. It existed for `claim_work`, which a provider
+called to ask for work. souk hands work over now (see souk/broker.py), so
+nothing asks souk for anything and there is no call left to present a token
+to. It was removed rather than left as something for a transport to find a
+use for: a credential nobody verifies is one downstream will assume means
+more than it does.
+
+Authenticating a *connection* is a different question, with a different
+answer, and it belongs to whatever holds connections.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -11,23 +39,44 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 
 SESSION_TOKEN_TTL_SECONDS = 3600
 
+# How far a signed request's own `timestamp` is allowed to drift from
+# souk's clock before the signature is refused outright, independent of
+# whether it's cryptographically valid. Without this, a signature has no
+# concept of "when" — anyone who merely *observes* one valid signed
+# request on the wire (no need to break Ed25519 or steal a private key)
+# could replay the exact same bytes indefinitely, e.g. to keep minting
+# fresh session tokens for a provider's identity forever. This bounds
+# that to a narrow window instead. Transport encryption (TLS) is what
+# stops the observation in the first place — this is defense in depth,
+# not a substitute for it.
 SIGNATURE_FRESHNESS_WINDOW_SECONDS = 60
 
 
+# A short, stable stand-in for a provider's public key, for places a
+# 64-character hex string is unusable — chiefly an address a human reads or
+# types (see docs/library-architecture.md on addressing). Derived, never
+# minted: anyone holding the key can compute it, it is the same on every
+# souk, and there is nothing to store on the provider's side or hand out.
+#
+# 16 hex is 64 bits. That is not about accidental collisions (those would
+# need ~2^32 providers) but deliberate ones: grinding keypairs until one
+# matches a chosen provider's fingerprint costs ~2^64, out of reach. souk
+# also refuses a registration whose fingerprint already belongs to another
+# key (see repo.ensure_provider), so even a found collision blocks a
+# registration rather than impersonating anyone.
 FINGERPRINT_HEX_LENGTH = 16
 
 
 def provider_fingerprint(public_key: str) -> str:
-    """Derives a short, deterministic identifier for a provider from its public key.
-
-    Two different providers registering under the same fingerprint is treated
-    as a collision (see `ProviderFingerprintTaken`); an agent can be resolved
-    by either its full public key or this fingerprint.
-    """
+    """SHA-256 of the key's raw bytes, truncated. The bytes rather than the
+    hex text, so the answer does not depend on how the hex was cased."""
     return hashlib.sha256(bytes.fromhex(public_key)).hexdigest()[:FINGERPRINT_HEX_LENGTH]
 
 
 def is_fingerprint(value: str) -> bool:
+    """Whether this is a fingerprint rather than a full public key. The two
+    are distinguishable by length — 16 hex against 64 — so one parameter can
+    accept either without ambiguity."""
     return len(value) == FINGERPRINT_HEX_LENGTH
 
 
@@ -35,114 +84,47 @@ def is_timestamp_fresh(timestamp: int) -> bool:
     return abs(time.time() - timestamp) <= SIGNATURE_FRESHNESS_WINDOW_SECONDS
 
 
+# What a signed request is *for*. Every signing payload starts with one of
+# these, so a signature captured for one operation cannot be presented as
+# another.
+#
+# This is not defensive habit; it closes a hole that was measured. Before it,
+# a registration signed `"translator:1755300000"` — and the obvious payload
+# for deleting one agent is the same name and the same timestamp, byte for
+# byte. Anyone who merely observed a provider register a single agent held a
+# valid order to delete it, for as long as the freshness window allows.
+#
+# The hole predates deletion: with only one signed operation there was nothing
+# to be confused with. Adding a second is what made it reachable, which is why
+# the prefixes arrive with it rather than after.
 _REGISTER = "souk-register"
-_REGISTER_LLM = "souk-register-llm"
 _DELETE_AGENT = "souk-delete-agent"
-_DELETE_LLM = "souk-delete-llm"
-_KYOK_CALL = "souk-kyok-call"
-_CONNECT_PROVIDER = "souk-connect-provider"
-_CONNECT_SOUK = "souk-connect-souk"
-
-
-def _roster_registration_payload(tag: str, names: list[str], timestamp: int) -> bytes:
-    """One payload shape for registering a roster of served names: sorted (order-independent), joined with `timestamp`, under a domain `tag`.
-
-    The tag is what keeps the payload spaces apart — a signature for one
-    roster (or a deletion order) must not be replayable as another.
-    `souk_provider_sdk.identity.roster_registration_payload` computes this
-    same shape independently on the provider side and both must agree
-    byte-for-byte.
-    """
-    return f"{tag}:{','.join(sorted(names))}:{timestamp}".encode()
 
 
 def registration_signing_payload(agent_names: list[str], timestamp: int) -> bytes:
-    """Builds the canonical bytes a provider must sign to prove it holds the key it registers with: `_roster_registration_payload` under the agent tag."""
-    return _roster_registration_payload(_REGISTER, agent_names, timestamp)
+    """What a registration signs: which names are being claimed, and when.
 
-
-def llm_registration_signing_payload(names: list[str], timestamp: int) -> bytes:
-    """Builds the canonical bytes an LLM provider must sign to register `names`: `_roster_registration_payload` under the LLM tag.
-
-    `souk_llm_provider_sdk` computes this same payload independently on the
-    provider side and both must agree byte-for-byte.
+    The identity itself is not in here and does not need to be — the
+    signature is verified against the public_key presented alongside, so a
+    captured payload cannot be re-presented under a different key. What must
+    be covered is what the request *claims* (the names), which operation it
+    is asking for, and its freshness.
     """
-    return _roster_registration_payload(_REGISTER_LLM, names, timestamp)
+    return f"{_REGISTER}:{','.join(sorted(agent_names))}:{timestamp}".encode()
 
 
 def agent_deletion_signing_payload(agent_name: str, timestamp: int) -> bytes:
-    """Builds the canonical bytes a provider must sign to authorize deleting one of its agents.
+    """What deleting one agent signs.
 
-    Uses a distinct domain tag from `registration_signing_payload` so a
-    captured registration signature can't be replayed to delete the agent.
+    One name, never a batch: deleting is not something to do by accident to a
+    list. Registration is declarative and idempotent; this is neither.
     """
     return f"{_DELETE_AGENT}:{agent_name}:{timestamp}".encode()
 
 
-def llm_deletion_signing_payload(name: str, timestamp: int) -> bytes:
-    """Builds the canonical bytes an LLM provider must sign to authorize deleting one of its offerings.
-
-    The LLM mirror of `agent_deletion_signing_payload`, under its own domain
-    tag for the same reason. `souk_llm_provider_sdk.llm_deletion_payload`
-    computes this same payload independently on the provider side and both
-    must agree byte-for-byte.
-    """
-    return f"{_DELETE_LLM}:{name}:{timestamp}".encode()
-
-
-def provider_connect_signing_payload(
-    souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
-) -> bytes:
-    """Builds the canonical bytes a provider signs to authenticate opening a link.
-
-    Freshness is the verifier's: `souk_nonce` is chosen by the souk being
-    connected to, so a recorded exchange is worthless to whoever recorded
-    it. `provider_nonce` is the provider's own challenge for souk's answering
-    proof, and the names the provider intends to serve are bound in (sorted,
-    order-independent) so they cannot be altered in flight.
-    `souk_public_key` names the recipient: the souk the provider means to
-    connect to (its pinned key; empty string for a souk with no identity),
-    so a proof handed to one souk cannot be relayed to attach at another —
-    the verifying souk builds this payload with its *own* key and a
-    mismatch fails the signature. The role in the domain tag keeps this
-    proof and souk's from ever being the same bytes, and the tag keeps it
-    unmistakable for a registration or deletion.
-    `souk_provider_sdk.identity.provider_connect_payload` computes this same
-    payload independently on the provider side and both must agree
-    byte-for-byte.
-    """
-    return (
-        f"{_CONNECT_PROVIDER}:{souk_public_key}:{souk_nonce}:{provider_nonce}:"
-        f"{','.join(sorted(names))}".encode()
-    )
-
-
-def souk_connect_signing_payload(souk_nonce: str, provider_nonce: str) -> bytes:
-    """Builds the canonical bytes souk signs (with `SoukIdentity`) to prove itself to a connecting provider.
-
-    Covers the provider's nonce (the provider chose the freshness) and
-    souk's own, under a role tag distinct from the provider's proof so
-    neither can be reflected as the other. This is the payload behind
-    "letting a provider pin souk by its public key": a provider verifies it
-    against the souk key it pinned before producing anything worth
-    stealing. `souk_provider_sdk.identity.souk_connect_payload` computes
-    this same payload independently and both must agree byte-for-byte.
-    """
-    return f"{_CONNECT_SOUK}:{souk_nonce}:{provider_nonce}".encode()
-
-
-def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> bytes:
-    """Builds the canonical bytes the agent provider signs to prove it made a given KYOK completion call.
-
-    Binds the payload to the bearer token, timestamp, and a hash of the
-    request body, so a captured signature can't be replayed for a
-    different call. `souk_provider_sdk.identity.kyok_call_payload`
-    computes this same payload independently on the provider side and
-    both must agree byte-for-byte.
-    """
-    return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
-
-
+# How long one freshly-signed hop stays usable. Only the last hop's expiry
+# is enforced (see verify_actor_chain), so this bounds "who is using this
+# chain right now", not how long the provenance it records stays readable.
 ACTOR_CHAIN_TTL_SECONDS = 300
 
 
@@ -162,16 +144,32 @@ def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | N
 
 
 def new_actor_chain(private_key: Ed25519PrivateKey, subject: dict) -> list[str]:
-    """Starts a new actor chain: a single hop, signed by `private_key`, vouching for `subject`."""
+    """Start a chain. `subject` is who it is fundamentally about.
+
+    An agent calling on its own behalf passes itself
+    (`{"type": "agent", "publicKey": ...}`). One that authenticated a human
+    by its own means — SSO, an internal login, whatever souk has no view of
+    — passes that instead (`{"type": "user", "id": "employee_x"}`). souk
+    never verifies that claim, because it cannot: how a user proved
+    themselves to the first agent is between them. What souk verifies is
+    that every actor signing a hop really holds the key it claims, and that
+    the chain has not been altered since.
+    """
     return [_sign_hop(private_key, subject, None)]
 
 
 def extend_actor_chain(private_key: Ed25519PrivateKey, prev_chain: list[str]) -> list[str]:
-    """Appends a new hop signed by `private_key` to `prev_chain`, carrying the same subject forward.
+    """Add this actor's hop to a chain it received and is relaying onward.
 
-    The new hop links to the chain's last hop via a hash of that token, so
-    the chain records who acted on whose behalf, in order. Raises
-    `ValueError` if `prev_chain` is empty.
+    This is what makes provenance survive a delegation. Without it a hop is
+    a dead end: whoever receives the call can be told who is calling *now*,
+    but not on whose behalf, and nothing ties the two together. souk keeps
+    this in core precisely so that an agent running inside souk can carry a
+    chain forward exactly as a remote one does — an in-process hop must not
+    be the place a chain quietly stops.
+
+    The subject is copied from the last hop as-is and not verified here;
+    souk checks the whole chain's integrity when it is used.
     """
     if not prev_chain:
         raise ValueError(
@@ -184,6 +182,9 @@ def extend_actor_chain(private_key: Ed25519PrivateKey, prev_chain: list[str]) ->
 @dataclass
 class ChainResult:
     subject: dict
+    # Ordered oldest -> newest, mirroring the input chain: actor_public_keys[0]
+    # is whoever originated the chain, actor_public_keys[-1] is the immediate
+    # caller souk received this request from.
     actor_public_keys: list[str]
 
 
@@ -196,21 +197,48 @@ def _hop_hash(token: str) -> str:
 
 
 def verify_actor_chain(chain: list[str]) -> ChainResult:
-    """Verifies an actor chain and returns the subject it vouches for plus each hop's actor key, in order.
+    """Verifies a caller-supplied identity chain — see
+    souk_agent_sdk.identity.new_actor_chain/extend_actor_chain for how one
+    is built, and protocols.a2a's _start_run for where this is called.
 
-    Each hop's signature must verify under its own embedded public key, and
-    each hop after the first must link to the previous hop via a matching
-    `prevHash` — reordering, truncating, or splicing in a hop from a
-    different chain breaks this and is rejected. Every hop must vouch for
-    the same `subject`. Only the last hop's expiry is enforced; earlier
-    hops may have expired since they were signed. Raises
-    `InvalidActorChain` on any of these failures, including an empty chain
-    or an unparseable/forged token.
+    Each entry in `chain` is a standard compact JWT (alg=EdDSA), signed by
+    whoever performed that hop, so any off-the-shelf JWT library can
+    decode/verify an individual entry — this is deliberately *not* an
+    invented wire format of our own. What's souk-specific is only how
+    entries are chained together: each entry's payload carries
+    `prevHash` = sha256 of the previous entry's raw token string (or None
+    for the first), binding them into an ordered, tamper-evident sequence
+    that can't be reordered, truncated, or spliced with hops from a
+    different chain. This is intentionally simpler than RFC 8693 OAuth
+    Token Exchange's nested `act` claim, which assumes a central token
+    issuer re-signing at every hop — souk has no such issuer; each actor
+    signs for itself instead.
 
-    Hops also arrive from out-of-process providers:
-    `souk_provider_sdk.identity.ProviderIdentity.sign_hop` builds the same
-    JWT claim format independently, and any change here must keep verifying
-    what it signs.
+    `subject` (who the chain is fundamentally about — see each hop's
+    payload) is carried unchanged through every entry and must match
+    across all of them; it does NOT have to correspond to a registered
+    souk identity or even to any of the actors that signed a hop — e.g.
+    an "agency" agent can originate a chain asserting
+    `subject={"type": "user", "id": "..."}` for a human it authenticated
+    by whatever means are its own business, and souk has no way to (and
+    makes no attempt to) verify that claim independently. What souk *does*
+    cryptographically verify is that every actor in the chain really is
+    who it claims (matching the same Ed25519-keypair-is-identity model as
+    provider registration), and that the chain hasn't been tampered with.
+
+    Only the *last* hop's `exp` is enforced — it's the one that represents
+    "who is actually using this chain to make this call right now" and
+    needs freshness. Earlier hops are historical provenance, not standing
+    authorization: their signatures are still fully verified (a hop can't
+    be forged or altered), but letting their `exp` lapse must not brick
+    the whole chain — a run that's been paused on `input-required` for
+    longer than a hop's TTL (see souk.pause) still needs to be able to
+    resume and have its provider extend the chain further, and a chain
+    built once at the start of a long-running delegation shouldn't expire
+    out from under normal thinking/tool-call latency either.
+
+    Raises InvalidActorChain with a human-readable reason on any failure;
+    never returns a partially-verified result.
     """
     if not chain:
         raise InvalidActorChain("empty actor chain")
@@ -264,56 +292,11 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
 
 
 def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
-    """Returns True if `signature_hex` is a valid Ed25519 signature by `public_key_hex` over `payload`.
-
-    Returns False (never raises) for a mismatched key, a mismatched
-    payload, or malformed hex in either the key or the signature.
-    """
     try:
         public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(public_key_hex))
         public_key.verify(bytes.fromhex(signature_hex), payload)
         return True
     except (InvalidSignature, ValueError):
         return False
-
-
-class SoukIdentity:
-    """A souk instance's own signing identity, distinct from any provider's.
-
-    Two instances built from different keys are different identities that
-    don't verify each other's signatures; the same key hex produces the
-    same public identity across restarts, letting a provider pin souk by
-    its public key.
-    """
-
-    def __init__(self, private_key: Ed25519PrivateKey) -> None:
-        self._private_key = private_key
-        self.public_key = private_key.public_key().public_bytes_raw().hex()
-
-    @classmethod
-    def from_hex(cls, private_key_hex: str) -> "SoukIdentity":
-        """Builds an identity from a 32-byte seed given as 64 hex chars.
-
-        Raises `ValueError` if the string isn't valid hex or doesn't
-        decode to exactly 32 bytes.
-        """
-        try:
-            raw = bytes.fromhex(private_key_hex)
-        except ValueError as e:
-            raise ValueError("identity_private_key is not valid hex") from e
-        if len(raw) != 32:
-            raise ValueError(
-                f"identity_private_key must be a 32-byte seed (64 hex chars), got {len(raw)} bytes"
-            )
-        return cls(Ed25519PrivateKey.from_private_bytes(raw))
-
-    @staticmethod
-    def generate_hex() -> str:
-        """Generates a fresh private key and returns it as a 32-byte hex seed."""
-        return Ed25519PrivateKey.generate().private_bytes_raw().hex()
-
-    def sign(self, payload: bytes) -> str:
-        """Signs `payload` with this identity's private key, returning the signature as hex."""
-        return self._private_key.sign(payload).hex()
 
 

@@ -40,10 +40,9 @@ from sqlalchemy import delete
 
 from souk.config import CoreSettings
 from souk.core import Souk
-
 from souk.identity import registration_signing_payload
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
-from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import ProviderIdentity, ProviderRuntime
 
 DB = Path(tempfile.gettempdir()) / "souk_probe_new_database.db"
 URL = f"sqlite+aiosqlite:///{DB}"
@@ -55,20 +54,20 @@ def migrate() -> None:
         if p.exists():
             p.unlink()
     os.environ["SOUK_DATABASE_URL"] = URL
-    cfg = Config()
-    cfg.set_main_option("script_location", "souk:alembic")
+    cfg = Config(str(Path("alembic.ini").resolve()))
+    cfg.set_main_option("script_location", str(Path("alembic").resolve()))
     command.upgrade(cfg, "head")
 
 
 class Provider:
     """Holds only what its own configuration says: the names it serves."""
 
-    async def run_stream(self, agent_name: str, run_input):
-        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+    async def run_stream(self, agent_name: str, run_input: dict):
+        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": f"served by {agent_name}"}
         yield {"type": "TEXT_MESSAGE_END", "messageId": "m1"}
-        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
 async def main() -> int:
@@ -90,9 +89,9 @@ async def main() -> int:
     first = await register()
     # Attached once, with the names from this provider's own configuration.
     # Through the SDK's runtime, because that is what souk can hand a run to.
-    runtime = ProviderRuntime(identity, Provider())
+    runtime = ProviderRuntime(identity, Provider(), souk)
     runtime.start()
-    await souk.attach_provider(InProcessLink(souk, runtime), ["translator"])
+    await souk.attach_provider(runtime, ["translator"])
 
     handle = await souk.start_run(first.agents["translator"], {"messages": []})
     before = [event async for event in handle.events()]

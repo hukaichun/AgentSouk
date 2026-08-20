@@ -2,23 +2,21 @@
 
 Thanks for taking a look. This repo is a set of independent projects
 sharing one git history, not one coupled monorepo — see the README's
-[Repository structure](README.md#repository-structure) table for what each one is, and read
+[Components](README.md#components) table for what each one is, and read
 that section before assuming a change belongs where you'd first guess.
 
 ## What lives here, and what doesn't
 
-This tree is the library (`souk/`), the two provider-side contract
-packages (`souk-provider-sdk/`, `souk-llm-provider-sdk/`) and the published
-site (`docs/`), which carries the design records too.
-Everything else — the gateway, the transport SDKs, the reference
-providers and the directory UI — lives in
+This tree is the library (`souk/`) and its design record (`docs/`).
+Everything else — the gateway, both SDKs, the reference providers and
+the directory UI — lives in
 [AgentSoukServer](https://github.com/hukaichun/AgentSoukServer),
 which consumes `souk` through a submodule and owns both ends of every
 wire it defines — anything network-facing belongs there (see issue #27
 for the boundary).
 
-There is deliberately no shared `uv` workspace; each project (`souk`,
-`souk-provider-sdk`, `souk-llm-provider-sdk`) syncs independently:
+There is deliberately no shared `uv` workspace; each project syncs
+independently:
 
 ```bash
 cd souk && uv sync --group dev
@@ -33,9 +31,8 @@ socket — the HTTP surfaces, the relay, the KYOK endpoints — is tested in
 AgentSoukServer's own suite.
 
 The suite runs against **SQLite by default**, with no database to stand up
-first — souk's schema and queries are dialect-neutral (see
-`souk/souk/schema.py` and `souk/souk/repo.py`), so it exercises the same
-semantics on either backend.
+first — souk's schema and queries are dialect-neutral (see `souk/schema.py`
+and `souk/repo.py`), so it exercises the same semantics on either backend.
 
 ```bash
 cd souk

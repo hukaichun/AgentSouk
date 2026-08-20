@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import hashlib
@@ -119,24 +120,6 @@ def test_an_expired_last_hop_is_rejected():
 def test_extending_nothing_is_an_error():
     with pytest.raises(ValueError):
         extend_actor_chain(_key(), [])
-
-
-def test_the_sdk_verifier_agrees_with_core_in_both_directions(new_identity):
-    from souk_provider_sdk import InvalidChain, verify_chain
-
-    core_key, sdk_identity = _key(), new_identity()
-
-    core_chain = extend_actor_chain(core_key, [sdk_identity.sign_chain_hop(USER)])
-    ours, theirs = verify_actor_chain(core_chain), verify_chain(core_chain)
-    assert (ours.subject, ours.actor_public_keys) == (theirs.subject, theirs.actor_public_keys)
-
-    foreign = new_actor_chain(_key(), USER)
-    grafted = extend_actor_chain(core_key, foreign)[-1]
-    tampered = [*core_chain, grafted]
-    with pytest.raises(InvalidActorChain):
-        verify_actor_chain(tampered)
-    with pytest.raises(InvalidChain):
-        verify_chain(tampered)
 
 
 def test_core_and_sdk_produce_interoperable_chains(new_identity):

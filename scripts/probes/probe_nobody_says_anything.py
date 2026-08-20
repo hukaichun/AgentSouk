@@ -33,10 +33,9 @@ from sqlalchemy import delete
 from souk.broker import RunBroker
 from souk.config import CoreSettings
 from souk.core import Souk
-
 from souk.models import AgentRef
 from souk.schema import agents, providers, run_events, runs, thread_messages, threads
-from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import ProviderIdentity, ProviderRuntime
 
 DB = Path(tempfile.gettempdir()) / "souk_probe_silence.db"
 URL = f"sqlite+aiosqlite:///{DB}"
@@ -48,14 +47,14 @@ def migrate() -> None:
         if p.exists():
             p.unlink()
     os.environ["SOUK_DATABASE_URL"] = URL
-    cfg = Config()
-    cfg.set_main_option("script_location", "souk:alembic")
+    cfg = Config(str(Path("alembic.ini").resolve()))
+    cfg.set_main_option("script_location", str(Path("alembic").resolve()))
     command.upgrade(cfg, "head")
 
 
 class Agent:
-    async def run_stream(self, name: str, run_input):
-        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
+    async def run_stream(self, name: str, run_input: dict):
+        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "RUN_FINISHED", **ids}
 
@@ -110,10 +109,10 @@ async def main() -> int:
     print("\n[1] a provider attaches for a name it never registered")
     identity = ProviderIdentity(Ed25519PrivateKey.generate())
     await register(souk, identity, "translator")
-    runtime = ProviderRuntime(identity, Agent())
+    runtime = ProviderRuntime(identity, Agent(), souk)
     runtime.start()
     try:
-        await souk.attach_provider(InProcessLink(souk, runtime), ["translatr"])
+        await souk.attach_provider(runtime, ["translatr"])
         outcome = "attached, and will now be offered nothing, forever"
         silent = True
     except Exception as exc:
@@ -130,7 +129,7 @@ async def main() -> int:
     print("[2] a run is started for an agent no provider is attached to")
     quick = Souk(
         CoreSettings(database_url=URL, token_signing_secret="probe"),
-        broker=RunBroker(unserved_timeout_seconds=0.05),
+        broker=RunBroker(queued_timeout_seconds=0.05),
     )
     await quick.start()
     lonely = ProviderIdentity(Ed25519PrivateKey.generate())
@@ -154,9 +153,9 @@ async def main() -> int:
     print("[3] souk's database is replaced while a provider stays attached")
     identity = ProviderIdentity(Ed25519PrivateKey.generate())
     await register(souk, identity, "steady")
-    runtime = ProviderRuntime(identity, Agent())
+    runtime = ProviderRuntime(identity, Agent(), souk)
     runtime.start()
-    await souk.attach_provider(InProcessLink(souk, runtime), ["steady"])
+    await souk.attach_provider(runtime, ["steady"])
     async with souk.session() as session:
         for table in (run_events, thread_messages, runs, threads, agents, providers):
             await session.execute(delete(table))

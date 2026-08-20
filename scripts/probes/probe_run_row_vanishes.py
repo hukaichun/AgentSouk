@@ -47,7 +47,7 @@ from sqlalchemy import delete
 from souk import repo
 from souk.config import CoreSettings
 from souk.core import Souk
-from souk.identity import provider_connect_signing_payload, registration_signing_payload
+from souk.identity import registration_signing_payload
 from souk.schema import agents, run_events, runs, thread_messages, threads
 
 DB = Path(tempfile.gettempdir()) / "souk_probe_vanish.db"
@@ -60,8 +60,8 @@ def migrate() -> None:
         if p.exists():
             p.unlink()
     os.environ["SOUK_DATABASE_URL"] = URL
-    cfg = Config()
-    cfg.set_main_option("script_location", "souk:alembic")
+    cfg = Config(str(Path("alembic.ini").resolve()))
+    cfg.set_main_option("script_location", str(Path("alembic").resolve()))
     command.upgrade(cfg, "head")
 
 
@@ -71,8 +71,7 @@ class _Taker:
     because this probe is about what souk does with them, not about an agent.
     """
 
-    def __init__(self, key, public_key: str) -> None:
-        self._key = key
+    def __init__(self, public_key: str) -> None:
         self.public_key = public_key
         self.max_concurrent_runs = None
 
@@ -81,13 +80,6 @@ class _Taker:
 
     def cancel(self, run_id: str) -> None:
         pass
-
-    def sign_connect(
-        self, souk_public_key: str, souk_nonce: str, provider_nonce: str, names: list[str]
-    ) -> str:
-        return self._key.sign(
-            provider_connect_signing_payload(souk_public_key, souk_nonce, provider_nonce, names)
-        ).hex()
 
 
 async def main() -> int:
@@ -105,7 +97,7 @@ async def main() -> int:
     )
     agent = registration.agents["a"]
 
-    await souk.attach_provider(_Taker(key, public_key), ["a"])
+    await souk.attach_provider(_Taker(public_key), ["a"])
     handle = await souk.start_run(agent, {"messages": []})
     async with asyncio.timeout(5):
         while souk.broker.get(handle.run_id).claimed_by is None:

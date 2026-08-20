@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import time
@@ -12,8 +13,8 @@ from souk_provider_sdk import ProviderIdentity
 
 class LocalProvider:
     async def run_stream(self, agent_id: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
-        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
 def _signed(identity: ProviderIdentity, names: list[str]) -> tuple[str, str, int]:
@@ -53,6 +54,8 @@ async def test_registration_refuses_a_stale_timestamp(souk):
 
 
 async def test_attaching_an_unregistered_agent_is_refused(souk, attach):
+    """Sharing souk's process is not a reason to be trusted, and not a reason
+    to take a different path: the names have to be ones this key registered."""
     with pytest.raises(AgentNotFound):
         await attach(ProviderIdentity.generate(), LocalProvider(), ["agent_never_registered"])
 
@@ -71,11 +74,13 @@ async def test_an_attached_provider_is_actually_online_and_reachable(souk, attac
 
 
 async def test_detaching_marks_it_offline_immediately(souk, attach):
+    """A departure souk witnessed, so it takes effect at once rather than
+    being inferred from silence later."""
     _registration, identity, agent_id = await _register(souk)
     await attach(identity, LocalProvider(), [agent_id.name])
     assert (await souk.list_agents())[0].online is True
 
-    souk.detach_all_for(identity.public_key)
+    await souk.detach_provider(identity.public_key)
 
     roster = await souk.list_agents()
     assert roster[0].online is False

@@ -32,13 +32,6 @@ dependencies = [
     # here — see tests/test_core_is_network_free.py, which is now the only
     # thing keeping core from importing them.
     "a2a-sdk>=1.1,<2",
-    # KYOK's wire shapes are OpenAI chat-completions, and souk hand-writes
-    # no protocol (same rule as ag-ui-protocol and a2a-sdk above). Only
-    # openai.types.* is imported — no client is ever constructed; like
-    # a2a-sdk, the base install drags httpx along, and
-    # tests/test_core_is_network_free.py is what keeps core from importing
-    # it.
-    "openai>=1.50",
     "cryptography>=42.0",
     "pyjwt>=2.9",
     # Schema migrations — run as `alembic upgrade head` (see
@@ -72,11 +65,6 @@ dev = [
     # was added, 219 tests passed, and no provider in the world could register
     # any more. See souk_provider_sdk.identity.
     "souk-provider-sdk",
-    # Same second-opinion arrangement for the KYOK side: the suite
-    # registers and serves completions through the LLM provider SDK, so
-    # its payload and the protocol it satisfies are checked against
-    # souk's own on every run.
-    "souk-llm-provider-sdk",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "psycopg[binary,pool]>=3.2",
@@ -98,4 +86,3 @@ packages = ["souk"]
 # them would not fail a local test run — only a fresh CI install. The copy is
 # only a second opinion if it is the live one.
 souk-provider-sdk = { path = "../souk-provider-sdk", editable = true }
-souk-llm-provider-sdk = { path = "../souk-llm-provider-sdk", editable = true }

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from souk.agui import rewrite_message_ids

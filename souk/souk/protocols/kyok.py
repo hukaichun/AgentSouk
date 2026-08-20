@@ -1,82 +1,77 @@
+"""KYOK translation: relaying a provider's LLM call to whoever is paying.
+
+Extracted from what used to be protocols.kyok, minus everything about HTTP.
+KYOK is structurally a second broker — a provider submits work (a completion),
+the caller's own bridge claims it and streams back the answer — so it splits
+the same way runs do: the mechanism and its checks live in core, the three
+`/kyok/*` endpoints are serving.
+
+What this deliberately holds rather than leaving to a route: the two-part
+authorization. A KYOK token proves souk minted it and names a run; it does
+not prove who is presenting it. The call-time signature is the other half,
+and getting either wrong means someone else spending the caller's real LLM
+budget — not the kind of check to reimplement per transport.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
-
-from openai.types.chat import ChatCompletion, ChatCompletionChunk, CompletionCreateParams
-from openai.types.chat.chat_completion import Choice
-from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from typing import TYPE_CHECKING, Any
 
 from souk import repo
 from souk.errors import KyokRejected
-from souk.identity import (
-    is_timestamp_fresh,
-    kyok_call_signing_payload,
-    verify_signature,
-)
-from souk.kyok import CompletionRequest, KyokToken, verify_kyok_token
+from souk.identity import is_timestamp_fresh, verify_signature
+from souk.kyok import COMPLETION_DONE, KyokToken, verify_kyok_token
 
 if TYPE_CHECKING:
     from souk.core import Souk
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("souk.protocols.kyok")
+
+# How long a provider's completion waits, queued, for the caller's bridge to
+# notice it before souk gives up — the KYOK counterpart of a run's
+# the broker's queued timeout, kept separate because a completion is expected to be
+# claimed far faster: the bridge is meant to be polling continuously for the
+# run's whole duration, not discovering work cold.
+CLAIM_TIMEOUT_SECONDS = 30.0
 
 
 @dataclass
 class CompletionRelay:
-    """A completion in flight from an attached LLM provider back to the KYOK caller, either
-    consumed in one shot as an OpenAI `ChatCompletion` (`collapsed`) or streamed out as
-    server-sent chunks (`encode`). Any error raised while draining `chunks` is surfaced as
-    `KyokRejected` (status 502) from `collapsed`, or as an inline `{"error": ...}` payload
-    followed by end-of-stream from `encode`.
+    """A submitted completion, and the answer coming back for it."""
 
-    An error carrying a `refusal` dict (the LLM provider's structured
-    refusal — `souk_llm_provider_sdk.CompletionRefused` builds these; the
-    attribute name is the contract, read duck-typed) travels intact: it
-    becomes the `{"error": ...}` payload in-stream, or rides `KyokRejected.
-    refusal`, instead of being flattened to prose. souk relays the payload
-    and never interprets it — its vocabulary belongs to the LLM provider
-    and its callers."""
-
+    request_id: str
     stream_requested: bool
-    chunks: AsyncIterator[ChatCompletionChunk]
+    chunks: AsyncIterator[dict[str, Any]]
 
-    async def collapsed(self) -> ChatCompletion:
-        try:
-            collected = [chunk async for chunk in self.chunks]
-        except Exception as e:
-            raise KyokRejected(
-                f"KYOK bridge failed to complete: {e}",
-                status=502,
-                refusal=_refusal_of(e),
-            ) from e
-        return collapse_stream(collected)
+    async def collapsed(self) -> dict[str, Any]:
+        """Every chunk reassembled into one non-streaming response, for a
+        provider that didn't ask to stream."""
+        return collapse_stream([chunk async for chunk in self.chunks])
 
     async def encode(self) -> AsyncIterator[str]:
-        try:
-            async for chunk in self.chunks:
-                yield chunk.model_dump_json()
-        except Exception as e:
-            logger.warning("KYOK bridge failed mid-stream: %s", e)
-            refusal = _refusal_of(e)
-            yield json.dumps({"error": refusal if refusal is not None else {"message": str(e)}})
-            return
+        """The chunks as OpenAI-style SSE payloads, terminator included."""
+        async for chunk in self.chunks:
+            yield json.dumps(chunk)
+            if isinstance(chunk, dict) and set(chunk) == {"error"}:
+                return
         yield "[DONE]"
 
 
-def _refusal_of(e: Exception) -> dict[str, Any] | None:
-    refusal = getattr(e, "refusal", None)
-    return refusal if isinstance(refusal, dict) else None
-
-
 class KyokAdapter:
+    """KYOK semantics over a Souk."""
 
     def __init__(self, souk: "Souk") -> None:
         self._souk = souk
+
+    async def poll(self, session_id: str, wait_seconds: float) -> dict[str, Any] | None:
+        """A caller's bridge asking whether any completion is waiting for it."""
+        return await self._souk.kyok_bridge.poll_one(session_id, wait_seconds)
 
     async def complete(
         self,
@@ -86,12 +81,19 @@ class KyokAdapter:
         timestamp: str,
         signature: str,
     ) -> CompletionRelay:
-        """Authenticates a KYOK completion call and forwards it to the bound LLM provider.
-        `bearer` must be a valid, unexpired KYOK token for a run that is still active (not
-        cancelled) for the agent named in the token, and `timestamp`/`signature` must be a
-        fresh, correctly signed proof that the calling agent itself made this call — else raises
-        `KyokRejected` with 401 or 403. Raises `KyokRejected` (400) if `body` isn't valid JSON,
-        and (503) if the run's bound LLM provider is no longer attached."""
+        """A provider's OpenAI-shaped call, authorized and relayed.
+
+        Three checks, all here rather than in a route:
+
+        1. the KYOK token is souk's own and unexpired,
+        2. the run it names is *still genuinely in flight* for that agent —
+           which caps a leaked token's usable window to the life of that run,
+           rather than leaving the token's own hour-long TTL as the only thing
+           between a finished run and someone spending the caller's budget,
+        3. the call is signed by the agent's own key, over this
+           exact token + timestamp + body, so a signature can't be replayed
+           onto another request.
+        """
         token = verify_kyok_token(bearer, self._souk.settings.token_signing_secret)
         if token is None:
             raise KyokRejected("invalid or expired KYOK token", status=401)
@@ -102,57 +104,50 @@ class KyokAdapter:
 
         await self._verify_caller(token, bearer, body, timestamp, signature)
 
-        try:
-            payload = cast(CompletionCreateParams, json.loads(body))
-        except json.JSONDecodeError as e:
-            raise KyokRejected("KYOK completion body is not valid JSON", status=400) from e
-
-        binding = self._souk.kyok_relay.binding_for(token.run_id)
-        if binding is None:
-            raise KyokRejected("run has no KYOK binding any more", status=503)
-        link = self._souk.kyok_relay.serving(binding.llm_provider)
-        if link is None:
-            raise KyokRejected(
-                f"LLM provider '{binding.llm_provider}' is not attached", status=503
-            )
-
+        payload = json.loads(body)
+        request_id, queue = self._souk.kyok_bridge.submit(token.session_id, payload)
         return CompletionRelay(
+            request_id=request_id,
             stream_requested=bool(payload.get("stream")),
-            chunks=self._counted(
-                binding.llm_provider.provider_key,
-                link.complete(
-                    CompletionRequest(
-                        run_id=token.run_id,
-                        agent=token.agent,
-                        body=payload,
-                        llm_name=binding.llm_provider.name,
-                        context=binding.context,
-                        actor_chain=binding.actor_chain,
-                    )
-                ),
-            ),
+            chunks=self._drain(request_id, queue),
         )
 
-    async def _counted(
-        self, public_key: str, chunks: AsyncIterator[ChatCompletionChunk]
-    ) -> AsyncIterator[ChatCompletionChunk]:
-        """Passes `chunks` through while recording what souk observed into the relay's quality counters."""
-        try:
-            async for chunk in chunks:
-                yield chunk
-        except Exception as e:
-            self._souk.kyok_relay.note_outcome(
-                public_key, "refused" if _refusal_of(e) is not None else "failed"
-            )
-            raise
-        self._souk.kyok_relay.note_outcome(public_key, "completions")
+    async def respond(self, request_id: str, lines: AsyncIterator[bytes]) -> None:
+        """The caller's bridge streaming the real LLM's answer back, as
+        newline-delimited JSON. Consumed incrementally so a long completion
+        never sits whole in memory on either side."""
+        pending = self._souk.kyok_bridge.get(request_id)
+        if pending is None:
+            raise KyokRejected(f"no pending KYOK completion '{request_id}'", status=404)
+
+        buffer = b""
+        async for piece in lines:
+            buffer += piece
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    logger.warning("kyok respond %s: dropping malformed line", request_id)
+                    continue
+                if isinstance(message, dict) and message.get("error"):
+                    pending.response_queue.put_nowait({"error": message["error"]})
+                    break
+                pending.response_queue.put_nowait(message)
+        pending.response_queue.put_nowait(COMPLETION_DONE)
 
     async def _verify_caller(
         self, token: KyokToken, bearer: str, body: bytes, timestamp: str, signature: str
     ) -> None:
-        """Raises `KyokRejected` unless `signature` is a fresh, valid signature — by the agent
-        named in `token`, using its registered public key — over the bearer token, timestamp,
-        and a hash of the request body."""
+        """The half the token can't cover: souk_agent_sdk.KyokSigningAuth
+        signs every call with the calling provider's registration identity, so
+        the key is the token's own — souk being the
+        one source of truth for that — and checks the signature really came
+        from it. Reuses souk.identity's freshness window rather than a second
+        constant; no reason KYOK's should ever diverge.
+        """
         if not timestamp or not signature:
             raise KyokRejected("missing KYOK call-time signature", status=401)
         try:
@@ -162,61 +157,77 @@ class KyokAdapter:
         if not fresh:
             raise KyokRejected("KYOK signature timestamp is stale", status=401)
 
+        # Still asked, because a de-listed agent must not keep spending a
+        # caller's key — but no longer asked in order to *learn* the key.
+        # The token carries it: an agent is `(provider_key, name)`, souk
+        # signed the token itself, and there used to be a whole lookup here
+        # (`repo.get_agent_public_key`) whose only job was turning an id back
+        # into the identity it always stood for.
         async with self._souk.session() as session:
             registered = await repo.get_agent(session, token.agent)
         if registered is None:
             raise KyokRejected(f"agent '{token.agent}' is not registered", status=403)
 
-        payload = kyok_call_signing_payload(
-            bearer, int(timestamp), hashlib.sha256(body).hexdigest()
-        )
+        payload = f"{bearer}:{timestamp}:{hashlib.sha256(body).hexdigest()}".encode()
         if not verify_signature(token.agent.provider_key, signature, payload):
             raise KyokRejected("KYOK call-time signature verification failed", status=401)
 
+    async def _drain(self, request_id: str, queue: asyncio.Queue) -> AsyncIterator[dict[str, Any]]:
+        try:
+            while True:
+                item = await asyncio.wait_for(queue.get(), timeout=CLAIM_TIMEOUT_SECONDS)
+                if item is COMPLETION_DONE:
+                    return
+                yield item
+        except asyncio.TimeoutError as e:
+            raise KyokRejected(
+                "no KYOK bridge claimed this completion in time", status=502
+            ) from e
+        finally:
+            self._souk.kyok_bridge.forget(request_id)
 
-def collapse_stream(chunks: list[ChatCompletionChunk]) -> ChatCompletion:
-    """Merges a sequence of `ChatCompletionChunk`s into a single `ChatCompletion`, concatenating
-    each choice index's content deltas and taking that index's last non-empty finish reason
-    (defaulting to `"stop"`). An empty chunk list collapses to one empty assistant message with
-    finish reason `"stop"`."""
+
+def collapse_stream(chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Reassembles OpenAI-style streaming chunks (chat.completion.chunk,
+    delta-shaped) into one non-streaming chat.completion response, for a
+    provider that called /kyok/v1/chat/completions with `stream` unset or
+    false. The caller's bridge always sends streaming-shaped chunks (see
+    docs/keep-your-own-key.md) regardless of what the provider asked for
+    — this is where a non-streaming caller gets that collapsed back down
+    instead of needing its own merge logic.
+    """
     if not chunks:
-        return ChatCompletion(
-            id="",
-            object="chat.completion",
-            created=0,
-            model="",
-            choices=[
-                Choice(
-                    index=0,
-                    message=ChatCompletionMessage(role="assistant", content=""),
-                    finish_reason="stop",
-                )
-            ],
-        )
+        return {
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": ""}, "finish_reason": "stop"}
+            ]
+        }
 
     first = chunks[0]
     content_by_index: dict[int, str] = {}
-    finish_reason_by_index: dict[int, str] = {}
+    finish_reason_by_index: dict[int, str | None] = {}
+    role = "assistant"
     for chunk in chunks:
-        for chunk_choice in chunk.choices:
-            index = chunk_choice.index
-            content_by_index[index] = content_by_index.get(index, "") + (
-                chunk_choice.delta.content or ""
-            )
-            if chunk_choice.finish_reason:
-                finish_reason_by_index[index] = chunk_choice.finish_reason
+        for choice in chunk.get("choices", []):
+            index = choice.get("index", 0)
+            delta = choice.get("delta", {})
+            if "role" in delta:
+                role = delta["role"]
+            content_by_index[index] = content_by_index.get(index, "") + delta.get("content", "")
+            if choice.get("finish_reason"):
+                finish_reason_by_index[index] = choice["finish_reason"]
 
-    return ChatCompletion(
-        id=first.id,
-        object="chat.completion",
-        created=first.created,
-        model=first.model,
-        choices=[
-            Choice(
-                index=index,
-                message=ChatCompletionMessage(role="assistant", content=content),
-                finish_reason=finish_reason_by_index.get(index, "stop"),
-            )
+    return {
+        "id": first.get("id"),
+        "object": "chat.completion",
+        "created": first.get("created"),
+        "model": first.get("model"),
+        "choices": [
+            {
+                "index": index,
+                "message": {"role": role, "content": content},
+                "finish_reason": finish_reason_by_index.get(index),
+            }
             for index, content in sorted(content_by_index.items())
         ],
-    )
+    }

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import ast
@@ -27,8 +28,8 @@ async def _register(souk: Souk, name: str = "echo"):
 
 class _Provider:
     async def run_stream(self, agent: str, run_input: dict):
-        yield {"type": "RUN_STARTED", "threadId": run_input.thread_id, "runId": run_input.run_id}
-        yield {"type": "RUN_FINISHED", "threadId": run_input.thread_id, "runId": run_input.run_id}
+        yield {"type": "RUN_STARTED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
+        yield {"type": "RUN_FINISHED", "threadId": run_input["threadId"], "runId": run_input["runId"]}
 
 
 async def _until(predicate, timeout: float = 5.0) -> None:
@@ -45,7 +46,7 @@ async def test_registering_and_attaching_both_change_the_roster(souk: Souk, atta
     assert seen == [RosterChanged()]
 
     await attach(identity, _Provider(), [agent.name])
-    souk.detach_all_for(agent.provider_key)
+    await souk.detach_provider(agent.provider_key)
 
     assert seen == [RosterChanged(), RosterChanged(), RosterChanged()]
 

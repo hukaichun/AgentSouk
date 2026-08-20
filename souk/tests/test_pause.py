@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from souk.pause import interrupt_outcome_of

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -9,15 +10,17 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from souk.config import CoreSettings
 from souk.core import Souk
-from souk.migrate import migrate as souk_migrate
-from souk_provider_sdk import InProcessLink, ProviderIdentity, ProviderRuntime
+from souk_provider_sdk import ProviderIdentity, ProviderRuntime
 
+ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 TEST_SIGNING_SECRET = "test-signing-secret"
 
@@ -25,15 +28,7 @@ DATABASE_URL = os.environ.get(
     "SOUK_DATABASE_URL", f"sqlite+aiosqlite:///{Path(tempfile.gettempdir()) / 'souk_pytest.db'}"
 )
 
-_TABLES_CHILD_FIRST = (
-    "run_events",
-    "thread_messages",
-    "runs",
-    "threads",
-    "agents",
-    "llm_providers",
-    "providers",
-)
+_TABLES_CHILD_FIRST = ("run_events", "thread_messages", "runs", "threads", "agents", "providers")
 
 
 @pytest.fixture(scope="session")
@@ -53,7 +48,7 @@ def _schema(settings: CoreSettings) -> None:
         for suffix in ("", "-wal", "-shm"):
             Path(url.database + suffix).unlink(missing_ok=True)
     os.environ["SOUK_DATABASE_URL"] = settings.database_url
-    souk_migrate(settings.database_url)
+    command.upgrade(Config(str(ALEMBIC_INI)), "head")
 
 
 @pytest.fixture(autouse=True)
@@ -71,8 +66,8 @@ async def _clean_db(souk: Souk) -> AsyncIterator[None]:
     async with souk.engine.begin() as conn:
         if is_postgres:
             await conn.exec_driver_sql(
-                "TRUNCATE providers, agents, threads, runs, thread_messages, run_events, "
-                "llm_providers RESTART IDENTITY CASCADE"
+                "TRUNCATE providers, agents, threads, runs, thread_messages, run_events "
+                "RESTART IDENTITY CASCADE"
             )
         else:
             for table in _TABLES_CHILD_FIRST:
@@ -111,13 +106,25 @@ def new_identity() -> type[Identity]:
 
 @pytest.fixture
 async def attach(souk: Souk):
+    """Attach a provider the way a real one arrives: wrapped in the SDK's
+    runtime, which is what souk can hand a run to.
+
+    souk used to take a bare object with `run_stream` and build the loop
+    around it itself. It does not any more — the loop is the provider's — so
+    a test that wants an agent served goes through the same two steps a
+    deployment does: make a runtime, attach it.
+
+    Every runtime is stopped when the test ends. The `souk` fixture is
+    session-scoped, so one left running stays registered with the broker and
+    takes the next test's runs.
+    """
     started: list[ProviderRuntime] = []
 
     async def _attach(identity: ProviderIdentity, provider, names, **kwargs) -> ProviderRuntime:
-        runtime = ProviderRuntime(identity, provider, **kwargs)
+        runtime = ProviderRuntime(identity, provider, souk, **kwargs)
         started.append(runtime)
         runtime.start()
-        await souk.attach_provider(InProcessLink(souk, runtime), list(names))
+        await souk.attach_provider(runtime, list(names))
         return runtime
 
     yield _attach
@@ -126,13 +133,16 @@ async def attach(souk: Souk):
 
 
 class EchoAgent:
+    """A provider that answers with one short message and remembers who
+    called it. Shared because two suites need exactly this and a test module
+    importing another test module is how deleting one file broke a second."""
 
     def __init__(self) -> None:
         self.seen_caller: dict | None = None
 
-    async def run_stream(self, agent_name: str, run_input):
-        self.seen_caller = (run_input.forwarded_props or {}).get("caller")
-        ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
+    async def run_stream(self, agent_name: str, run_input: dict):
+        self.seen_caller = (run_input.get("forwardedProps") or {}).get("caller")
+        ids = {"threadId": run_input["threadId"], "runId": run_input["runId"]}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}
         yield {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "done"}
@@ -142,6 +152,8 @@ class EchoAgent:
 
 @dataclass
 class Served:
+    """What `serve` hands back: everything a test needs to talk about the
+    provider it just stood up."""
 
     identity: Identity
     provider: Any
@@ -151,6 +163,12 @@ class Served:
 
 @pytest.fixture
 async def serve(souk: Souk, attach):
+    """Register a provider's agents and attach it, in one step.
+
+    Both halves, because they are always done together and neither is
+    optional: registration is what makes the names souk's to serve, and
+    attaching is what makes them reachable.
+    """
 
     async def _serve(provider=None, *names: str, **kwargs) -> Served:
         provider = EchoAgent() if provider is None else provider
@@ -168,6 +186,8 @@ async def serve(souk: Souk, attach):
 
 @pytest.fixture
 async def register(souk: Souk):
+    """Register agents without attaching anything — for the cases that are
+    about souk knowing a name, not about anybody serving it."""
 
     async def _register(*names: str) -> Served:
         identity = Identity()

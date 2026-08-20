@@ -64,14 +64,12 @@ transport-specific", write eight lines that prove it instead.
 - `tests/test_core_is_network_free.py` is a hard constraint, not a
   suggestion. If it fails, the fix is almost never to widen its allow-list.
 - **Every test provider is a stub, so nothing here proves souk works.** The
-  suite has never called a model. The check that does is the demo stack —
-  `docker compose up` with a real key in `.env` — which now lives in
-  AgentSoukServer (this repo's compose carries only a Postgres); the first
-  time it was run it found three defects in a row: the stack wouldn't start
-  (host `.venv` copied into the image, so `uv` re-downloaded everything at
-  container start), a failing provider reached callers as a 200 with zero
-  events, and A2A only answered to method names the spec had renamed. Run
-  it from there after touching the wire.
+  suite has never called a model. `docker compose up` with a real key in
+  `.env` is the check that does, and the first time it was run it found three
+  defects in a row: the stack wouldn't start (host `.venv` copied into the
+  image, so `uv` re-downloaded everything at container start), a failing
+  provider reached callers as a 200 with zero events, and A2A only answered
+  to method names the spec had renamed. Run it after touching the wire.
 - **A protocol souk hand-writes will silently rot, and reading the package
   is not enough on its own — check *which version* you are reading.** A2A had
   moved twice; the first fix landed on v0.3 because its shapes were read out
@@ -106,15 +104,7 @@ These are load-bearing; breaking one has caused a real bug here.
 
 ## Where the design lives
 
-`docs/design-records.md`. It records decisions *and* the ones that turned
-out wrong, with the measurements behind them. Read it before changing the
-provider port, cancellation, or the core/serving boundary — and if the code
-contradicts it, one of them needs fixing, deliberately.
-
-The `design/` directory it was distilled from is gone; each record links
-into it at the commit before removal. **Do not treat those notes as
-current.** They state designs in the present tense whether or not the code
-followed, and five were falsified against the code in one sitting — the ack
-signature, `A2AAdapter`'s arguments, `RunHandle.is_live`, two settings that
-never existed, and a whole event-typing mitigation that was never built.
-Grep for the identifier before repeating anything they say.
+`docs/library-architecture.md`. It records decisions *and* the ones that
+turned out wrong, with the measurements behind them. Read it before changing
+the provider port, cancellation, or the core/serving boundary — and if the
+code contradicts it, one of them needs fixing, deliberately.

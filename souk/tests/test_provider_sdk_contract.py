@@ -1,147 +1,55 @@
+"""The two sides state the same interaction independently; this checks they
+still agree.
+
+`souk_provider_sdk` cannot import souk, so nothing makes the pair agree by
+construction. It has been broken: souk delivered its own dispatch object,
+whose input field is `input_json`, to a provider reading `run_input`, and the
+run died on its first event with nothing red anywhere.
+
+Both directions are checked, because both cross the boundary — souk hands a
+run over, and the provider hands events back.
+"""
+
 from __future__ import annotations
 
 import inspect
-import re
-
-import pytest
 
 from souk_provider_sdk import (
-    CONNECTED_PROVIDER_ATTRS,
-    Refusal,
-    DELIVERED_RUN_FIELDS,
-    REGISTRATION_FIELDS,
-    LINK_QUERY_METHODS,
-    LINK_REPORT_METHODS,
-    InProcessLink,
-    AgentHandle,
-    DeliveredRun,
+    AGENT_FIELDS,
+    CLAIMED_RUN_FIELDS,
     HandleProvider,
     ProviderIdentity,
     ProviderRuntime,
 )
 
-from souk import repo
-from souk.broker import ConnectedProvider, RunBroker
-from souk.models import ClaimedRun
+from souk.broker import ConnectedProvider
+from souk.models import AgentRef, ClaimedRun
 
 
-def test_the_adapter_can_fill_every_field_the_sdk_declares():
-    assert set(DeliveredRun.model_fields) == DELIVERED_RUN_FIELDS
-
-    source = inspect.getsource(DeliveredRun.from_claimed)
-    for field in ("run_id", "agent_name", "run_input", "thread_id"):
-        assert f"{field}=" in source, f"the adapter never fills {field}"
+def test_a_delivered_run_carries_exactly_what_a_provider_reads():
+    assert set(ClaimedRun.model_fields) == CLAIMED_RUN_FIELDS
 
 
-def test_what_souk_delivers_still_carries_what_the_adapter_reads():
-    assert {"run_id", "agent", "thread_id", "run_input"} <= set(ClaimedRun.model_fields)
+def test_the_agent_on_a_delivered_run_is_still_the_pair():
+    assert set(AgentRef.model_fields) == AGENT_FIELDS
 
 
-def test_the_two_sides_agree_on_what_a_connected_provider_is():
-    assert ConnectedProvider.__protocol_attrs__ == set(CONNECTED_PROVIDER_ATTRS)
+def test_the_sdk_runtime_is_something_souks_broker_can_deliver_to():
+    # An instance, not the class: `max_concurrent_runs` is set in __init__,
+    # which is exactly the kind of thing a class-level hasattr misses.
+    runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]), souk=None)
+
+    for name in ConnectedProvider.__annotations__:
+        assert hasattr(runtime, name), f"ConnectedProvider needs {name}"
+    assert inspect.iscoroutinefunction(runtime.deliver)
+    assert not inspect.iscoroutinefunction(runtime.cancel)
 
 
-def test_the_in_process_connection_is_something_souks_broker_can_deliver_to():
-    runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]))
-    adapter = InProcessLink(souk=None, runtime=runtime)
-
-    for name in ConnectedProvider.__protocol_attrs__:
-        assert hasattr(adapter, name), f"ConnectedProvider needs {name}"
-    assert inspect.iscoroutinefunction(adapter.deliver)
-    assert not inspect.iscoroutinefunction(adapter.cancel)
-
-
-def test_the_runtime_itself_needs_the_same_trio():
-    runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]))
-
-    for name in CONNECTED_PROVIDER_ATTRS:
-        assert hasattr(runtime, name)
-
-
-def test_the_reporting_half_the_sdk_declares_is_what_the_link_supplies():
-    link = InProcessLink(souk=None, runtime=ProviderRuntime(ProviderIdentity.generate(), HandleProvider([])))
-
-    for name, params in LINK_REPORT_METHODS.items():
-        method = getattr(link, name, None)
-        assert method is not None, f"the link has no {name}"
-        assert inspect.iscoroutinefunction(method)
-        bound = list(inspect.signature(method).parameters)
-        assert len(bound) == len(params), f"{name}{params} vs {bound}"
-
-
-def test_the_query_half_the_sdk_declares_is_what_the_link_supplies():
-    link = InProcessLink(souk=None, runtime=ProviderRuntime(ProviderIdentity.generate(), HandleProvider([])))
-
-    for name, params in LINK_QUERY_METHODS.items():
-        method = getattr(link, name, None)
-        assert method is not None, f"the link has no {name}"
-        assert inspect.iscoroutinefunction(method), f"{name} has to be awaitable — it crosses a wire"
-        assert set(inspect.signature(method).parameters) == set(params)
-
-
-def test_a_link_that_only_reports_is_not_constructible():
-    from souk_provider_sdk import SoukLink
-
-    class ReportsOnly(SoukLink):
-        public_key = "k"
-        max_concurrent_runs = None
-
-        async def offer(self, run):
-            return True
-
-        def cancel(self, run_id):
-            pass
-
-        async def report_event(self, run_id, event):
-            pass
-
-        async def finish_run(self, run_id):
-            pass
-
-    with pytest.raises(TypeError, match="thread_messages"):
-        ReportsOnly()
-
-
-def test_the_runtime_reports_through_the_link_and_holds_no_callbacks():
-    runtime = ProviderRuntime(ProviderIdentity.generate(), HandleProvider([]))
-
-    assert runtime.link is None
-    assert not hasattr(runtime, "on_event")
-    assert not hasattr(runtime, "on_finish")
-
-    link = InProcessLink(souk=None, runtime=runtime)
-    assert runtime.link is link
-
-
-def test_souk_still_has_the_two_calls_the_adapter_reports_through():
+def test_souk_satisfies_the_connection_the_provider_reports_back_through():
     from souk.core import Souk
 
+    # Synchronous on purpose: a provider must never wait on souk's
+    # persistence, and the end-of-stream marker is sent while unwinding a
+    # cancellation, where an await would be interrupted before arriving.
     assert not inspect.iscoroutinefunction(Souk.report_event)
     assert not inspect.iscoroutinefunction(Souk.finish_run)
-    for method in (Souk.report_event, Souk.finish_run):
-        assert "claimed_by" in inspect.signature(method).parameters
-
-
-def test_a_handle_can_express_everything_register_agents_reads():
-    source = inspect.getsource(repo.register_agents)
-    read_by_souk = set(re.findall(r"agent(?:\.get\(|\[)[\"']([a-z_]+)[\"']", source))
-
-    assert read_by_souk, "no keys found — the regex stopped matching, not a passing test"
-    assert read_by_souk == set(REGISTRATION_FIELDS), (
-        f"register_agents reads {sorted(read_by_souk)}, "
-        f"the SDK declares {sorted(REGISTRATION_FIELDS)}"
-    )
-
-
-def test_the_handle_actually_carries_those_fields():
-    declared = set(AgentHandle.__dataclass_fields__)
-
-    assert REGISTRATION_FIELDS <= declared, (
-        f"AgentHandle cannot express {sorted(REGISTRATION_FIELDS - declared)}"
-    )
-
-
-def test_a_refusal_is_read_by_the_attribute_the_sdk_declares():
-    assert getattr(Refusal("gone"), "reason") == "gone"
-    source = inspect.getsource(RunBroker._offer)
-    assert 'getattr(accepted, "reason"' in source

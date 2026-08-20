@@ -30,8 +30,8 @@ def migrate() -> None:
         if p.exists():
             p.unlink()
     os.environ["SOUK_DATABASE_URL"] = URL
-    cfg = Config()
-    cfg.set_main_option("script_location", "souk:alembic")
+    cfg = Config(str(Path("alembic.ini").resolve()))
+    cfg.set_main_option("script_location", str(Path("alembic").resolve()))
     command.upgrade(cfg, "head")
 
 

@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import ast
@@ -40,7 +41,7 @@ def test_core_module_imports_no_transport(module: Path) -> None:
     assert not offenders, (
         f"{module.name} imports {sorted(offenders)}, which makes souk's core depend on a "
         "transport. Move whatever needs it into the serving layer, or put a port in front "
-        "of it — see docs/core-components/dispatch.md."
+        "of it — see docs/library-architecture.md."
     )
 
 

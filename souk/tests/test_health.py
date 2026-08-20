@@ -1,3 +1,14 @@
+
+"""The health sweeps: what souk does about runs that went wrong on their own.
+
+`fail_unclaimed_runs` used to live here — a database sweep for runs nobody had
+claimed. It is gone: the broker holds every queued run in memory along with
+when it started waiting, so it answers "how long have I held this" without
+reading anything, and gives up on them itself. See
+`RunBroker.expire_queued`, and `test_run_failure_is_reported` for what a
+caller sees when nobody ever comes.
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
