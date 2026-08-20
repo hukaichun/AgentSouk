@@ -81,9 +81,10 @@ The published shape is challenge-response, both directions:
 `sign_connect`, and `attach` challenges any connection that can sign —
 automatically, so an embedder authenticates without writing a line. A
 connection offering a proof always has it verified; one offering none is
-admitted only while `require_connect_proof` (settings, default off) stays
-off — the migration switch for transports that still authenticate at
-their own edge. Sequencing — who sends which frame when, reconnects,
+refused. A `require_connect_proof` migration switch existed while the
+handshake landed and was removed (#102): one handshake everywhere is what
+lets a provider in any language implement it once against the published
+vectors. Sequencing — who sends which frame when, reconnects,
 multiplexing — is the transport's property; souk publishes the bytes,
 never the choreography.
 
