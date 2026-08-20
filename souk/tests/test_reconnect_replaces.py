@@ -11,8 +11,9 @@ class _StubConnection:
 
     max_concurrent_runs = None
 
-    def __init__(self, public_key: str) -> None:
-        self.public_key = public_key
+    def __init__(self, identity: ProviderIdentity) -> None:
+        self.public_key = identity.public_key
+        self.sign_connect = identity.sign_connect
 
     async def deliver(self, run):
         return False
@@ -25,7 +26,7 @@ async def test_a_replaced_agent_connections_cleanup_leaves_the_replacement_servi
     served = await register("worker")
     key = served.identity.public_key
     ref = AgentRef(provider_key=key, name="worker")
-    old, new = _StubConnection(key), _StubConnection(key)
+    old, new = _StubConnection(served.identity), _StubConnection(served.identity)
 
     await souk.attach_provider(old, ["worker"])
     await souk.attach_provider(new, ["worker"])

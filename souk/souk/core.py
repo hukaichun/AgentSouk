@@ -204,9 +204,9 @@ class _Roster(abc.ABC):
         can sign (it exposes `sign_connect`, as the in-process links do) is
         challenged and verified automatically; in-process is not trusted
         either. A connection that offers a proof has it verified; one that
-        offers none is admitted only while `require_connect_proof` is off —
-        the migration switch for transports that still authenticate at
-        their own edge.
+        offers none is rejected. There is deliberately no way to switch
+        this off — one handshake everywhere is what lets a provider in any
+        language implement it once against the published vectors.
         """
         if not names:
             raise ValueError(
@@ -229,10 +229,10 @@ class _Roster(abc.ABC):
                 raise InvalidRegistration(
                     f"invalid connect proof for {self.party} '{connection.public_key}'"
                 )
-        elif self._souk.settings.require_connect_proof:
+        else:
             raise InvalidRegistration(
-                f"{self.party} '{connection.public_key}' attached without a connect proof, "
-                "and this souk requires one"
+                f"{self.party} '{connection.public_key}' attached without a connect proof — "
+                "sign the challenge from issue_connect_challenge, or expose sign_connect"
             )
         async with self._souk.session() as session:
             registered = await self.registered_names(session, connection.public_key)

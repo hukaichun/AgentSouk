@@ -32,7 +32,6 @@ alive.
 reading environment variables under the `SOUK_` prefix, constructed once
 and handed to `Souk`. Every deliberate switch lives here: database URL
 and schema, timeouts and sweep intervals, the token-signing secret,
-souk's identity key, and migration-stage switches such as
-`require_connect_proof` (attach authentication: the mechanism is always
-on, enforcement is flipped per deployment when its transports are
-ready).
+and souk's identity key. Attach authentication deliberately has no
+switch here: a link either proves its key or is refused, so the
+handshake is the same on every souk.

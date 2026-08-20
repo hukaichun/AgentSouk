@@ -85,6 +85,7 @@ async def test_a_permanent_refusal_fails_the_run_with_the_providers_reason(brisk
 
         def __init__(self) -> None:
             self.public_key = identity.public_key
+            self.sign_connect = identity.sign_connect
             self.offers = 0
 
         async def deliver(self, run):

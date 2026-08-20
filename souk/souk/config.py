@@ -25,4 +25,3 @@ class CoreSettings(BaseSettings):
 
     identity_private_key: str | None = None
 
-    require_connect_proof: bool = False
