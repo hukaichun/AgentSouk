@@ -39,11 +39,56 @@ against both backends; dialect-specific SQL is not accepted into this
 layer.
 
 Schema lifecycle: the Alembic chain ships **inside the package**
-(`souk/alembic`), and `souk.migrate()` (or `python -m souk.migrate`)
-runs it programmatically — a fresh database is created at head, an old
-one upgrades in place, and the version row that `health()` checks is
+(`souk/alembic` in the installed wheel), and
+`souk.migrate(database_url=None, db_schema=None)` — or
+`python -m souk.migrate` — runs it programmatically. A fresh database is
+created at head, an old one upgrades in place, and the version row is
 written by the same mechanism. There is deliberately no second
-create-the-tables path to drift against. Deployments that manage schema
-themselves have three documented tiers, down to "no Alembic at all":
-make the tables match the published metadata and write the one expected
-revision row.
+create-the-tables path to drift against.
+
+## Managing the schema yourself
+
+Plenty of deployments will not let an application migrate its own
+database. souk does not require it to. Three tiers, each smaller than
+the last, and all of them supported rather than tolerated.
+
+**Tier 1 — you run the chain, on your terms.** Point your own
+`alembic.ini` at the packaged chain:
+
+```ini
+[alembic]
+script_location = souk:alembic
+```
+
+That single line is what this repository's own `alembic.ini` uses, so
+you are running exactly what souk runs, on your schedule and under your
+review.
+
+**Tier 2 — souk writes the SQL, your DBA applies it.** Alembic's offline
+mode emits the DDL without contacting a database:
+
+```bash
+alembic upgrade head --sql
+```
+
+The output ends by stamping the version row itself, so a DBA who applies
+the script has a database souk recognizes without souk ever holding
+credentials. `alembic upgrade <from>:<to> --sql` narrows it to one step
+when you are upgrading in place.
+
+**Tier 3 — no Alembic at all.** Make the tables match, then tell souk
+which revision they match. Two facts, both importable:
+
+- `souk.schema.metadata` — the SQLAlchemy `MetaData` every table is
+  declared in, and the same object the migration chain targets. Whatever
+  builds your schema must produce these tables and columns.
+- `souk.db_schema.EXPECTED_SCHEMA_REVISION` — the one string to write
+  into `alembic_version`. A test asserts it equals the chain's head, so
+  it cannot drift from the migrations.
+
+!!! note "`health()` reports, it does not judge"
+    `Souk.health()` returns both the revision it found and the revision
+    it expected, and does **not** compare them. A deployment that wants
+    a mismatch to be fatal makes that comparison itself. (Note also that
+    `Souk.health()` — the readiness probe — is a different thing from
+    the `health` module, which runs the stalled-run sweeps.)

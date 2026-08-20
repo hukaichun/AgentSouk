@@ -51,6 +51,7 @@ nav:
       - core-components.md
       - Persistence: core-components/persistence.md
       - The dispatch trunk: core-components/dispatch.md
+      - Embedding souk: core-components/embedding.md
       - Contract and identity: core-components/contract-identity.md
       - Mechanism to code: core-components/extensions.md
       - Support: core-components/support.md
@@ -58,4 +59,5 @@ nav:
       - sdks.md
       - souk-provider-sdk: sdks/provider-sdk.md
       - souk-llm-provider-sdk: sdks/llm-provider-sdk.md
+  - Writing a transport: writing-a-transport.md
   - Design records: design-records.md

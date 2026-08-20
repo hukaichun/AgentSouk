@@ -7,7 +7,7 @@ every identity it is shown, and intervenes in nobody's behavior. The
 core is a network-free Python library; putting it on a wire is a
 downstream job.
 
-This site is organized as five chapters, in reading order:
+This site is organized as six chapters, in reading order:
 
 **[The integration contract](integration-contract.md)** — the
 declaration to anyone plugging in. Callers speak AG-UI or A2A with a
@@ -31,13 +31,18 @@ with (`souk-provider-sdk`, `souk-llm-provider-sdk`): no transport, no
 souk dependency, every byte pinned — including the wire itself, exercised
 end to end without a socket.
 
+**[Writing a transport](writing-a-transport.md)** — core hands back
+objects and pure functions; this is how you put them on a wire. The
+opening handshake in order, with the exact calls, and the parts souk
+deliberately leaves to you.
+
 **[Design records](design-records.md)** — why souk is shaped this way,
 including the shapes it had first and stopped having. Each entry was
 argued from something that happened: a probe that returned the wrong
 answer, a bug that reached a caller, a measurement taken before a
 rewrite.
 
-The byte-level authority behind the first four is
+The byte-level authority behind all of it is
 [`contract-vectors.json`](contract-vectors.json), consumed by souk's own
 test suites and replayable by an implementation in any language. The
 working design record lives in the repository under
