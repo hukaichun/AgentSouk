@@ -34,6 +34,14 @@ souk invents. Opting out costs nothing — the run behaves as plain
 AG-UI/A2A — and opting in is always the caller's explicit act, never an
 inference souk makes.
 
+One small carve-out keeps the record honest: the metadata keys souk
+itself writes into a run's record (`verifiedActorChain`,
+`addressedRunId`, `interrupts`, `failureReason`, and `souk`, held in
+reserve) are stripped from caller-supplied metadata at the doors. A
+caller cannot plant a forged verification summary — or a fake failure
+reason — wearing souk's handwriting; everything else passes through
+untouched.
+
 ## Agent providers: speak AG-UI shapes, souk opens the doors
 
 An agent provider hosts nothing and opens no port. It connects **out** to
