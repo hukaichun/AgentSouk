@@ -59,9 +59,23 @@ run broken.
 `RawEvent` cannot paper over it. Its `type` is a hard-coded
 `Literal[EventType.RAW]`, so wrapping an unrecognized event changes what
 the caller sees from the real new event type to `RAW` — not faithful
-relaying, and worse than passing the event through untouched. The port's
-event type therefore admits both forms, `BaseEvent | dict`, and souk
-reads only the fields it decides on.
+relaying, and worse than passing the event through untouched. That
+rejection is the durable part of this record: the obvious mitigation
+makes souk lie about what the provider said.
+
+What shipped is narrower. `handlers._handle_relay` validates each event
+against the discriminated union and forwards `cmd.event` — the original
+mapping — rather than a re-dumped model, so no `timestamp: null` is ever
+injected into a caller's stream, and souk reads only the fields it
+decides on (`type`, and the interrupt outcome for pause detection).
+
+**The first row is still open.** An event that does not validate ends the
+run, so a provider running a newer AG-UI than souk would have its run
+broken by an event type souk has not heard of — the exact hazard named
+above. The design record proposed admitting both a typed event and a
+plain mapping on the port; that is not what the port does today, where
+`report_event` takes `Any` and souk validates strictly. Anyone widening
+this should start from why `RawEvent` was refused.
 
 See [The dispatch trunk](core-components/dispatch.md) →
 [full record](https://github.com/hukaichun/AgentSouk/blob/main/design/library-architecture.md#typed-data-and-where-typing-stops)
