@@ -12,8 +12,8 @@ from google.protobuf.json_format import ParseDict, ParseError
 
 from souk import repo
 from souk.agui import build_run_agent_input
-from souk.errors import AgentNotFound, InvalidRunInput, RunNotFound
-from souk.kyok import strip_kyok_context
+from souk.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound, RunNotFound
+from souk.kyok import KyokBinding, parse_kyok_opt_in, strip_kyok_context
 from souk.props import build_forwarded_props
 from souk.models import AgentRef
 from souk.pause import is_resuming
@@ -299,9 +299,10 @@ class A2AAdapter:
         creating or reopening whichever is needed, and returns `(run_id, thread_id, is_live)`.
         `is_live` is False if an already-active run on the thread was returned as-is instead of
         starting a new one, or if the agent isn't currently served (in which case the run is
-        recorded as failed). A `referenceTaskIds` entry both anchors thread lineage to the
-        referenced task's thread and, if that task carries a KYOK binding, inherits it for this
-        run."""
+        recorded as failed). A `metadata.kyok` opt-in binds the run to the named LLM offering
+        (raising `LlmProviderNotFound` for an unknown one), the same road AG-UI callers use.
+        Absent that, a `referenceTaskIds` entry both anchors thread lineage to the referenced
+        task's thread and, if that task carries a KYOK binding, inherits it for this run."""
         souk = self._souk
         async with souk.session() as session:
             record = await repo.get_agent(session, agent)
@@ -309,6 +310,10 @@ class A2AAdapter:
                 raise AgentNotFound(f"agent '{agent}' is not registered")
 
             metadata = params.get("metadata", {})
+            kyok = parse_kyok_opt_in(metadata)
+            kyok_ref = kyok.llm_provider if kyok is not None else None
+            if kyok_ref is not None and await repo.get_llm_provider(session, kyok_ref) is None:
+                raise LlmProviderNotFound(f"unknown KYOK LLM provider '{kyok_ref}'")
             metadata = strip_kyok_context(metadata)
             parent_thread_id = await _lineage_parent(session, params)
             context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
@@ -350,14 +355,16 @@ class A2AAdapter:
                 return run_id, thread_id, False
 
             reference_task_ids = params.get("message", {}).get("referenceTaskIds") or []
-            inherited = bool(reference_task_ids) and souk.kyok_relay.inherit(
-                reference_task_ids[0], run_id, actor_chain
+            inherited = (
+                kyok_ref is None
+                and bool(reference_task_ids)
+                and souk.kyok_relay.inherit(reference_task_ids[0], run_id, actor_chain)
             )
             forwarded_props = build_forwarded_props(
                 souk.settings.token_signing_secret,
                 run_id,
                 agent,
-                inherited,
+                kyok_ref is not None or inherited,
                 None,
                 verified_subject,
                 verified_actors,
@@ -373,6 +380,11 @@ class A2AAdapter:
 
             await session.commit()
 
+        if kyok_ref is not None:
+            souk.kyok_relay.bind_run(
+                run_id,
+                KyokBinding(llm_provider=kyok_ref, context=kyok.context, actor_chain=actor_chain),
+            )
         souk.enqueue_run(run_id, agent, thread_id, agui_input, "a2a", seq=starting_seq)
         return run_id, thread_id, True
 

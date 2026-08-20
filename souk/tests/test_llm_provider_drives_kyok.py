@@ -250,6 +250,67 @@ async def test_a_delegated_run_inherits_binding_and_shows_its_chain(souk, serve,
     await _finish(parent, stream)
 
 
+async def test_an_a2a_caller_opts_in_with_metadata(souk, serve, llm):
+    stub, _, ref = llm
+
+    class LLMCallingAgent:
+
+        def __init__(self) -> None:
+            self.identity: Identity | None = None
+            self.answer: str | None = None
+
+        async def run_stream(self, agent_name: str, run_input):
+            ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
+            yield {"type": "RUN_STARTED", **ids}
+            grant = read_kyok_forwarded_props(run_input.forwarded_props)
+            assert grant, "an A2A metadata.kyok opt-in should grant a token"
+            body = _completion_body()
+            relay = await KyokAdapter(souk).complete(
+                grant.token, body, **_signed_call(self.identity, grant.token, body)
+            )
+            self.answer = (await relay.collapsed()).choices[0].message.content
+            yield {"type": "RUN_FINISHED", **ids}
+
+    caller = LLMCallingAgent()
+    served = await serve(caller, "a2a-kyok-agent")
+    caller.identity = served.identity
+
+    await A2AAdapter(souk).send_task(
+        served.agents["a2a-kyok-agent"],
+        {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
+        metadata={
+            "kyok": {
+                "llmProvider": {"providerKey": ref.provider_key, "name": ref.name},
+                "context": {"voucher": "a2a-7"},
+            }
+        },
+    )
+
+    assert caller.answer == "hello world"
+    delivered = stub.seen[-1]
+    assert delivered.agent_name == "a2a-kyok-agent"
+    assert delivered.context == {"voucher": "a2a-7"}
+
+
+async def test_an_a2a_opt_in_naming_an_unknown_offering_is_refused(souk, serve, llm):
+    _, identity, _ = llm
+    agent = KyokTokenAgent()
+    served = await serve(agent, "kyok-agent")
+    with pytest.raises(LlmProviderNotFound, match="no-such-model"):
+        await A2AAdapter(souk).send_task(
+            served.agents["kyok-agent"],
+            {"role": "user", "parts": [{"type": "text", "text": "hi"}]},
+            metadata={
+                "kyok": {
+                    "llmProvider": {
+                        "providerKey": identity.public_key,
+                        "name": "no-such-model",
+                    }
+                }
+            },
+        )
+
+
 async def test_a_streaming_call_streams(souk, serve, llm):
     _, _, ref = llm
     agent = KyokTokenAgent()
