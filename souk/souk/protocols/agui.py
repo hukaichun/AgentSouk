@@ -18,7 +18,6 @@ from souk.kyok import (
     strip_kyok_context,
 )
 from souk.props import build_forwarded_props
-from souk.pause import is_resuming
 
 if TYPE_CHECKING:
     from souk.core import Souk
@@ -82,18 +81,28 @@ class AGUIAdapter:
                 session, agent, body.thread_id, metadata=metadata, create_if_missing=True
             )
 
-            active = await repo.get_active_run_for_thread(session, thread_id)
-            if active is not None and not is_resuming(active, resume):
+            # A resume targets the thread's paused (input-required) run
+            # specifically — not "the latest active run", which with queued
+            # siblings on the thread may be a different, merely queued run.
+            paused = (
+                await repo.get_paused_run_for_thread(session, thread_id) if resume else None
+            )
+            if paused is None and await repo.get_active_run_for_thread(session, thread_id):
                 return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
-            resuming_run_id = active["run_id"] if active is not None else None
 
             input_dump = body.model_dump(mode="json", by_alias=True)
             if isinstance(input_dump.get("metadata"), dict):
                 input_dump["metadata"] = strip_kyok_context(input_dump["metadata"])
-            if resuming_run_id is not None:
-                run_id = resuming_run_id
+            if paused is not None:
+                run_id = paused["run_id"]
+                # Status-guarded so two concurrent resumes resolve to one; the
+                # loser sees the thread as busy, same as any other caller.
+                if not await repo.reopen_run(
+                    session, run_id, input_dump, metadata=metadata,
+                    expected_status="input-required",
+                ):
+                    return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
                 starting_seq = await repo.get_last_event_seq(session, run_id)
-                await repo.reopen_run(session, run_id, input_dump, metadata=metadata)
             else:
                 created = await repo.create_run(
                     session, thread_id, agent, "ag-ui", input_dump, metadata=metadata

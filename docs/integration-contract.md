@@ -112,18 +112,20 @@ across the pause.
 These are not design positions. They are what the code does today, and a
 client author needs them.
 
-- **A paused task cannot be answered over A2A.** Resume is AG-UI-only,
-  gated in one place, and the A2A surface always passes no resume. A
-  task in `input-required` is a dead end for an A2A caller. This began
-  as a deliberate doctrine — a delegating *agent* must not be able to
-  approve an interrupt meant for a human — but A2A now has
-  `elicitationId` for exactly this, and souk has no answer to it yet.
-- **A second message on a live `contextId` is dropped.** While a run on
-  that thread is still active, `SendMessage` returns the in-flight task
-  as its result and the message is discarded — not queued, not appended
-  to the thread. This is the gap the
-  [queueing direction](design-records.md#queueing-makes-may-i-speak-always-answerable-with-yes)
-  exists to close.
+- **Answering a paused task over A2A rides `taskId`, not
+  `elicitationId`.** A message whose `taskId` names the thread's
+  `input-required` task resumes it; who may do so is gated by nothing
+  more than knowing the id, the same capability-by-identifier trust
+  every thread reference carries today (a recorded contradiction, not a
+  position). When A2A v1.1's `elicitationId` lands, that is the marker
+  this interim rule yields to.
+- **A message sent while a run is active is queued behind it.** It
+  becomes a new task on the thread — appended, dispatched one turn per
+  thread at a time, never merged into the active run and never dropped.
+  The
+  [queueing record](design-records.md#queueing-makes-may-i-speak-always-answerable-with-yes)
+  carries the reasoning; a paused task holds its thread, so queued
+  messages wait until its question is answered.
 - **An unknown AG-UI `threadId` mints a new thread and discards the id
   you sent.** A client that invents its own thread id and keeps sending
   it gets a brand-new thread on every call, because the id it supplied

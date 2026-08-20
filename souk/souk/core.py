@@ -443,6 +443,8 @@ class Souk:
         self._started = True
         async with self.session() as session:
             orphaned = await repo.fail_orphaned_runs(session)
+            for paused in await repo.get_paused_runs(session):
+                self.broker.hold_thread(paused["thread_id"], paused["run_id"])
         if orphaned:
             logger.warning(
                 "start: marked %d run(s) failed — still queued/running from before this "
@@ -750,6 +752,8 @@ class Souk:
         self, session: AsyncSession, run_id: str, status: str, metadata: dict[str, Any] | None = None
     ) -> None:
         await repo.mark_run_status(session, run_id, status, metadata=metadata)
+        if status in ("completed", "failed", "cancelled"):
+            self.broker.release_thread(run_id)
         self._notify_change(RunStatusChanged(run_id=run_id, status=status))
 
     async def list_agents(self) -> list[AgentSummary]:

@@ -57,8 +57,13 @@ async def broker():
         b.stop()
 
 
-def _enqueue(broker: RunBroker, run_id: str, agent: AgentRef = AGENT):
-    return broker.enqueue_run(run_id, agent, "thread_1", {"messages": []}, "ag-ui", {})
+def _enqueue(broker: RunBroker, run_id: str, agent: AgentRef = AGENT, thread_id: str | None = None):
+    # Each run gets its own thread unless a test is about thread order:
+    # dispatch is one turn per thread at a time, and these tests exercise
+    # delivery and capacity, not the thread gate.
+    return broker.enqueue_run(
+        run_id, agent, thread_id or f"thread_{run_id}", {"messages": []}, "ag-ui", {}
+    )
 
 
 async def test_an_ack_starts_the_run_and_takes_a_place(broker):
@@ -342,3 +347,50 @@ async def test_a_provider_returning_within_the_window_keeps_the_run():
         assert b.get("run_1") is not None
     finally:
         b.stop()
+
+
+async def test_two_runs_on_one_thread_go_one_at_a_time(broker):
+    from souk.broker import FinishStream
+
+    provider = Recording()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_1", thread_id="thread_shared")
+    _enqueue(broker, "run_2", thread_id="thread_shared")
+
+    await _until(lambda: provider.offered == ["run_1"])
+    await asyncio.sleep(0.05)
+    assert provider.offered == ["run_1"], "a thread's second run overtook its first"
+
+    broker.push("run_1", FinishStream())
+    await _until(lambda: provider.offered == ["run_1", "run_2"], timeout=2.0)
+
+
+async def test_a_held_thread_does_not_block_other_threads(broker):
+    provider = Recording()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_1", thread_id="thread_shared")
+    _enqueue(broker, "run_2", thread_id="thread_shared")
+    _enqueue(broker, "run_3", thread_id="thread_other")
+
+    await _until(lambda: set(provider.offered) == {"run_1", "run_3"})
+    await asyncio.sleep(0.05)
+    assert "run_2" not in provider.offered
+
+
+async def test_a_paused_run_keeps_its_thread_until_released(broker):
+    from souk.broker import FinishStream
+
+    provider = Recording()
+    broker.register_provider({AGENT: provider})
+    _enqueue(broker, "run_1", thread_id="thread_shared")
+    _enqueue(broker, "run_2", thread_id="thread_shared")
+    await _until(lambda: provider.offered == ["run_1"])
+
+    broker._runs["run_1"].pause_payload = {"interrupts": []}
+    broker.push("run_1", FinishStream())
+    await _until(lambda: broker.get("run_1") is None, timeout=2.0)
+    await asyncio.sleep(0.05)
+    assert provider.offered == ["run_1"], "a paused run's thread was given away before the answer"
+
+    broker.release_thread("run_1")
+    await _until(lambda: provider.offered == ["run_1", "run_2"], timeout=2.0)

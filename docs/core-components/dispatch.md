@@ -24,7 +24,13 @@ The A2A door (`protocols/a2a.py`) speaks JSON-RPC with method names read
 off the A2A service descriptor (nothing hand-written, so an upstream
 rename fails at import). `message/send` creates a thread and run the
 same way; task states are derived from run statuses; `referenceTaskIds`
-records lineage; `tasks/cancel` is the one external cancel path.
+records lineage; `tasks/cancel` is the one external cancel path. Every
+message is kept: one whose `taskId` names the thread's paused
+`input-required` task is the answer to its question and resumes that
+run (status-guarded, so concurrent replies resolve to one resume); any
+other message becomes a new queued run on the thread — including one
+sent while a run is active, which waits its turn rather than being
+merged, refused, or dropped.
 
 ## The translation: A2A becomes AG-UI before dispatch
 
@@ -44,9 +50,18 @@ run, a pending deque per agent, and a capacity bucket per provider
 (declared limit vs in-flight count). A sweep task wakes whenever work
 arrives or capacity frees, and walks each agent's queue:
 
-1. **Offer.** The head run is offered to the agent's attached connection
-   — one awaited call carrying the claimed-run envelope, under a
-   delivery timeout. The provider answers accepted / declined-full /
+1. **Offer.** The earliest queued run whose thread has no run in flight
+   is offered to the agent's attached connection — one awaited call
+   carrying the claimed-run envelope, under a delivery timeout. Dispatch
+   is **one turn per thread at a time**: a run whose thread is held by a
+   claimed or paused run is passed over (without blocking other
+   threads' runs behind it), which preserves per-thread order — the
+   holder is by construction an earlier run on that thread. A paused
+   `input-required` run keeps its thread until its question is answered
+   or it is failed as stale, so no queued sibling overtakes an
+   unanswered question; the gate is re-seeded from paused runs at
+   startup, since dispatch state does not survive a restart but a
+   paused run does. The provider answers accepted / declined-full /
    refused-permanently; timeouts and refusals are handled per
    [runs and cancels are requests](../mechanisms/requests.md).
 2. **Claim.** An accepted run is marked claimed by that provider's key

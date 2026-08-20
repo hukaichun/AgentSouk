@@ -16,7 +16,6 @@ from souk.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound, Run
 from souk.kyok import KyokBinding, parse_kyok_opt_in, strip_kyok_context
 from souk.props import build_forwarded_props
 from souk.models import AgentRef
-from souk.pause import is_resuming
 from souk.protocols.a2a_translate import (
     a2a_message_to_agui_messages,
     agui_event_to_a2a_update,
@@ -297,8 +296,10 @@ class A2AAdapter:
     async def _start_run(self, agent: AgentRef, params: dict) -> tuple[str, str, bool]:
         """Resolves `params` (a `contextId`/`taskId`/message envelope) to a thread and run,
         creating or reopening whichever is needed, and returns `(run_id, thread_id, is_live)`.
-        `is_live` is False if an already-active run on the thread was returned as-is instead of
-        starting a new one, or if the agent isn't currently served (in which case the run is
+        A message addressed (via `taskId`) to the thread's paused `input-required` task resumes
+        it; any other message becomes a new queued run — dispatched one per thread at a time —
+        so a message sent while a run is active is queued, never dropped. `is_live` is False
+        only if the agent isn't currently served (in which case the run is
         recorded as failed). A `metadata.kyok` opt-in binds the run to the named LLM offering
         (raising `LlmProviderNotFound` for an unknown one), the same road AG-UI callers use.
         Absent that, a `referenceTaskIds` entry both anchors thread lineage to the referenced
@@ -326,18 +327,34 @@ class A2AAdapter:
                 session, agent, context_id, parent_thread_id, metadata=metadata
             )
 
-            active = await repo.get_active_run_for_thread(session, thread_id)
-            if active is not None and not is_resuming(active, None):
-                return active["run_id"], thread_id, False
-            resuming_run_id = active["run_id"] if active is not None else None
-
             messages = a2a_message_to_agui_messages(params.get("message", {}))
             run_input = {"thread_id": thread_id, "messages": messages}
 
-            if resuming_run_id is not None:
-                run_id = resuming_run_id
+            # Two lanes. A message whose taskId names this thread's paused
+            # (input-required) task is the bound answer to its question and
+            # resumes that run. Every other message — mid-run follow-ups
+            # included — becomes a new queued run on the thread; the broker
+            # dispatches one turn per thread at a time, so it waits its turn
+            # instead of being merged, refused, or dropped. The reopen is
+            # status-guarded so two concurrent replies resolve to one resume;
+            # the loser lands in the queue lane like any other utterance.
+            task_id = params.get("taskId")
+            addressed = await repo.get_run(session, task_id) if task_id else None
+            reopened = (
+                addressed is not None
+                and addressed.thread_id == thread_id
+                and addressed.status == "input-required"
+                and await repo.reopen_run(
+                    session,
+                    task_id,
+                    run_input,
+                    metadata=metadata,
+                    expected_status="input-required",
+                )
+            )
+            if reopened:
+                run_id = task_id
                 starting_seq = await repo.get_last_event_seq(session, run_id)
-                await repo.reopen_run(session, run_id, run_input, metadata=metadata)
             else:
                 created = await repo.create_run(
                     session, thread_id, agent, "a2a", run_input, metadata=metadata

@@ -213,6 +213,7 @@ class RunBroker:
         self._spawn = spawn or self._spawn_unsupervised
         self._runs: dict[str, Run] = {}
         self._pending_by_agent: dict[AgentRef, deque[str]] = defaultdict(deque)
+        self._thread_holder: dict[str, str] = {}
         self._live = LiveRoster(("misdeclared", "abandoned", "unanswered", "answered_late"))
         self._unserved_since: dict[AgentRef, datetime] = {}
         self._capacity: dict[str, _Capacity] = {}
@@ -337,30 +338,52 @@ class RunBroker:
     async def _offer_pending(self, agent: AgentRef) -> bool:
         """Offers `agent`'s queued runs, in order, to its provider until the
         queue is empty, the provider has no room, or an offer isn't accepted.
-        Skips (and drops) runs that were cancelled while still queued. Returns
-        whether at least one run was placed."""
+        A run whose thread already has a run in flight (claimed, or paused on
+        `input-required`) is left queued and passed over — one turn per thread
+        at a time — without blocking later runs on other threads. Skips (and
+        drops) runs that were cancelled while still queued. Returns whether at
+        least one run was placed."""
         placed = False
         while True:
             provider = self._live.serving(agent)
             queue = self._pending_by_agent.get(agent)
             if provider is None or not queue:
                 return placed
-            run_id = queue[0]
+            run_id = self._first_offerable(queue)
+            if run_id is None:
+                return placed
             run = self._runs.get(run_id)
             if run is None or run.cancel_requested:
-                queue.popleft()
+                queue.remove(run_id)
                 continue
             capacity = self._capacity.get(provider.public_key)
             if capacity is not None and not capacity.has_room:
                 return placed
             outcome = await self._offer(run, provider)
             if outcome == "refused":
-                queue.popleft()
+                with contextlib.suppress(ValueError):
+                    queue.remove(run_id)
                 continue
             if not outcome:
                 return placed
-            queue.popleft()
+            with contextlib.suppress(ValueError):
+                queue.remove(run_id)
             placed = True
+
+    def _first_offerable(self, queue: deque[str]) -> str | None:
+        """The earliest queued run whose thread has no other run in flight.
+        Dead entries (unknown or cancel-requested runs) are returned as-is so
+        the caller drops them; live entries on a held thread are passed over,
+        which preserves per-thread order — the holder of the thread is, by
+        construction, an earlier run on it."""
+        for run_id in queue:
+            run = self._runs.get(run_id)
+            if run is None or run.cancel_requested:
+                return run_id
+            holder = self._thread_holder.get(run.thread_id)
+            if holder is None or holder == run_id:
+                return run_id
+        return None
 
     async def _offer(self, run: Run, provider: ConnectedProvider) -> bool | str:
         """Delivers `run` to `provider` within `deliver_timeout_seconds` and, if
@@ -420,6 +443,7 @@ class RunBroker:
             return False
         run.claimed_by = provider.public_key
         run.cancel_notify = provider.cancel
+        self._thread_holder[run.thread_id] = run.run_id
         if capacity is not None:
             capacity.in_flight += 1
         handlers = self._handlers.get(run.run_id)
@@ -549,11 +573,15 @@ class RunBroker:
         provider = self._live.serving(run.agent)
         if provider is None or provider.public_key != claimed_by:
             return False
+        holder = self._thread_holder.get(run.thread_id)
+        if holder is not None and holder != run_id:
+            return False
 
         queue = self._pending_by_agent.get(run.agent)
         if queue is not None and run_id in queue:
             queue.remove(run_id)
 
+        self._thread_holder[run.thread_id] = run_id
         capacity = self._capacity.get(claimed_by)
         if capacity is not None:
             capacity.in_flight += 1
@@ -591,7 +619,11 @@ class RunBroker:
         """Drops a run's tracked state and handlers, frees the claimed
         provider's in-flight capacity (if any, waking the sweep loop so its
         freed place can be offered again), and notifies forget listeners.
-        Safe to call for a run that isn't tracked."""
+        The run's hold on its thread is released too — except when it ended
+        paused on `input-required`: the thread stays held by the paused run,
+        so queued siblings wait for the answer instead of overtaking it (the
+        resumed run itself passes the gate, being its own holder). Safe to
+        call for a run that isn't tracked."""
         run = self._runs.pop(run_id, None)
         self._handlers.pop(run_id, None)
         if run is not None and run.claimed_by is not None:
@@ -599,5 +631,26 @@ class RunBroker:
             if capacity is not None and capacity.in_flight > 0:
                 capacity.in_flight -= 1
                 self._work_to_do.set()
+        if run is not None and run.pause_payload is None:
+            self.release_thread(run_id)
         for listener in self._forget_listeners:
             listener(run_id)
+
+    def hold_thread(self, thread_id: str, run_id: str) -> None:
+        """Marks `thread_id` as having `run_id` in flight, so no other run on
+        that thread is offered until the hold is released. Used at startup to
+        re-seed the gate from runs the database says are paused — dispatch
+        state doesn't survive a restart, but an `input-required` run does."""
+        self._thread_holder[thread_id] = run_id
+
+    def release_thread(self, run_id: str) -> None:
+        """Releases whatever thread `run_id` holds, waking the sweep loop so a
+        queued sibling can be offered. For runs that end inside the broker this
+        happens in `forget`; this entry point is for a paused run — no longer
+        broker-tracked — that reaches a terminal status outside the dispatch
+        path (failed as stale by the health sweep, or marked failed by an
+        adapter). A no-op if `run_id` holds nothing."""
+        for thread_id, holder in list(self._thread_holder.items()):
+            if holder == run_id:
+                del self._thread_holder[thread_id]
+                self._work_to_do.set()

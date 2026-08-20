@@ -557,8 +557,16 @@ async def _merge_run_metadata(
 
 
 async def reopen_run(
-    session: AsyncSession, run_id: str, input_json: dict[str, Any], metadata: dict[str, Any] | None = None
-) -> None:
+    session: AsyncSession,
+    run_id: str,
+    input_json: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    expected_status: str | None = None,
+) -> bool:
+    """Puts `run_id` back to "queued" with fresh input, returning whether a row
+    changed. With `expected_status`, the update only applies while the run is
+    still in that status — the guard that makes two concurrent replies to one
+    paused run resolve to a single reopen instead of both winning."""
     values: dict[str, Any] = {
         "status": "queued",
         "input_json": input_json,
@@ -566,10 +574,12 @@ async def reopen_run(
     }
     if metadata:
         values["metadata"] = await _merge_run_metadata(session, run_id, metadata)
-    await session.execute(
-        update(runs).where(runs.c.run_id == run_id).values(**values)
-    )
+    where = [runs.c.run_id == run_id]
+    if expected_status is not None:
+        where.append(runs.c.status == expected_status)
+    result = await session.execute(update(runs).where(*where).values(**values))
     await session.commit()
+    return result.rowcount > 0
 
 
 async def mark_run_status(
@@ -619,6 +629,36 @@ async def get_active_run_for_thread(session: AsyncSession, thread_id: str) -> di
     return dict(row) if row else None
 
 
+async def get_paused_run_for_thread(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
+    """The thread's `input-required` run, if it has one. Distinct from
+    `get_active_run_for_thread` on purpose: with queued siblings on the thread,
+    "latest active" may be a queued run, while a resume must target the run
+    that actually asked the question."""
+    row = (
+        await session.execute(
+            select(runs)
+            .where(
+                runs.c.thread_id == thread_id,
+                runs.c.status == "input-required",
+            )
+            .order_by(runs.c.created_at.desc())
+            .limit(1)
+        )
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+async def get_paused_runs(session: AsyncSession) -> list[dict[str, Any]]:
+    """Every `input-required` run's (run_id, thread_id), for re-seeding the
+    broker's thread gate at startup."""
+    rows = (
+        await session.execute(
+            select(runs.c.run_id, runs.c.thread_id).where(runs.c.status == "input-required")
+        )
+    ).all()
+    return [{"run_id": row.run_id, "thread_id": row.thread_id} for row in rows]
+
+
 async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
     thread = await get_thread(session, thread_id)
     if thread is None:
@@ -645,16 +685,17 @@ async def _fail_runs(
     now = _utcnow()
     run_ids: list[str] = []
     for row in rows:
-        await session.execute(
+        result = await session.execute(
             update(runs)
-            .where(runs.c.run_id == row.run_id)
+            .where(runs.c.run_id == row.run_id, where_clause)
             .values(
                 status="failed",
                 completed_at=now,
                 metadata={**(row.metadata or {}), "failureReason": failure_reason},
             )
         )
-        run_ids.append(row.run_id)
+        if result.rowcount > 0:
+            run_ids.append(row.run_id)
     await session.commit()
     return run_ids
 

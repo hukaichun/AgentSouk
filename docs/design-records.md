@@ -218,22 +218,37 @@ question.
 lane**. It says nothing about whether the queue lane is open, because the
 queue lane is always open.
 
+On souk's A2A surface the reply lane's marker, until A2A v1.1's
+`elicitationId` lands, is a message whose `taskId` names the thread's
+paused task: that resumes it. Any other message is the queue lane.
+
 [full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#the-two-lanes)
 
 ### Queueing makes "may I speak?" always answerable with yes
 
-Direction, not yet implemented: every caller utterance is accepted at any
-moment and queued as a run on the thread, and the provider decides when
-or whether to claim it. Wire behavior becomes deterministic with no "not
-accepting input" error, and mid-execution steering needs no protocol
-flag — **an agent that drains its queue eagerly *is* a steerable
-agent**. Timing is the provider's will, not the protocol's ruling and
-not souk's.
+Every caller utterance is accepted at any moment and queued as a run on
+the thread, and the provider decides when or whether to claim it. Wire
+behavior becomes deterministic with no "not accepting input" error, and
+mid-execution steering needs no protocol flag — **an agent that drains
+its queue eagerly *is* a steerable agent**. Timing is the provider's
+will, not the protocol's ruling and not souk's.
 
 souk never merges a queued message into an active run. Inferring which
 messages belong together is the batch-correlation swamp that killed an
 earlier design; membership is only ever declared by the caller and
 absorbed by the provider, never assumed by the relay.
+
+This shipped for the A2A door (before it, a message sent mid-run was
+answered with the in-flight task and **silently discarded** — not
+queued, not appended, invisible to the caller), with the dispatch half
+in the broker: one turn per thread at a time, and a paused
+`input-required` run holds its thread until answered, so nothing
+overtakes an unanswered question. Two deliberate narrowings: enqueue
+order is arrival order (truly concurrent messages have no canonical
+order to preserve, and the gate serializes dispatch regardless), and the
+AG-UI door still answers a busy thread with a snapshot — what its caller
+should see while queued is an unsettled UX question, not a mechanism
+gap.
 
 [full record](https://github.com/hukaichun/AgentSouk/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#queueing-delivery-is-the-protocols-timing-is-the-providers)
 

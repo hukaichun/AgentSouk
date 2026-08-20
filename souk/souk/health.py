@@ -39,6 +39,7 @@ async def sweep_once(souk: "Souk") -> None:
             stalled,
         )
     for run_id in stale_paused:
+        souk.broker.release_thread(run_id)
         await _close_with_terminal_event(souk, run_id, "paused_no_resume")
     if stale_paused:
         logger.warning(
