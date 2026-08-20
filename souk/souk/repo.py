@@ -449,13 +449,16 @@ async def ensure_thread(
     `ThreadOwnershipMismatch` otherwise — and its `last_activity_at` is
     bumped. If `thread_id` is given but doesn't exist, raises
     `ThreadNotFound` unless `create_if_missing` is set, in which case a
-    new thread is created instead.
+    new thread is created instead — under a souk-minted id, never the
+    caller's: souk owns its record's primary keys, and a caller-chosen
+    name has no caller identity to scope it to yet (see the design
+    record on conversation naming rights).
     """
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
         if existing is None:
             if create_if_missing:
-                return await create_thread(session, agent, metadata=metadata)
+                return await create_thread(session, agent, parent_thread_id, metadata=metadata)
             raise ThreadNotFound(thread_id)
         owner = AgentRef(
             provider_key=existing["provider_key"], name=existing["agent_name"]
