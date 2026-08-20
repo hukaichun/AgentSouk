@@ -294,21 +294,18 @@ holds its thread until answered, so nothing overtakes an unanswered
 question.
 
 The queue is a **run queue, and every entry stays a run**: each is
-dispatched whole, as its own turn, and never changes shape. A reading
-that tempted us and was rejected — "one buffer, two consumers", where
-interjection (designed below, not built) would be the provider reaching
-into the same queue early — puts an entry's meaning in the hands of
-whoever picks it up: the batch-correlation swamp reborn, and a run
-whose work was absorbed into another turn would need a terminal status
-souk never observed. So the two verbs stay separate at birth, declared
-by the caller and never inferred: a queued entry is always a run;
-an interjection travels through its own opt-in entry point with
-`parentRunId`, is never a run at all when accepted (its response grows
-out of the original stream), and only becomes one if rejected and
-deliberately resent through the ordinary door. Nothing is ever dumped:
-the provider receives one run per turn (whose input carries the history
-folded at its arrival, with `thread_messages` as the authoritative
-read).
+dispatched whole and never changes shape. A reading that tempted us and
+was rejected — "one buffer, two consumers", where interjection would be
+the provider reaching into the same queue and *reinterpreting* an entry
+— puts an entry's meaning in the hands of whoever picks it up: the
+batch-correlation swamp reborn. What survives instead: an entry's verb
+is declared by the caller at birth and never inferred, and an
+interjection-intended utterance is *still a run*, merely annotated with
+the in-flight run it addresses — see the interjection record below for
+how the annotation changes dispatch and nothing else. Nothing is ever
+dumped: absent that annotation the provider receives one run per turn
+(whose input carries the history folded at its arrival, with
+`thread_messages` as the authoritative read).
 
 The pending depth is bounded (`thread_queue_limit`, default 8, `None`
 opts out): a live conversation holds a few unconsumed utterances, not
