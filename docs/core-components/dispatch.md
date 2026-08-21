@@ -170,18 +170,20 @@ fact. This is also what makes self-delegation deadlock — see
 
 A provider that declared **unlimited** concurrency and then declines
 has contradicted its own declaration outright — there is no finite
-figure to fall back to. funduq records the `misdeclared` event once and
-**withholds further offers until the provider next does something
-observable** (finishes a run, answers late, reconnects). This is not a
-back-off funduq runs on the provider's behalf: keeping intake sane is
-the provider's own job, done by declaring a real limit — funduq helps
-queue against a declared throughput, and declines to keep asking a
-provider whose words don't add up (the old behaviour re-offered every
-sweep forever, inflating the counter into noise — funduq#128). New work
-arriving does not lift the withhold; only the provider acting does.
-The provider SDK keeps the default coherent: a runtime that claims no
-limit accepts every delivered run, so it can never be branded abnormal
-by its own transport plumbing.
+figure to fall back to. That is abnormal behaviour, and funduq handles
+an abnormal provider rather than cleaning up after one: the
+`misdeclared` event is recorded once and the provider is **withdrawn
+from service on the spot**. Nothing special happens to the run — it
+stays in the queue like anyone's, and with its agent now unserved it
+travels the ordinary no-provider expiry road to a loud failure; runs
+already in flight are left to finish and report. The way back in is
+the front door: reconnect and register again, with the quality record
+intact. (The old behaviour re-offered every sweep forever, inflating
+the counter into noise — funduq#128.) Providers that want funduq to
+pace intake declare a real limit — that is what the declaration is
+for — and the provider SDK keeps the default coherent: a runtime that
+claims no limit accepts every delivered run, so it can never be
+branded abnormal by its own transport plumbing.
 
 ## One substrate under both
 

@@ -66,22 +66,15 @@ class ProviderQuality:
 class _Capacity:
     """Tracks one provider's in-flight run count against its declared limit.
     `declared=None` means the provider accepts unlimited concurrent runs —
-    a declaration like any other, and one a decline contradicts. `withheld`
-    is set when that contradiction happens: funduq stops offering to a
-    provider whose own words don't add up, until the provider next does
-    something observable (finishes a run, answers late, reconnects). Not a
-    back-off — pacing a provider's intake is the provider's job, via a
-    declared limit; this is funduq declining to keep asking an abnormal
-    one."""
+    a declaration like any other, and one a decline contradicts (see the
+    decline handling in `_offer`: the contradiction withdraws the provider
+    from service)."""
 
     declared: int | None
     in_flight: int = 0
-    withheld: bool = False
 
     @property
     def has_room(self) -> bool:
-        if self.withheld:
-            return False
         return self.declared is None or self.in_flight < self.declared
 
 
@@ -321,11 +314,9 @@ class RunBroker:
         for agent in mapping:
             self._unserved_since.pop(agent, None)
         for provider in mapping.values():
-            capacity = self._capacity.setdefault(
+            self._capacity.setdefault(
                 provider.public_key, _Capacity(declared=provider.max_concurrent_runs)
             )
-            # A (re)connection is the provider acting; stop withholding.
-            capacity.withheld = False
         self._work_to_do.set()
 
     def serving(self, agent: AgentRef) -> ConnectedProvider | None:
@@ -425,14 +416,20 @@ class RunBroker:
             if capacity is not None and capacity.has_room:
                 self._live.note(provider.public_key, "misdeclared")
                 if capacity.declared is None:
-                    # Claiming no limit and declining is abnormal behaviour,
-                    # recorded once — not re-asked every sweep, which only
-                    # inflated the counter into noise (funduq#128). Offers
-                    # resume when the provider next acts.
-                    capacity.withheld = True
+                    # Claiming no limit and declining is abnormal behaviour:
+                    # recorded once, and the provider is withdrawn from
+                    # service on the spot (funduq#128). funduq handles an
+                    # abnormal provider; it does not keep a seat warm for
+                    # one. The declined run stays in the queue like any
+                    # other and, with its agent now unserved, travels the
+                    # ordinary no-provider expiry road; runs already in
+                    # flight are left to finish and report. The way back in
+                    # is the front door: reconnect and register again.
+                    self.unregister_provider(self.agents_served_by(provider.public_key))
                     logger.warning(
                         "provider %s declared unlimited concurrency yet declined run %s; "
-                        "withholding further offers until it acts (misdeclared: %d)",
+                        "withdrawn from service as abnormal (misdeclared: %d) — "
+                        "re-registration is the way back",
                         provider.public_key[:16],
                         run.run_id,
                         self._live.count(provider.public_key, "misdeclared"),
@@ -514,7 +511,10 @@ class RunBroker:
         provider for longer than `timeout_seconds`, failing each with
         `Fail("no_provider_took_it")`, and returns their run_ids. A run whose
         agent *is* served stays queued indefinitely — a declining-but-attached
-        provider is a full stall, not a lost one. The clock is the later of the
+        provider with a declared limit is a full stall, not a lost one. (An
+        *unlimited* provider that declines doesn't stall; it is withdrawn
+        from service as abnormal, which makes its agent unserved and starts
+        exactly this clock.) The clock is the later of the
         run's own enqueue and the moment the agent last lost its provider, so
         every run gets the full grace period even if its agent was already
         unserved when it arrived."""
@@ -586,7 +586,6 @@ class RunBroker:
         capacity = self._capacity.get(claimed_by)
         if capacity is not None:
             capacity.in_flight += 1
-            capacity.withheld = False
         self._live.note(claimed_by, "answered_late")
         logger.warning(
             "provider %s answered late for run %s (%d so far): already producing for "
@@ -628,7 +627,6 @@ class RunBroker:
             capacity = self._capacity.get(run.claimed_by)
             if capacity is not None and capacity.in_flight > 0:
                 capacity.in_flight -= 1
-                capacity.withheld = False
                 self._work_to_do.set()
         for listener in self._forget_listeners:
             listener(run_id)
