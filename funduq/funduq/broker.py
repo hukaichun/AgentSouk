@@ -65,7 +65,10 @@ class ProviderQuality:
 @dataclass
 class _Capacity:
     """Tracks one provider's in-flight run count against its declared limit.
-    `declared=None` means the provider accepts unlimited concurrent runs."""
+    `declared=None` means the provider accepts unlimited concurrent runs —
+    a declaration like any other, and one a decline contradicts (see the
+    decline handling in `_offer`: the contradiction withdraws the provider
+    from service)."""
 
     declared: int | None
     in_flight: int = 0
@@ -204,6 +207,7 @@ class RunBroker:
         sweep_interval_seconds: float = 1.0,
         unserved_timeout_seconds: float = 45.0,
         deliver_timeout_seconds: float = 5.0,
+        quality_tolerance: int | None = None,
     ) -> None:
         self._spawn = spawn or self._spawn_unsupervised
         self._runs: dict[str, Run] = {}
@@ -216,12 +220,39 @@ class RunBroker:
         self.sweep_interval_seconds = sweep_interval_seconds
         self.unserved_timeout_seconds = unserved_timeout_seconds
         self.deliver_timeout_seconds = deliver_timeout_seconds
+        self.quality_tolerance = quality_tolerance
         self._loop_task: asyncio.Task | None = None
         self._work_to_do = asyncio.Event()
         self._forget_listeners: list[Callable[[str], None]] = []
 
     def add_forget_listener(self, listener: Callable[[str], None]) -> None:
         self._forget_listeners.append(listener)
+
+    def _note_abnormal(self, public_key: str, event: str) -> None:
+        """Records one abnormal event and applies the tolerance. The quality
+        counters are the allowance: they say how much abnormality a provider
+        is permitted, and a provider whose counter reaches the allowance is
+        withdrawn from service — the same judgment for every event type, no
+        provider getting a special seat. Queued runs are treated like
+        anyone's (the agent is now unserved, so they travel the ordinary
+        no-provider expiry road); runs in flight finish and report; the way
+        back is the front door — reconnect and register again, the record
+        intact and still counting."""
+        self._live.note(public_key, event)
+        tolerance = self.quality_tolerance
+        if tolerance is None or self._live.count(public_key, event) < tolerance:
+            return
+        agents = self.agents_served_by(public_key)
+        if agents:
+            self.unregister_provider(agents)
+            logger.warning(
+                "provider %s reached the abnormality allowance (%s: %d of %d); "
+                "withdrawn from service — re-registration is the way back",
+                public_key[:16],
+                event,
+                self._live.count(public_key, event),
+                tolerance,
+            )
 
 
     def start(self) -> None:
@@ -386,7 +417,7 @@ class RunBroker:
                     )
                 )
         except TimeoutError:
-            self._live.note(provider.public_key, "unanswered")
+            self._note_abnormal(provider.public_key, "unanswered")
             logger.warning(
                 "provider %s did not answer an offer of run %s within %ss (%d so far)",
                 provider.public_key[:16],
@@ -396,7 +427,7 @@ class RunBroker:
             )
             return False
         except Exception:
-            self._live.note(provider.public_key, "unanswered")
+            self._note_abnormal(provider.public_key, "unanswered")
             logger.exception("run %s: delivering to its provider failed", run.run_id)
             return False
         reason = getattr(accepted, "reason", None)
@@ -411,15 +442,24 @@ class RunBroker:
             return "refused"
         if not accepted:
             if capacity is not None and capacity.has_room:
-                self._live.note(provider.public_key, "misdeclared")
-                capacity.in_flight = capacity.declared or capacity.in_flight
-                logger.warning(
-                    "provider %s declined a run while funduq believed it had room "
-                    "(now %d/%s in flight); treating it as full",
-                    provider.public_key[:16],
-                    capacity.in_flight,
-                    capacity.declared,
-                )
+                # Declining while claiming room is one abnormal event,
+                # whatever the declaration was — the tolerance in
+                # _note_abnormal decides when it adds up to withdrawal, the
+                # same judgment every provider gets (funduq#128). A declared
+                # limit is additionally treated as reached, that being the
+                # provider's own figure; an unlimited declaration has no
+                # figure to fall back to, so the run is simply re-offered
+                # and each further decline spends more of the allowance.
+                self._note_abnormal(provider.public_key, "misdeclared")
+                if capacity.declared is not None:
+                    capacity.in_flight = capacity.declared
+                    logger.warning(
+                        "provider %s declined a run while funduq believed it had room "
+                        "(now %d/%s in flight); treating it as full",
+                        provider.public_key[:16],
+                        capacity.in_flight,
+                        capacity.declared,
+                    )
             return False
         run.claimed_by = provider.public_key
         run.cancel_notify = provider.cancel
@@ -450,7 +490,7 @@ class RunBroker:
         if run is None:
             return False
         if isinstance(command, Fail) and run.claimed_by is not None:
-            self._live.note(run.claimed_by, "abandoned")
+            self._note_abnormal(run.claimed_by, "abandoned")
             logger.warning(
                 "provider %s abandoned run %s (%d so far): took it and never ended it",
                 run.claimed_by[:16],
@@ -488,7 +528,10 @@ class RunBroker:
         provider for longer than `timeout_seconds`, failing each with
         `Fail("no_provider_took_it")`, and returns their run_ids. A run whose
         agent *is* served stays queued indefinitely — a declining-but-attached
-        provider is a full stall, not a lost one. The clock is the later of the
+        provider is a full stall, not a lost one. (A provider that spends its
+        whole abnormality allowance — see `_note_abnormal` — stops being
+        attached: withdrawal makes its agents unserved and starts exactly
+        this clock.) The clock is the later of the
         run's own enqueue and the moment the agent last lost its provider, so
         every run gets the full grace period even if its agent was already
         unserved when it arrived."""
@@ -560,7 +603,7 @@ class RunBroker:
         capacity = self._capacity.get(claimed_by)
         if capacity is not None:
             capacity.in_flight += 1
-        self._live.note(claimed_by, "answered_late")
+        self._note_abnormal(claimed_by, "answered_late")
         logger.warning(
             "provider %s answered late for run %s (%d so far): already producing for "
             "a run funduq had put back in the queue",
