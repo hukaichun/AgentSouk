@@ -168,22 +168,24 @@ the only capacity figure funduq has and the decline is the more recent
 fact. This is also what makes self-delegation deadlock — see
 [the design record](../design-records.md#self-delegation-deadlocks-a-capacity-capped-provider).
 
-A provider that declared **unlimited** concurrency and then declines
-has contradicted its own declaration outright — there is no finite
-figure to fall back to. That is abnormal behaviour, and funduq handles
-an abnormal provider rather than cleaning up after one: the
-`misdeclared` event is recorded once and the provider is **withdrawn
-from service on the spot**. Nothing special happens to the run — it
-stays in the queue like anyone's, and with its agent now unserved it
-travels the ordinary no-provider expiry road to a loud failure; runs
-already in flight are left to finish and report. The way back in is
-the front door: reconnect and register again, with the quality record
-intact. (The old behaviour re-offered every sweep forever, inflating
-the counter into noise — funduq#128.) Providers that want funduq to
-pace intake declare a real limit — that is what the declaration is
-for — and the provider SDK keeps the default coherent: a runtime that
-claims no limit accepts every delivered run, so it can never be
-branded abnormal by its own transport plumbing.
+The quality counters are not just a report — they are **the
+allowance**: they say how much abnormality a provider is permitted,
+and a provider whose counter reaches it (`provider_quality_tolerance`,
+default 3, `None` disables; policy, so a setting) is **withdrawn from
+service** — the same judgment for every event type and every provider,
+nobody holding a special seat. funduq handles an abnormal provider
+rather than cleaning up after one: nothing special happens to its
+runs — queued ones stay in the queue like anyone's and, the agent now
+unserved, travel the ordinary no-provider expiry road to a loud
+failure; runs already in flight finish and report. The way back is
+the front door: reconnect and register again, with the record intact
+and still counting. (Before this rule, an unlimited provider that kept
+declining was re-offered every sweep forever, inflating `misdeclared`
+into noise — funduq#128.) Providers that want funduq to pace intake
+declare a real limit — that is what the declaration is for — and the
+provider SDK keeps the default coherent: a runtime that claims no
+limit accepts every delivered run, so it can never be branded abnormal
+by its own transport plumbing.
 
 ## One substrate under both
 

@@ -118,34 +118,64 @@ async def test_a_decline_leaves_the_run_queued(broker):
     assert broker.quality()["pk_provider"].in_flight == 0
 
 
-async def test_an_unlimited_decline_withdraws_the_provider_from_service(broker):
-    """funduq#128: declaring no limit is a declaration, and a decline
-    contradicts it outright. funduq handles the abnormal provider — one
-    misdeclared event, withdrawn from service on the spot — and does not
-    keep a seat warm for it; the way back is re-registration."""
-    provider = Recording(answers=[False], default=True)
-    broker.register_provider({AGENT: provider})
-    _enqueue(broker, "run_1")
-    await _until(lambda: provider.offered == ["run_1"])
+async def test_a_provider_past_its_abnormality_allowance_is_withdrawn():
+    """funduq#128 settled generally: the quality counters ARE the allowance —
+    they say how much abnormality any provider is permitted, and one that
+    reaches it is withdrawn from service, the same judgment for every event
+    type and every provider. The way back is the front door."""
+    b = RunBroker(deliver_timeout_seconds=0.05, unserved_timeout_seconds=0.1,
+                  quality_tolerance=2)
+    b.start()
+    try:
+        provider = Recording(answers=[False, False], default=True)
+        b.register_provider({AGENT: provider})
+        _enqueue(b, "run_1")
 
-    await _until(lambda: broker.serving(AGENT) is None)
-    assert broker.quality()["pk_provider"].misdeclared == 1, "one event, one count"
+        # Each decline-with-room spends allowance; at 2 of 2 the provider is out.
+        await _until(lambda: b.serving(AGENT) is None, timeout=3.0)
+        assert b.quality()["pk_provider"].misdeclared == 2
+        offered_when_withdrawn = list(provider.offered)
 
-    _enqueue(broker, "run_2")
-    await asyncio.sleep(0.2)
-    assert provider.offered == ["run_1"], "withdrawn means withdrawn — no more offers"
-    assert broker.get("run_1") is not None, "the declined run stays queued like anyone's"
+        _enqueue(b, "run_2")
+        await asyncio.sleep(0.2)
+        assert provider.offered == offered_when_withdrawn, (
+            "withdrawn means withdrawn — no more offers"
+        )
 
-    # The front door works: re-registering restores service.
-    broker.register_provider({AGENT: provider})
-    await _until(lambda: broker.get("run_1") is not None and broker.get("run_1").is_claimed)
+        # The front door works: re-registering restores service.
+        b.register_provider({AGENT: provider})
+        await _until(lambda: b.get("run_1") is None or b.get("run_1").is_claimed, timeout=3.0)
+    finally:
+        b.stop()
+
+
+async def test_below_the_allowance_an_abnormal_event_is_tolerated():
+    """One discourtesy is counted, not ejected: the tolerance exists so a
+    provider may be somewhat abnormal before funduq stops serving it."""
+    b = RunBroker(deliver_timeout_seconds=0.05, unserved_timeout_seconds=0.1,
+                  quality_tolerance=2)
+    b.start()
+    try:
+        provider = Recording(answers=[False], default=True)
+        b.register_provider({AGENT: provider})
+        _enqueue(b, "run_1")
+        await _until(lambda: provider.offered == ["run_1"])
+
+        assert b.serving(AGENT) is provider, "one event is within the allowance"
+        await _until(
+            lambda: b.get("run_1") is not None and b.get("run_1").is_claimed, timeout=3.0
+        )
+        assert b.quality()["pk_provider"].misdeclared == 1
+    finally:
+        b.stop()
 
 
 async def test_runs_of_a_withdrawn_provider_expire_on_the_ordinary_road():
     """With its provider withdrawn, the agent is simply unserved: queued runs
     travel the existing no-provider expiry road and fail loudly, instead of
     waiting on an abnormal provider's change of heart."""
-    b = RunBroker(deliver_timeout_seconds=0.05, unserved_timeout_seconds=0.2)
+    b = RunBroker(deliver_timeout_seconds=0.05, unserved_timeout_seconds=0.2,
+                  quality_tolerance=1)
     b.start()
     try:
         provider = Recording(default=False)

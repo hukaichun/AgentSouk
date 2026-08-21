@@ -393,7 +393,10 @@ class Funduq:
         )
         self.engine = _create_engine(self.settings)
         self.sessionmaker = async_sessionmaker(self.engine, expire_on_commit=False)
-        self.broker = broker or RunBroker(spawn=self.spawn)
+        self.broker = broker or RunBroker(
+            spawn=self.spawn,
+            quality_tolerance=self.settings.provider_quality_tolerance,
+        )
         self.kyok_relay = KyokRelay()
         self.broker.add_forget_listener(self.kyok_relay.discard)
         self._agent_roster = _AgentRoster(self)
