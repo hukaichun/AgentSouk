@@ -333,8 +333,70 @@ failure lands on your run, your stall record, your invoice — the
 resulting break-point topology is an honest map of every provider's
 declared competence boundary.
 
+**Later refinement (2026-08-21): the declaration dissolved into the
+act.** Asking why a break edge would carry signatures onward — what
+would that guarantee? — showed the answer is *nothing*: everything
+extension buys (escalation path, answering rights, visibility) is
+exactly what break refuses, and carrying the chain through a break
+would also advertise the user's head to subcontractors the user never
+chose. So there is no per-edge flag to declare: **extending the chain
+is the extend declaration, and silence is the break** — the default
+falls out for free, and segment boundaries are derived from where
+signatures actually reached rather than registered anywhere. Funding
+was split off into its own topic and is no longer part of the bundle
+this record describes.
+
 See [Responsibility chains](mechanisms/responsibility-chains.md) →
 [full record](https://github.com/hukaichun/funduq/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/responsibility-chains.md#delegation-the-edge-declaration)
+
+### A user is a position, and a chain is only keys
+
+The question that blocked responsibility chains longest was "how is a
+user's identity defined?" — and the settled answer is that it isn't,
+separately: funduq has one identity primitive (a keypair, no accounts,
+existing by being seen) and "user" is that primitive standing at **the
+head of a responsibility segment**. The position is symmetric: a main
+agent signing the first hop of a fresh chain when it delegates heads
+that sub-segment by the same machinery a human heads theirs — the
+mechanism never needs to know whether a head is a person, which is the
+responsibility-layer face of the two-entrances symmetry. Custody (a
+key file, a passkey, an SSO-backed gateway) is deployment, bridged by
+one new signed payload: the session delegation certificate, a durable
+key naming an ephemeral key with an expiry — needed because chain
+*extension* is provenance anyone may perform, so delegating authority
+to a named key takes an explicit statement.
+
+Three subtractions fell out of the same conversation:
+
+- **`subject` goes.** It was the signer's own unverifiable claim about
+  whom the key represents — an assertion wearing the record's clothes.
+  Authorization becomes pure keys; disclosure becomes a separate
+  opt-in **voucher** signed by a party who actually knows, making
+  "authorization is not disclosure" a file format instead of a policy.
+- **`forwardedProps.caller` goes with it.** funduq's verification
+  digest for the agent had one real payload — the raw chain, which is
+  the caller's utterance, not funduq's. It now rides to the agent
+  verbatim (the same two-slot pattern as any caller-declared data),
+  the agent verifies for itself, and with no digest there is no digest
+  to forge — the `verifiedActorChain` reserved-key defense retires.
+  funduq's part is four verbs: verify, copy the head, relay, refuse.
+- **No challenge round-trip for resolutions.** An ask's funduq-minted
+  single-use id is already the nonce: a resolution signs over the ask
+  id and the answer's hash, and a replay hits an ask that no longer
+  exists.
+
+The lock that comes with identity is deliberately half a lock: a
+thread whose first run carries a chain binds {segment head, provider}
+at birth, immutably, and **writing is membership** — members interject
+freely, non-members cannot speak — but reading a known id stays open
+at the core: a door-level read lock would gate confidentiality the
+core cannot actually deliver (its operator reads the database) while
+breaking every standard client's unauthenticated reads. The core
+enforces integrity with signatures; confidentiality belongs to the
+deployment's gateway; and discovery queries respect segment
+boundaries, so a broken-off subtree is simply never enumerated
+upstream — invisibility honest about being non-enumeration, not
+secrecy.
 
 ### Authorization is not disclosure
 
