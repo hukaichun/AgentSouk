@@ -66,24 +66,17 @@ run, a pending deque per agent, and a capacity bucket per provider
 (declared limit vs in-flight count). A sweep task wakes whenever work
 arrives or capacity frees, and walks each agent's queue:
 
-1. **Offer.** The earliest queued run whose thread has no run in flight
-   is offered to the agent's attached connection — one awaited call
-   carrying the claimed-run envelope, under a delivery timeout. Dispatch
-   is **one turn per thread at a time**: a run whose thread is held by a
-   claimed or paused run is passed over (without blocking other
-   threads' runs behind it), which preserves per-thread order — the
-   holder is by construction an earlier run on that thread. A paused
-   `input-required` run keeps its thread until its question is answered
-   or it is failed as stale, so no queued sibling overtakes an
-   unanswered question; the gate is re-seeded from paused runs at
-   startup, since dispatch state does not survive a restart but a
-   paused run does. One exemption: a run the caller addressed to the
-   run currently in flight (an interjection) is offered once mid-turn,
-   its address in the envelope's `metadata`; the provider's ordinary
-   answer is the whole negotiation, a decline drops it behind the gate
-   as a plain next turn (annotation stripped), and an exempt claim
-   never takes the thread gate — see
-   [the design record](../design-records.md#interjection-the-decline-is-the-whole-negotiation).
+1. **Offer.** The head of the agent's queue is offered to its attached
+   connection — one awaited call carrying the claimed-run envelope,
+   under a delivery timeout. Arrival order is the only sequencing funduq
+   imposes: a thread's utterances are offered in the order they came,
+   and a sibling is offered as soon as it reaches the head, whether or
+   not an earlier run of that thread is still producing. funduq does not
+   pace a provider's conversation — running the new turn at once,
+   holding it, or folding it into the turn in flight is the provider's
+   own decision, made in the agent author's code (the design record
+   [the thread gate is retired](../design-records.md#the-thread-gate-is-retired-funduq-does-not-pace-a-providers-conversation)
+   records why funduq once decided this and stopped).
    The provider answers accepted / declined-full /
    refused-permanently; timeouts and refusals are handled per
    [runs and cancels are requests](../mechanisms/requests.md).

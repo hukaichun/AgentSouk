@@ -59,7 +59,6 @@ async def sweep_once(funduq: "Funduq") -> None:
             stalled,
         )
     for run_id in stale_paused:
-        funduq.broker.release_thread(run_id)
         await close_with_terminal_event(funduq, run_id, "paused_no_resume")
     if stale_paused:
         logger.warning(

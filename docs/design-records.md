@@ -189,46 +189,91 @@ silently dropping `parent_thread_id`.
 See [The integration contract](integration-contract.md) →
 issue [#117](https://github.com/hukaichun/funduq/issues/117)
 
-### Interjection: the decline is the whole negotiation
+### Every seam has exactly two entrances: an utterance, or a result
 
-Superseding an earlier design (a separate opt-in entry point whose
-rejection the caller answered by resending): the reasoning that
-collapsed it starts from the wire's shape. **Every run in the world is
-SSE-shaped** — request in, one-way event stream out — and one-way
-channels mean an interjection can only ever be *another channel
-injecting into the original channel's loop*. So any provider that has
-hand-rolled interjection already has a second channel, and funduq's own
-delivery path *is* a second channel from the provider's point of view.
-No new entry point is needed; the one door funduq already has suffices.
+At the user–agent seam the inputs are a human's words or a deferred tool
+call's result; at the agent–agent seam they are an agent's words or a
+deferred tool call's result. The seams are symmetric — only the speaker
+differs — which is why funduq's machinery never needs to know whether
+the far side is human: **what needs to distinguish humans is the
+responsibility layer** (who may supply a result), not the mechanism.
 
-The shape that shipped: an interjection is an **ordinary run, annotated**
-with the in-flight run it addresses (over A2A the annotation is A2A's
-own grammar — a message whose `taskId` names the thread's *running*
-task; no new field). The broker offers an annotated run **immediately,
-once**, exempt from the thread gate, and the provider's ordinary
-three-valued answer is the entire negotiation:
+The deferred call is where human-in-the-loop lives. When an agent needs
+a person, the protocol shape is an ask left pending (`input-required` is
+that state; A2A's elicitation drafts are the same thing named) — and
+"whose human may answer, and what proves it" is exactly where a
+responsibility chain binds. The taxonomy sorts everything this page
+already records:
 
-- **accept** — the provider takes the full run, envelope intact
-  (caller props, KYOK, chain — identity was never a problem, because
-  delivery is the whole run), and injects it into its loop however it
-  likes. The run keeps its own stream, task id, and terminal status;
-  `task ≡ run` survives untouched.
-- **decline** — one shot only: the run drops behind the gate and is
-  re-offered as a plain next turn *with the annotation stripped* (a
-  stale annotation would make a default-declining provider refuse
-  forever). Degradation is the default physics: no resend, no fallback
-  policy, no capability advertisement anywhere — the SDK runtime
-  declines annotated offers until absorption machinery exists, and
-  nobody is told anything. The ack quietly reveals the implementation.
+- A plain message and a declared interjection are both **utterances** —
+  the interjection flag is timing intent on an utterance, not a third
+  entrance.
+- The reply lane delivers a **result**: it lands on the thread's pending
+  ask (status-guarded, so concurrent replies resolve to one winner),
+  and funduq never judges whether it satisfies the ask — the asker does.
+- The buffer bound (`thread_queue_limit`) applies to utterances only,
+  and the reply lane's exemption stops being a special case: **results
+  drain a pending ask; they never pile new input**, so refusing one
+  would strand the ask it answers.
+- A **result with no pending ask is refused** (the AG-UI door returns
+  the thread's state), never repackaged as an utterance. This clause
+  was earned by a probe: a `resume` payload sent at a thread with
+  nothing paused used to slip in as a fresh run, handing the agent an
+  answer to a question it never asked. Over A2A the case cannot arise —
+  a result there is a plain message plus addressing, so when it lands
+  on no ask it simply *is* an utterance, and degrading it is honest.
+- **Cancel is outside the taxonomy** by intent: it is a control request
+  about a run, not input to anyone's reasoning, and must not be cited
+  as precedent for a third entrance.
 
-Two implementation rules keep it race-free, both learned by walking the
-code before writing it: the immediate offer is an *eligibility
-exemption* inside the one deliverer (a second deliver call site would
-recreate the documented double-delivery race), and **an exempt claim
-never takes the thread gate** — if the interjection finished first while
-holding it, its forget would open the thread under the still-running
-holder. A paused target does not qualify: it holds its gate but has
-nothing in flight to absorb into.
+Current granularity: one pending ask per run, addressed by the run's
+own id. If asks ever need to be several-at-once (the shape A2A's
+elicitation draft sketches), results address individual ask ids — a
+widening of the result lane, not a new entrance.
+
+The taxonomy is also the razor for reading upstream proposals: anything
+that would create a third entrance is suspect. So far nothing does —
+elicitations are deferred calls, timeline mid-task messages are
+utterances.
+
+### Interjection is a declared intent, and its target's agent is the judge
+
+An interjection is a run that **asks to join another run's turn already in
+flight**. Two things about that sentence are load-bearing and each was
+learned the hard way.
+
+**It is declared, never inferred.** Continuation ("this follows that, next
+turn" — AG-UI's own `parentRunId`, relayed untouched) and interjection
+("this wants *into* that turn now") are different verbs, and the target's
+liveness must not be used to guess which one the caller meant — a
+continuation sent while its target happens to still be running is not an
+interjection. The caller states the intent explicitly: over A2A via the
+interjection extension (A2A's own extension convention — the target's id in
+the message's `metadata` under
+`https://github.com/hukaichun/funduq/ext/interjection/v1/addressedRunId`;
+v1.0's only mid-task verb is `CancelTask`, the v1.1 drafts cover only
+*solicited* input, and this key yields to whatever official carrier lands),
+over AG-UI by writing `forwardedProps.addressedRunId` directly. funduq
+copies the declaration into `forwardedProps.addressedRunId` and does
+nothing else with it.
+
+**Its target's agent is the judge.** Whether the named run still has a turn
+to join is a fact only the party running it holds; a relay-side answer is a
+stale copy by construction — funduq#136 was exactly that staleness caught on
+the wire, and the fix-of-the-fix kept shrinking until the honest shape
+appeared: funduq holds *no* opinion. The agent compares one string against
+its own in-flight loop: still open → absorb if it chooses; already ended →
+an ordinary next turn. Degradation needs no machinery, no capability
+signal, and no re-offer protocol. (The previous shape — an envelope
+annotation, a broker in-flight predicate, a one-shot decline flag, and
+strip-on-fallback — went down with the thread gate; see
+[the reversal record](#the-thread-gate-is-retired-funduq-does-not-pace-a-providers-conversation).)
+
+An agent that absorbs can mark the absorption point in its own stream with
+an event of its own naming — the unknown-event rule (store and forward,
+never branch) relays it verbatim, which is exactly the provider-authored
+timestamp a coherent cross-party history needs and the relay could never
+honestly write itself.
 
 ## Designed, not built
 
@@ -350,10 +395,11 @@ absorbed by the provider, never assumed by the relay.
 This shipped for both doors (before it, the A2A door answered a mid-run
 message with the in-flight task and **silently discarded** the message —
 not queued, not appended, invisible to the caller — and the AG-UI door
-refused a busy thread with a snapshot), with the dispatch half in the
-broker: one turn per thread at a time, and a paused `input-required` run
-holds its thread until answered, so nothing overtakes an unanswered
-question.
+refused a busy thread with a snapshot). The dispatch half is arrival
+order and nothing else: a thread's runs are offered in the order they
+came, without waiting for the previous turn to end — funduq's own
+turn-pacing was tried and retired (see
+[the reversal record](#the-thread-gate-is-retired-funduq-does-not-pace-a-providers-conversation)).
 
 The queue is a **run queue, and every entry stays a run**: each is
 dispatched whole and never changes shape. A reading that tempted us and
@@ -362,9 +408,9 @@ the provider reaching into the same queue and *reinterpreting* an entry
 — puts an entry's meaning in the hands of whoever picks it up: the
 batch-correlation swamp reborn. What survives instead: an entry's verb
 is declared by the caller at birth and never inferred, and an
-interjection-intended utterance is *still a run*, merely annotated with
-the in-flight run it addresses — see the interjection record below for
-how the annotation changes dispatch and nothing else. Nothing is ever
+interjection-intended utterance is *still a run*, its intent declared at
+the door (see the interjection record above); the declaration changes
+nothing in dispatch. Nothing is ever
 dumped: absent that annotation the provider receives one run per turn
 (whose input carries the history folded at its arrival, with
 `thread_messages` as the authoritative read).
@@ -379,9 +425,9 @@ never subject to it: answering the question is how the thread drains.
 The count-then-create at the door is deliberately unlocked; a rare
 concurrent overshoot by one is cheaper than locking a guard that is
 not accounting. Two deliberate narrowings. Enqueue order is arrival order —
-truly concurrent messages have no canonical order to preserve, and the
-gate serializes dispatch regardless. And an AG-UI run queued behind
-another holds its event stream open, silent, until its turn comes:
+truly concurrent messages have no canonical order to preserve. And an AG-UI run arriving behind
+another holds its event stream open, silent, until its provider starts
+producing:
 AG-UI has no "accepted, not yet worked on" vocabulary to answer with
 (that is A2A's `submitted`), so the silence is chosen debt, guarded by
 the use case — an AG-UI client holds one session per thread and rarely
@@ -391,6 +437,55 @@ refusing it.
 [full record](https://github.com/hukaichun/funduq/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/conversation-semantics.md#queueing-delivery-is-the-protocols-timing-is-the-providers)
 
 ## Tried, measured, reversed
+
+### The thread gate is retired — funduq does not pace a provider's conversation
+
+What shipped first (the queueing and interjection work): a broker-side
+thread gate — one turn per thread at a time, a paused `input-required`
+run holding its thread, and an interjection *exemption* through the gate
+with the provider's ack as the negotiation.
+
+What killed it was a probe, then a chain of diagnoses that each went one
+level deeper. funduq#136 caught the exemption's annotation naming a run
+that had already ended: the gate opened in `mark_run_status` a beat
+before the run left the broker's tracking in `forget`, and the sweep
+read the two half-updated views in between. The first fix aligned one
+reader with the gate and was rightly rejected as a workaround — the
+window stayed open for every other reader. The second proposal closed
+the window by doing both updates in one synchronous section, and was
+rejected for the better reason: correctness resting on single-event-loop
+scheduling is a design that horizontal scaling must throw away.
+
+The real defects, in the order they were found:
+
+1. **The run-in-handler discipline never covered thread scope.** Runs
+   had one owner and an ordered command queue from day one; the gate —
+   thread-scope state added later — was a bare dict mutated from four
+   call sites, with the sweep reading and writing outside any queue.
+   A state scope added later must inherit the single-owner discipline
+   on the day it is born.
+2. **The status machine had no order.** `mark_run_status` was an
+   unguarded UPDATE — any string, from any state, at any time. It now
+   carries the legal-transition table in the UPDATE's own WHERE clause,
+   so the database arbitrates racing writers and the loser's write
+   matches zero rows: ordering that holds in one process or many.
+3. **Deepest: the gate itself was funduq deciding when a provider drains
+   its conversation** — the exact thing our own A2A #1992 comment says
+   is "the provider's own decision". Every special case (the exemption,
+   the one-shot flag, the annotation stripping, #136 itself) was this
+   contradiction paying interest.
+
+What replaced it: offers go head-of-queue in arrival order — per-thread
+order holds by construction, and a sibling is offered while the previous
+turn still runs; the SDK runtime hands every run to the agent author's
+code and answers nothing on its behalf, with `serialize_per_thread` as
+the one-line opt-in for authors who want turn-taking back; the buffer
+bound is unchanged but now measures what it should — runs the provider
+has not taken — so backpressure flows provider → buffer → loud refusal
+at the door. The principle the whole episode distilled: **correctness
+comes only from guarded transitions on the one ordered ledger; caches
+and shadows may buy efficiency, never correctness; and funduq asserts no
+fact whose owner is someone else.**
 
 ### Enforcing cancellation produced a family of bugs
 

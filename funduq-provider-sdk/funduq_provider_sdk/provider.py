@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -92,3 +94,33 @@ class HandleProvider:
 
     def run_stream(self, agent_name: str, run_input: RunAgentInput) -> AsyncIterator[Any]:
         return self.agents[agent_name].run_stream(run_input)
+
+
+def serialize_per_thread(
+    run_stream: Callable[[RunAgentInput], AsyncIterator[Any]],
+) -> Callable[[RunAgentInput], AsyncIterator[Any]]:
+    """Wraps an agent callable so runs of the same thread execute one at a
+    time, in arrival order; runs on different threads still interleave freely.
+
+    funduq delivers a thread's utterances as they arrive and deliberately
+    imposes no turn-taking of its own — sequencing a conversation is the
+    agent author's decision. This wrapper is that decision's off-the-shelf
+    form: wrap the callable you hand to `AgentHandle` and each thread becomes
+    one turn at a time. Don't wrap an agent that absorbs interjections
+    (runs declared via `forwardedProps.addressedRunId`) — an interjection
+    must reach the agent *during* the turn it asks to join, which is exactly
+    what this wrapper prevents. Runs with no `thread_id` are not serialized against anything.
+    """
+    locks: dict[str, asyncio.Lock] = {}
+
+    async def serialized(run_input: RunAgentInput) -> AsyncIterator[Any]:
+        thread_id = getattr(run_input, "thread_id", None)
+        if thread_id is None:
+            async for event in run_stream(run_input):
+                yield event
+            return
+        async with locks.setdefault(thread_id, asyncio.Lock()):
+            async for event in run_stream(run_input):
+                yield event
+
+    return serialized

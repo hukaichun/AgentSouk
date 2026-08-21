@@ -36,8 +36,7 @@ inference funduq makes.
 
 One small carve-out keeps the record honest: the metadata keys funduq
 itself writes into a run's record (`verifiedActorChain`,
-`addressedRunId`, `interrupts`, `failureReason`, and `funduq`, held in
-reserve) are stripped from caller-supplied metadata at the doors. A
+`interrupts`, `failureReason`, and `funduq`, held in reserve) are stripped from caller-supplied metadata at the doors. A
 caller cannot plant a forged verification summary — or a fake failure
 reason — wearing funduq's handwriting; everything else passes through
 untouched.
@@ -130,13 +129,27 @@ client author needs them.
   every thread reference carries today (a recorded contradiction, not a
   position). When A2A v1.1's `elicitationId` lands, that is the marker
   this interim rule yields to.
-- **A message sent while a run is active is queued behind it.** It
-  becomes a new task on the thread — appended, dispatched one turn per
-  thread at a time, never merged into the active run and never dropped.
-  The
-  [queueing record](design-records.md#queueing-makes-may-i-speak-always-answerable-with-yes)
-  carries the reasoning; a paused task holds its thread, so queued
-  messages wait until its question is answered.
+- **A message sent while a run is active becomes its own task,
+  delivered alongside.** It is a new task on the thread — never merged
+  into the active run and never dropped — and funduq offers it to the
+  provider in arrival order without waiting for the active turn to end:
+  funduq does not pace a provider's conversation, so whether the new
+  turn runs at once, waits, or is folded into the turn in flight is the
+  agent's own decision. (The
+  [gate-retirement record](design-records.md#the-thread-gate-is-retired-funduq-does-not-pace-a-providers-conversation)
+  explains why funduq once made that decision itself, and stopped.)
+- **Asking to join a turn in flight is a declared extension, never an
+  inference.** Under the interjection extension
+  (`https://github.com/hukaichun/funduq/ext/interjection/v1`), a caller
+  puts the target task's id in the message's `metadata` under
+  `<uri>/addressedRunId`; funduq relays it to the agent as
+  `forwardedProps.addressedRunId` and holds no opinion about the
+  target's state — the agent judges from its own loop, and an ask that
+  lands after the target ended degrades to an ordinary next turn. This
+  is *intent*, distinct from AG-UI's `parentRunId` (plain continuation,
+  relayed untouched): a `taskId` naming a running task declares
+  nothing, because v1.0 defines no meaning for it and funduq will not
+  guess. Yields to whatever mid-task carrier A2A ships.
 - **The thread's pending buffer is bounded** (`thread_queue_limit`,
   default 8). At the limit a new message is refused loudly —
   `ThreadQueueFull`, meaning NOT accepted, retry after the thread

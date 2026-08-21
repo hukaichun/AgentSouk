@@ -57,10 +57,11 @@ class AGUIAdapter:
         owns its record's primary keys; a caller-chosen name has no caller identity to scope it
         to yet — see the design record on conversation naming rights). The caller-supplied
         `run_id` is likewise ignored in favour of funduq's own. A run on a thread
-        that already has one in flight is accepted and queued behind it — one turn per thread at
-        a time — and its returned stream stays silent until its turn comes; an AG-UI client
-        normally holds one session per thread, so a second concurrent run is unusual but not
-        refused. A resume with no surviving paused run to target (another caller answered first)
+        that already has one in flight is accepted and offered to the provider in arrival
+        order; whether the provider runs it immediately, holds it, or folds it into the turn
+        in flight is the provider's own decision, and the returned stream stays silent until
+        the provider starts producing. An AG-UI client normally holds one session per thread,
+        so a second concurrent run is unusual but not refused. A resume with no surviving paused run to target (another caller answered first)
         gets a `ThreadSnapshot` instead of a stream. If the agent is registered but not currently
         served, the run is recorded as failed and the returned stream carries a `RUN_ERROR` event
         rather than hanging. Raises `AgentNotFound` if `agent` isn't registered,
@@ -95,6 +96,12 @@ class AGUIAdapter:
             paused = (
                 await repo.get_paused_run_for_thread(session, thread_id) if resume else None
             )
+            if resume and paused is None:
+                # A resume is a deferred call's RESULT, and a result must land
+                # on its pending ask — with nothing paused there is no ask, and
+                # a result must not enter dressed as an utterance (the door's
+                # two entrances are an utterance or a result, nothing else).
+                return ThreadSnapshot(await repo.get_thread_snapshot(session, thread_id))
 
             input_dump = body.model_dump(mode="json", by_alias=True)
             if isinstance(input_dump.get("metadata"), dict):
@@ -148,6 +155,10 @@ class AGUIAdapter:
                         actor_chain,
                     ),
                     resume=resume,
+                    # The caller's own parentRunId, relayed verbatim — AG-UI's
+                    # field for placing another run's id on this input; the
+                    # agent judges what the repetition means from its own loop.
+                    parent_run_id=body.parent_run_id,
                 )
             except ValueError as e:
                 raise InvalidRunInput(str(e)) from e

@@ -37,9 +37,16 @@ def build_run_agent_input(
     context: list[dict[str, Any]] | None = None,
     forwarded_props: Any = None,
     resume: list[dict[str, Any]] | None = None,
+    parent_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Builds and validates a wire-format AG-UI `RunAgentInput` dict from the given fields,
-    raising `ValueError` if the assembled input fails AG-UI's own validation."""
+    raising `ValueError` if the assembled input fails AG-UI's own validation.
+
+    `parent_run_id` is AG-UI's own field for placing another run's id on this
+    input. The id appearing a second time is the entire semantics: the caller
+    says this run follows that one. Whether it lands as a continuation or an
+    interjection is decided by the one fact funduq cannot hold — whether the
+    parent is still in flight — which the agent reads off its own loop."""
     try:
         model = RunAgentInput.model_validate(
             {
@@ -51,6 +58,7 @@ def build_run_agent_input(
                 "context": context or [],
                 "forwardedProps": forwarded_props,
                 "resume": resume,
+                "parentRunId": parent_run_id,
             }
         )
     except ValidationError as e:
