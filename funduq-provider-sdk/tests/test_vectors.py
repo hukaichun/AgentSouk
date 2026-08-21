@@ -73,13 +73,12 @@ def test_the_published_chain_verifies_here_too_and_can_be_reproduced():
     (vector,) = [c for c in VECTORS["chains"] if c["kind"] == "actor-chain"]
 
     result = verify_chain(vector["chain"])
-    assert result.subject == vector["subject"]
     assert result.actor_public_keys == vector["actor_public_keys"]
+    assert result.head == vector["actor_public_keys"][0]
 
     first_key = _Key.from_private_bytes(bytes.fromhex(vector["inputs"]["hop_private_keys_hex"][0]))
     reproduced = _jwt.encode(
         {
-            "subject": vector["inputs"]["subject"],
             "actorPublicKey": vector["actor_public_keys"][0],
             "prevHash": None,
             "iat": vector["inputs"]["iat"],
@@ -98,14 +97,16 @@ def test_every_funduq_invented_wire_structure_validates_with_this_packages_model
     nullability and silently dropped verified caller identities; the twins
     plus this frame are what make restating unnecessary.
     """
-    from funduq_provider_sdk import CallerProps, KyokForwardedProps
+    from funduq_provider_sdk import KyokForwardedProps, verify_chain
 
     (frame,) = [w["frame"] for w in VECTORS["wire"] if w["kind"] == "delivered-run"]
     props = frame["runInput"]["forwardedProps"]
-    funduq_keys = {"caller": CallerProps, "kyok": KyokForwardedProps}
 
-    assert funduq_keys.keys() <= props.keys(), "the published frame must carry every declared key"
-    for key, model in funduq_keys.items():
-        parsed = model.model_validate(props[key])
-        assert parsed.model_dump(mode="json", by_alias=True) == props[key], key
-    assert CallerProps.model_validate(props["caller"]).chain is None
+    assert {"kyok", "actorChain"} <= props.keys(), (
+        "the published frame must carry every declared key"
+    )
+    parsed = KyokForwardedProps.model_validate(props["kyok"])
+    assert parsed.model_dump(mode="json", by_alias=True) == props["kyok"]
+    # The chain is the caller's own words, relayed verbatim — no digest of
+    # funduq's to validate; the agent verifies the chain itself.
+    assert verify_chain(props["actorChain"]).head

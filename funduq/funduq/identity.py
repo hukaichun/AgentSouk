@@ -146,11 +146,10 @@ def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> by
 ACTOR_CHAIN_TTL_SECONDS = 300
 
 
-def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | None) -> str:
+def _sign_hop(private_key: Ed25519PrivateKey, prev_token: str | None) -> str:
     now = int(time.time())
     return jwt.encode(
         {
-            "subject": subject,
             "actorPublicKey": private_key.public_key().public_bytes_raw().hex(),
             "prevHash": _hop_hash(prev_token) if prev_token is not None else None,
             "iat": now,
@@ -161,30 +160,37 @@ def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | N
     )
 
 
-def new_actor_chain(private_key: Ed25519PrivateKey, subject: dict) -> list[str]:
-    """Starts a new actor chain: a single hop, signed by `private_key`, vouching for `subject`."""
-    return [_sign_hop(private_key, subject, None)]
+def new_actor_chain(private_key: Ed25519PrivateKey) -> list[str]:
+    """Starts a new actor chain: a single hop signed by `private_key` — the signer is the
+    chain's head, the responsibility segment's authority. A chain carries keys and nothing
+    else; whom a key represents is a separate, opt-in disclosure (a voucher), never a field
+    on the chain."""
+    return [_sign_hop(private_key, None)]
 
 
 def extend_actor_chain(private_key: Ed25519PrivateKey, prev_chain: list[str]) -> list[str]:
-    """Appends a new hop signed by `private_key` to `prev_chain`, carrying the same subject forward.
+    """Appends a new hop signed by `private_key` to `prev_chain`.
 
     The new hop links to the chain's last hop via a hash of that token, so
-    the chain records who acted on whose behalf, in order. Raises
-    `ValueError` if `prev_chain` is empty.
+    the chain records who acted downstream of whom, in order. Extending is
+    provenance, not authorization: the head stays the segment's authority.
+    Raises `ValueError` if `prev_chain` is empty.
     """
     if not prev_chain:
         raise ValueError(
             "extend_actor_chain requires a non-empty prev_chain — use new_actor_chain to originate one"
         )
-    subject = jwt.decode(prev_chain[-1], options={"verify_signature": False})["subject"]
-    return [*prev_chain, _sign_hop(private_key, subject, prev_chain[-1])]
+    return [*prev_chain, _sign_hop(private_key, prev_chain[-1])]
 
 
 @dataclass
 class ChainResult:
-    subject: dict
     actor_public_keys: list[str]
+
+    @property
+    def head(self) -> str:
+        """The first hop's signer: the responsibility segment's authority."""
+        return self.actor_public_keys[0]
 
 
 class InvalidActorChain(ValueError):
@@ -196,16 +202,17 @@ def _hop_hash(token: str) -> str:
 
 
 def verify_actor_chain(chain: list[str]) -> ChainResult:
-    """Verifies an actor chain and returns the subject it vouches for plus each hop's actor key, in order.
+    """Verifies an actor chain and returns each hop's actor key, in order (head first).
 
     Each hop's signature must verify under its own embedded public key, and
     each hop after the first must link to the previous hop via a matching
     `prevHash` — reordering, truncating, or splicing in a hop from a
-    different chain breaks this and is rejected. Every hop must vouch for
-    the same `subject`. Only the last hop's expiry is enforced; earlier
-    hops may have expired since they were signed. Raises
-    `InvalidActorChain` on any of these failures, including an empty chain
-    or an unparseable/forged token.
+    different chain breaks this and is rejected. Only the last hop's expiry
+    is enforced; earlier hops may have expired since they were signed.
+    Unknown claims on a hop are ignored (a chain from a signer still
+    stamping the retired `subject` field verifies; the field carries no
+    meaning). Raises `InvalidActorChain` on any of these failures,
+    including an empty chain or an unparseable/forged token.
 
     Hops also arrive from out-of-process providers:
     `funduq_provider_sdk.identity.ProviderIdentity.sign_hop` builds the same
@@ -215,7 +222,6 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
     if not chain:
         raise InvalidActorChain("empty actor chain")
 
-    subject: dict | None = None
     actor_public_keys: list[str] = []
     prev_token: str | None = None
 
@@ -249,18 +255,10 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
         if payload.get("prevHash") != expected_prev_hash:
             raise InvalidActorChain(f"hop {i}: prevHash doesn't match — chain reordered, truncated, or spliced")
 
-        if i == 0:
-            subject = payload.get("subject")
-            if not isinstance(subject, dict):
-                raise InvalidActorChain("hop 0: missing subject")
-        elif payload.get("subject") != subject:
-            raise InvalidActorChain(f"hop {i}: subject changed partway through the chain")
-
         actor_public_keys.append(actor_public_key)
         prev_token = token
 
-    assert subject is not None
-    return ChainResult(subject=subject, actor_public_keys=actor_public_keys)
+    return ChainResult(actor_public_keys=actor_public_keys)
 
 
 def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:

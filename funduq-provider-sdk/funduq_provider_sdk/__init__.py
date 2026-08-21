@@ -21,7 +21,7 @@ from funduq_provider_sdk.identity import (
     verify_signature,
     WrongFunduq,
 )
-from funduq_provider_sdk.props import CallerProps, KyokForwardedProps, VerifiedActor
+from funduq_provider_sdk.props import KyokForwardedProps
 from funduq_provider_sdk.provider import (
     AgentHandle,
     DeliveredRun,
@@ -33,9 +33,7 @@ from funduq_provider_sdk.provider import (
 from funduq_provider_sdk.runtime import ProviderRuntime
 
 __all__ = [
-    "CallerProps",
     "KyokForwardedProps",
-    "VerifiedActor",
     "InvalidChain",
     "VerifiedChain",
     "verify_chain",

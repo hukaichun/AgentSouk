@@ -30,11 +30,10 @@ def test_an_identity_is_its_key_and_signs_over_the_timestamp_it_returns():
     assert isinstance(signature, str) and isinstance(timestamp, int)
 
 
-def test_a_chain_carries_its_subject_forward(tmp_path):
+def test_a_chain_grows_one_signed_hop_at_a_time(tmp_path):
     first, second = ProviderIdentity.generate(), ProviderIdentity.generate()
-    subject = {"type": "user", "id": "employee_x"}
 
-    chain = second.extend_chain(first.new_chain(subject))
+    chain = second.extend_chain(first.new_chain())
 
     assert len(chain) == 2
 

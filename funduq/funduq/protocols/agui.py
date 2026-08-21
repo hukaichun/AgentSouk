@@ -75,9 +75,7 @@ class AGUIAdapter:
             metadata = getattr(body, "metadata", None) or {}
             resume = [r.model_dump(mode="json", by_alias=True) for r in body.resume] if body.resume else None
 
-            metadata, verified_subject, verified_actors, actor_chain = await verify_caller(
-                session, metadata
-            )
+            metadata, head_key, actor_chain = await verify_caller(session, metadata)
 
             kyok = parse_kyok_opt_in(metadata)
             kyok_ref = kyok.llm_provider if kyok is not None else None
@@ -150,8 +148,6 @@ class AGUIAdapter:
                         agent,
                         kyok_ref is not None,
                         body.forwarded_props,
-                        verified_subject,
-                        verified_actors,
                         actor_chain,
                     ),
                     resume=resume,
@@ -189,32 +185,24 @@ async def _offline_events(thread_id: str, run_id: str) -> AsyncIterator[dict[str
     )
 
 
-async def verify_caller(session, metadata: dict) -> tuple[dict, Any, list[dict], Any]:
-    """Verifies `metadata["actorChain"]` if present, resolving each actor's public key to a
-    registered agent name and returning `(metadata with a verifiedActorChain entry added,
-    verified subject, verified actors, raw actor chain)`. Raises `InvalidActorChain` if the
-    chain is tampered. Returns `metadata` with empty/`None` verification fields if there is
-    no actor chain to verify.
+async def verify_caller(session, metadata: dict) -> tuple[dict, str | None, Any]:
+    """Verifies `metadata["actorChain"]` if present and returns
+    `(metadata stripped of funduq's reserved keys, the chain's head key, the raw chain)` —
+    `(metadata, None, None)` when no chain is attached. Raises `InvalidActorChain` if the
+    chain is tampered: a bad chain is refused at the door, never carried.
 
-    Both doors funnel caller metadata through here, which makes it the one
-    place to strip funduq's reserved keys from the caller's input: without the
-    strip, a caller could plant a forged `verifiedActorChain` — no chain
-    attached, nothing to verify, yet the record would carry a verification
-    summary in funduq's handwriting."""
+    funduq's whole part in caller identity is four verbs — verify, copy the
+    head, relay, refuse — and this is the verify. No summary is produced:
+    the chain reaches the agent verbatim (`forwardedProps.actorChain`) and
+    the agent verifies for itself; the head key is what funduq copies onto
+    the records that need an authority (a thread's binding, a paused ask).
+
+    Both doors funnel caller metadata through here, which also makes it the
+    one place to strip funduq's reserved keys from the caller's input."""
     metadata = {k: v for k, v in metadata.items() if k not in RESERVED_METADATA_KEYS}
     actor_chain = metadata.get("actorChain")
     if not actor_chain:
-        return metadata, None, [], None
-
-    result = verify_actor_chain(actor_chain)
-    verified_actors: list[dict] = []
-    for public_key in result.actor_public_keys:
-        resolved = await repo.get_agent_name_for_public_key(session, public_key)
-        verified_actors.append({"publicKey": public_key, "agentName": resolved})
-    metadata = {
-        **metadata,
-        "verifiedActorChain": {"subject": result.subject, "actors": verified_actors},
-    }
-    return metadata, result.subject, verified_actors, actor_chain
+        return metadata, None, None
+    return metadata, verify_actor_chain(actor_chain).head, actor_chain
 
 

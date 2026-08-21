@@ -320,9 +320,7 @@ class A2AAdapter:
             parent_thread_id = await _lineage_parent(session, params)
             context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
 
-            metadata, verified_subject, verified_actors, actor_chain = await verify_caller(
-                session, metadata
-            )
+            metadata, head_key, actor_chain = await verify_caller(session, metadata)
 
             thread_id = await repo.ensure_thread(
                 session, agent, context_id, parent_thread_id, metadata=metadata
@@ -393,8 +391,6 @@ class A2AAdapter:
                 agent,
                 kyok_ref is not None or inherited,
                 None,
-                verified_subject,
-                verified_actors,
                 actor_chain,
                 # The extension convention puts the key in the Message's own
                 # metadata map; the request-level map is accepted too.

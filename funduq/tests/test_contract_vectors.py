@@ -107,8 +107,8 @@ def test_the_published_chain_verifies_and_names_exactly_the_published_actors():
 
     result = verify_actor_chain(vector["chain"])
 
-    assert result.subject == vector["subject"]
     assert result.actor_public_keys == vector["actor_public_keys"]
+    assert result.head == vector["actor_public_keys"][0]
 
 
 def test_cross_party_formats_without_a_domain_tag_are_vectored_too():
@@ -118,19 +118,20 @@ def test_cross_party_formats_without_a_domain_tag_are_vectored_too():
 
 
 def test_both_sides_props_twins_validate_the_same_frame():
-    from funduq_provider_sdk import CallerProps as SdkCaller
     from funduq_provider_sdk import KyokForwardedProps as SdkKyok
+    from funduq_provider_sdk import verify_chain
 
+    from funduq.identity import verify_actor_chain
     from funduq.kyok import KyokForwardedProps
-    from funduq.props import CallerProps
 
     (frame,) = [w["frame"] for w in VECTORS["wire"] if w["kind"] == "delivered-run"]
     props = frame["runInput"]["forwardedProps"]
 
-    for model, twin, key in (
-        (CallerProps, SdkCaller, "caller"),
-        (KyokForwardedProps, SdkKyok, "kyok"),
-    ):
-        ours = model.model_validate(props[key]).model_dump(mode="json", by_alias=True)
-        theirs = twin.model_validate(props[key]).model_dump(mode="json", by_alias=True)
-        assert ours == theirs == props[key], key
+    ours = KyokForwardedProps.model_validate(props["kyok"]).model_dump(mode="json", by_alias=True)
+    theirs = SdkKyok.model_validate(props["kyok"]).model_dump(mode="json", by_alias=True)
+    assert ours == theirs == props["kyok"]
+    # The chain is relayed verbatim, not modeled: both verifiers must agree on it.
+    assert (
+        verify_actor_chain(props["actorChain"]).actor_public_keys
+        == verify_chain(props["actorChain"]).actor_public_keys
+    )
