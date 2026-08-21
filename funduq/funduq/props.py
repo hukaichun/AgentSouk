@@ -46,6 +46,7 @@ def build_forwarded_props(
     caller_forwarded_props: Any,
     actor_chain: Any = None,
     addressed_run_id: str | None = None,
+    delegation: dict | None = None,
 ) -> Any:
     """Merges funduq-added forwarded-props extras (a KYOK grant if `kyok_enabled`, the caller's
     actor chain relayed verbatim if present) into the caller-supplied `forwarded_props`,
@@ -70,6 +71,12 @@ def build_forwarded_props(
         extra["addressedRunId"] = addressed_run_id
     if actor_chain:
         extra["actorChain"] = actor_chain
+    if delegation is not None:
+        # The session delegation certificate, relayed so the agent can
+        # resolve the chain's head to its durable authority itself. Safe to
+        # carry: the certificate moves nothing without the delegate's own
+        # private key.
+        extra["delegation"] = delegation
     if not extra:
         return caller_forwarded_props
     if isinstance(caller_forwarded_props, dict):

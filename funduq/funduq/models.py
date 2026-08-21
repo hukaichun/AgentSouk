@@ -93,6 +93,7 @@ class RunRecord(BaseModel):
     agent_name: str
     protocol: str
     status: str
+    head_key: str | None = None
     input_json: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime

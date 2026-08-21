@@ -32,7 +32,17 @@ Everything funduq adds beyond the two standards is **opt-in**: binding a
 run to a KYOK offering, attaching an actor chain, any metadata mechanism
 funduq invents. Opting out costs nothing — the run behaves as plain
 AG-UI/A2A — and opting in is always the caller's explicit act, never an
-inference funduq makes.
+inference funduq makes. The largest opt-in is the responsibility chain:
+a thread whose first run carries an actor chain binds the chain's head
+at birth — thereafter only the head or the serving provider may write
+to it, and a paused ask on a chained run is answered only with a
+signature from those keys (`metadata.resolution`, the
+`funduq-resolve:{run_id}:{timestamp}` payload; a session delegation
+certificate under `metadata.delegation` lets an ephemeral session key
+act for a durable one). A thread opened without a chain keeps the open
+behavior on this page forever — a later chained writer cannot lock it.
+The mechanics are in
+[Responsibility chains](mechanisms/responsibility-chains.md).
 
 One small carve-out keeps the record honest: the metadata keys funduq
 itself writes into a run's record (`verifiedActorChain`,
@@ -179,7 +189,7 @@ client author needs them.
 
 ## Where the inventions live
 
-What the plumbing actually is — the seven signed payload families, the
+What the plumbing actually is — the nine signed payload families, the
 link-open challenge, actor chains and what they do and do not prove — is
 [Identity is an Ed25519 keypair](mechanisms/identity.md) and
 [Actor chain](mechanisms/actor-chain.md). How to carry all of it over a

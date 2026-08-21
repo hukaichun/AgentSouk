@@ -85,6 +85,26 @@
       },
       "payload_utf8": "funduq-connect-funduq:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
       "signature_hex": "52eb6a978325e7da8a67844eece4a801f85c0a4eaea0e692830ad277353efe64da3b8dba45e2bc10107ba3a447798144d6af606aa710e0bf15496d5781536d0e"
+    },
+    {
+      "kind": "delegation",
+      "note": "the session delegation certificate's signed bytes: a durable key (here the test key) names an ephemeral delegate key and an expiry. Wire form: {authorityPublicKey, delegatePublicKey, expiresAt, signature} verified by funduq.identity.verify_delegation. The certificate alone moves nothing without the delegate's own private key, so it is safe to store and relay. expires_at is far-future so the vector stays valid.",
+      "inputs": {
+        "delegate_public_key": "805440ee48051fc82ea64d905acabff0d21780f7fcaba6900e0e41387b1d4a57",
+        "expires_at": 9999999999
+      },
+      "payload_utf8": "funduq-delegate:805440ee48051fc82ea64d905acabff0d21780f7fcaba6900e0e41387b1d4a57:9999999999",
+      "signature_hex": "5cdc463a0c1a59333b565f4f41df7a76cb8d3982ab04a95e4bdc0d94833275d79c848270e05c9017d9ed13fb2f449d1568142b748b1a6905e60f5b42a1b6b100"
+    },
+    {
+      "kind": "resolution",
+      "note": "the bytes an authority signs to answer a paused ask (resolve an input-required run). Singular operation, so it uses the timestamp family: the timestamp is checked against the 60s freshness window and the status-guarded reopen consumes the signature with the win.",
+      "inputs": {
+        "run_id": "run_2c26b46b68ffc68ff99b453c",
+        "timestamp": 1755500000
+      },
+      "payload_utf8": "funduq-resolve:run_2c26b46b68ffc68ff99b453c:1755500000",
+      "signature_hex": "c110a243a4d706870deb428555f6225d7f299088a4f54577b2099eb4bf76fe398b37ebe628671956b77ad6f3d82a7caf8136d5bad743b9b0768b65ed72ee6c08"
     }
   ],
   "wire": [

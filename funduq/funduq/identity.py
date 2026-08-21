@@ -42,6 +42,8 @@ _DELETE_LLM = "funduq-delete-llm"
 _KYOK_CALL = "funduq-kyok-call"
 _CONNECT_PROVIDER = "funduq-connect-provider"
 _CONNECT_FUNDUQ = "funduq-connect-funduq"
+_DELEGATE = "funduq-delegate"
+_RESOLVE = "funduq-resolve"
 
 
 def _roster_registration_payload(tag: str, names: list[str], timestamp: int) -> bytes:
@@ -141,6 +143,104 @@ def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> by
     both must agree byte-for-byte.
     """
     return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
+
+
+def delegation_signing_payload(delegate_public_key: str, expires_at: int) -> bytes:
+    """The bytes a durable key signs to name a session key: "SK acts for me until T".
+
+    The session delegation certificate is custody's bridge (a passkey or an
+    SSO-custodied key signs once per session; the ephemeral key signs
+    everything after). It exists because chain *extension* is provenance
+    anyone may perform — delegating authority to a named key takes this
+    explicit statement. `expires_at` is the session's lifetime (hours), a
+    different layer from a hop's presentation freshness (minutes).
+    """
+    return f"{_DELEGATE}:{delegate_public_key}:{expires_at}".encode()
+
+
+class InvalidDelegation(ValueError):
+    pass
+
+
+def verify_delegation(certificate: dict) -> str:
+    """Verifies a session delegation certificate and returns the authority's public key.
+
+    `certificate` is `{"authorityPublicKey", "delegatePublicKey",
+    "expiresAt", "signature"}`: the authority signed
+    `delegation_signing_payload(delegatePublicKey, expiresAt)`. Raises
+    `InvalidDelegation` if the signature fails or the certificate has
+    expired. The certificate alone moves nothing — only the named delegate's
+    own signatures gain the authority — so it is safe to store and to relay.
+    """
+    try:
+        authority = certificate["authorityPublicKey"]
+        delegate = certificate["delegatePublicKey"]
+        expires_at = int(certificate["expiresAt"])
+        signature = certificate["signature"]
+    except (KeyError, TypeError, ValueError) as e:
+        raise InvalidDelegation(f"malformed delegation certificate: {e}") from e
+    if time.time() > expires_at:
+        raise InvalidDelegation("delegation certificate has expired")
+    if not verify_signature(
+        authority, signature, delegation_signing_payload(delegate, expires_at)
+    ):
+        raise InvalidDelegation("delegation certificate signature does not verify")
+    return authority
+
+
+def resolve_signing_payload(run_id: str, timestamp: int) -> bytes:
+    """The bytes an authority signs to answer a paused ask: "I resolve this run, now".
+
+    A resolution is singular — the status-guarded reopen picks one winner and
+    consumes the signature with it — so it belongs to the timestamp family
+    (like registration), not the challenge family: `timestamp` is checked
+    against the 60s freshness window, and a stored signature is spent by the
+    time anyone can read it.
+    """
+    return f"{_RESOLVE}:{run_id}:{timestamp}".encode()
+
+
+class InvalidResolution(ValueError):
+    pass
+
+
+def verify_resolution(
+    resolution: dict,
+    run_id: str,
+    allowed_keys: set[str],
+    delegation: dict | None = None,
+) -> str:
+    """Verifies a resolution proof for a paused run and returns the effective authority.
+
+    `resolution` is `{"publicKey", "timestamp", "signature"}`: the signer
+    signed `resolve_signing_payload(run_id, timestamp)`. With a delegation
+    certificate naming the signer, the certificate's authority is the
+    effective key; otherwise the signer stands for itself. The effective key
+    must be in `allowed_keys` (the ask's authority set: the run's chain head
+    and the agent's own provider key). The timestamp is checked against the
+    60s freshness window. Raises `InvalidResolution` on any failure.
+    """
+    try:
+        signer = resolution["publicKey"]
+        timestamp = int(resolution["timestamp"])
+        signature = resolution["signature"]
+    except (KeyError, TypeError, ValueError) as e:
+        raise InvalidResolution(f"malformed resolution proof: {e}") from e
+    effective = signer
+    if delegation is not None:
+        authority = verify_delegation(delegation)
+        if delegation.get("delegatePublicKey") == signer:
+            effective = authority
+    if effective not in allowed_keys:
+        raise InvalidResolution(
+            "the resolver is not an authority for this ask — neither the run's "
+            "segment head nor its provider"
+        )
+    if not is_timestamp_fresh(timestamp):
+        raise InvalidResolution("resolution timestamp outside the freshness window")
+    if not verify_signature(signer, signature, resolve_signing_payload(run_id, timestamp)):
+        raise InvalidResolution("resolution signature does not verify")
+    return effective
 
 
 ACTOR_CHAIN_TTL_SECONDS = 300

@@ -4,6 +4,7 @@ from funduq.repo import (
     ProviderFingerprintTaken,
     ThreadNotFound,
     ThreadOwnershipMismatch,
+    ThreadMembershipRequired,
     ThreadQueueFull,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "FunduqError",
     "ThreadNotFound",
     "ThreadOwnershipMismatch",
+    "ThreadMembershipRequired",
     "ThreadQueueFull",
 ]
 

@@ -79,6 +79,7 @@ async def test_get_run_is_a_run_record_without_the_storage_columns(funduq: Fundu
         "agent_name",
         "protocol",
         "status",
+        "head_key",
         "input_json",
         "metadata",
         "created_at",

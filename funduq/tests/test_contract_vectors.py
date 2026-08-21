@@ -5,6 +5,8 @@ from pathlib import Path
 
 from funduq.identity import (
     agent_deletion_signing_payload,
+    delegation_signing_payload,
+    resolve_signing_payload,
     provider_connect_signing_payload,
     funduq_connect_signing_payload,
     llm_deletion_signing_payload,
@@ -28,6 +30,10 @@ BUILDERS = {
     "kyok-call": lambda i: kyok_call_signing_payload(
         i["bearer"], i["timestamp"], i["body_sha256_hex"]
     ),
+    "delegation": lambda i: delegation_signing_payload(
+        i["delegate_public_key"], i["expires_at"]
+    ),
+    "resolution": lambda i: resolve_signing_payload(i["run_id"], i["timestamp"]),
 }
 
 

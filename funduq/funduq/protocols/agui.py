@@ -11,7 +11,7 @@ from funduq import repo
 from funduq.models import AgentRef, LlmRef
 from funduq.agui import build_run_agent_input, rewrite_message_ids
 from funduq.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound
-from funduq.identity import verify_actor_chain
+from funduq.identity import verify_actor_chain, verify_delegation, verify_resolution
 from funduq.kyok import (
     KyokBinding,
     parse_kyok_opt_in,
@@ -85,7 +85,12 @@ class AGUIAdapter:
                     raise LlmProviderNotFound(f"unknown KYOK LLM provider '{kyok_ref}'")
 
             thread_id = await repo.ensure_thread(
-                session, agent, body.thread_id, metadata=metadata, create_if_missing=True
+                session,
+                agent,
+                body.thread_id,
+                metadata=metadata,
+                create_if_missing=True,
+                head_key=head_key,
             )
 
             # A resume targets the thread's paused (input-required) run
@@ -106,6 +111,17 @@ class AGUIAdapter:
                 input_dump["metadata"] = strip_kyok_context(input_dump["metadata"])
             if paused is not None:
                 run_id = paused["run_id"]
+                if paused.get("head_key") is not None:
+                    # A chained ask names its authorities; the resolution must
+                    # be signed by one of them (the 60s-window timestamp
+                    # family — the reopen below consumes the signature with
+                    # the win). Raises InvalidResolution otherwise.
+                    verify_resolution(
+                        metadata.get("resolution") or {},
+                        run_id,
+                        {paused["head_key"], agent.provider_key},
+                        metadata.get("delegation"),
+                    )
                 # Status-guarded so two concurrent resumes resolve to one; the
                 # loser sees the thread as busy, same as any other caller.
                 if not await repo.reopen_run(
@@ -119,7 +135,8 @@ class AGUIAdapter:
                     session, thread_id, funduq.settings.thread_queue_limit
                 )
                 created = await repo.create_run(
-                    session, thread_id, agent, "ag-ui", input_dump, metadata=metadata
+                    session, thread_id, agent, "ag-ui", input_dump,
+                    metadata=metadata, head_key=head_key,
                 )
                 run_id = created["run_id"]
                 starting_seq = 0
@@ -149,6 +166,7 @@ class AGUIAdapter:
                         kyok_ref is not None,
                         body.forwarded_props,
                         actor_chain,
+                        delegation=metadata.get("delegation"),
                     ),
                     resume=resume,
                     # The caller's own parentRunId, relayed verbatim — AG-UI's
@@ -197,12 +215,23 @@ async def verify_caller(session, metadata: dict) -> tuple[dict, str | None, Any]
     the agent verifies for itself; the head key is what funduq copies onto
     the records that need an authority (a thread's binding, a paused ask).
 
+    A session delegation certificate under `metadata["delegation"]` resolves
+    the head: when the certificate's named delegate signed the chain's first
+    hop, the certificate's authority is the effective head — rights attach to
+    the durable key; the session key is a glove.
+
     Both doors funnel caller metadata through here, which also makes it the
     one place to strip funduq's reserved keys from the caller's input."""
     metadata = {k: v for k, v in metadata.items() if k not in RESERVED_METADATA_KEYS}
     actor_chain = metadata.get("actorChain")
     if not actor_chain:
         return metadata, None, None
-    return metadata, verify_actor_chain(actor_chain).head, actor_chain
+    head = verify_actor_chain(actor_chain).head
+    delegation = metadata.get("delegation")
+    if delegation is not None:
+        authority = verify_delegation(delegation)
+        if delegation.get("delegatePublicKey") == head:
+            head = authority
+    return metadata, head, actor_chain
 
 
