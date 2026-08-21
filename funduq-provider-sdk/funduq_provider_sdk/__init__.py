@@ -17,11 +17,13 @@ from funduq_provider_sdk.identity import (
     provider_connect_payload,
     registration_payload,
     funduq_connect_payload,
+    delegation_payload,
+    resolve_payload,
     verify_chain,
     verify_signature,
     WrongFunduq,
 )
-from funduq_provider_sdk.props import CallerProps, KyokForwardedProps, VerifiedActor
+from funduq_provider_sdk.props import KyokForwardedProps
 from funduq_provider_sdk.provider import (
     AgentHandle,
     DeliveredRun,
@@ -33,11 +35,11 @@ from funduq_provider_sdk.provider import (
 from funduq_provider_sdk.runtime import ProviderRuntime
 
 __all__ = [
-    "CallerProps",
     "KyokForwardedProps",
-    "VerifiedActor",
     "InvalidChain",
     "VerifiedChain",
+    "delegation_payload",
+    "resolve_payload",
     "verify_chain",
     "new_nonce",
     "provider_connect_payload",

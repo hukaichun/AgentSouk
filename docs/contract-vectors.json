@@ -85,12 +85,32 @@
       },
       "payload_utf8": "funduq-connect-funduq:b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7b7:c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9c9",
       "signature_hex": "52eb6a978325e7da8a67844eece4a801f85c0a4eaea0e692830ad277353efe64da3b8dba45e2bc10107ba3a447798144d6af606aa710e0bf15496d5781536d0e"
+    },
+    {
+      "kind": "delegation",
+      "note": "the session delegation certificate's signed bytes: a durable key (here the test key) names an ephemeral delegate key and an expiry. Wire form: {authorityPublicKey, delegatePublicKey, expiresAt, signature} verified by funduq.identity.verify_delegation. The certificate alone moves nothing without the delegate's own private key, so it is safe to store and relay. expires_at is far-future so the vector stays valid.",
+      "inputs": {
+        "delegate_public_key": "805440ee48051fc82ea64d905acabff0d21780f7fcaba6900e0e41387b1d4a57",
+        "expires_at": 9999999999
+      },
+      "payload_utf8": "funduq-delegate:805440ee48051fc82ea64d905acabff0d21780f7fcaba6900e0e41387b1d4a57:9999999999",
+      "signature_hex": "5cdc463a0c1a59333b565f4f41df7a76cb8d3982ab04a95e4bdc0d94833275d79c848270e05c9017d9ed13fb2f449d1568142b748b1a6905e60f5b42a1b6b100"
+    },
+    {
+      "kind": "resolution",
+      "note": "the bytes an authority signs to answer a paused ask (resolve an input-required run). Singular operation, so it uses the timestamp family: the timestamp is checked against the 60s freshness window and the status-guarded reopen consumes the signature with the win.",
+      "inputs": {
+        "run_id": "run_2c26b46b68ffc68ff99b453c",
+        "timestamp": 1755500000
+      },
+      "payload_utf8": "funduq-resolve:run_2c26b46b68ffc68ff99b453c:1755500000",
+      "signature_hex": "c110a243a4d706870deb428555f6225d7f299088a4f54577b2099eb4bf76fe398b37ebe628671956b77ad6f3d82a7caf8136d5bad743b9b0768b65ed72ee6c08"
     }
   ],
   "wire": [
     {
       "kind": "delivered-run",
-      "note": "the frame a transport carries for an offered run: DeliveredRun.model_dump(by_alias=True); rebuild with model_validate. forwardedProps carries both funduq-invented keys \u2014 caller (CallerProps; note chain may be null) and kyok (KyokForwardedProps; the token here is a fixed opaque example, real ones are minted per run) \u2014 each side's twin must validate them.",
+      "note": "the frame a transport carries for an offered run: DeliveredRun.model_dump(by_alias=True); rebuild with model_validate. forwardedProps carries funduq's kyok grant (KyokForwardedProps; the token here is a fixed opaque example, real ones are minted per run) and the caller's own actorChain relayed verbatim \u2014 no funduq-authored digest exists; the agent verifies the chain itself with funduq_provider_sdk.verify_chain.",
       "frame": {
         "runId": "run-1",
         "agentName": "translator",
@@ -111,17 +131,13 @@
           "tools": [],
           "context": [],
           "forwardedProps": {
-            "caller": {
-              "subject": {
-                "type": "user",
-                "id": "employee_x"
-              },
-              "actors": [],
-              "chain": null
-            },
             "kyok": {
               "token": "a2t0LXZlY3Rvci1ib2R5.0000000000000000000000000000000000000000000000000000000000000000"
-            }
+            },
+            "actorChain": [
+              "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhY3RvclB1YmxpY0tleSI6IjI5ZTU4MzNhOTE1YTY0MjlhNGUzYTc5NDg0NzVjMzM4ZWY0MzZlYjgyYmU4OWM5MmYwNTk3MDQ0MDNkYjlkNTUiLCJwcmV2SGFzaCI6bnVsbCwiaWF0IjoxNzU1NTAwMDAwLCJleHAiOjk5OTk5OTk5OTl9.Z2YdJcLmX1G1MjU-rWtXLbX8Ek9DocWYOErm4b8Em4nS-mmf6smwVtwuHNF-seDRfEAarly37uRT3iK1P4ScCg",
+              "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhY3RvclB1YmxpY0tleSI6IjgwNTQ0MGVlNDgwNTFmYzgyZWE2NGQ5MDVhY2FiZmYwZDIxNzgwZjdmY2FiYTY5MDBlMGU0MTM4N2IxZDRhNTciLCJwcmV2SGFzaCI6IjYwZTdmNDFmZDc2NTgwZGE5OTk0YWVlYjI4NzNkNTc0OWVlMmQ5ZDdiMzZhZDdiM2NjYzY1YzM2ZjY5ZDlhNmIiLCJpYXQiOjE3NTU1MDAwMDAsImV4cCI6OTk5OTk5OTk5OX0.hgbQovYevw5IFomv-oVf0XqqSZnD3l2bh5uLQeCuZQR4TXmjQ6H7H6vKTS7Oe4FEQR4dLVf-I5aSB4cagDEQDw"
+            ]
           },
           "resume": null
         },
@@ -156,12 +172,8 @@
   "chains": [
     {
       "kind": "actor-chain",
-      "note": "a two-hop actor chain both verifiers (funduq.identity.verify_actor_chain and funduq_provider_sdk.verify_chain) must accept, yielding exactly this subject and these actors in order. exp is far-future so the vector stays valid; iat is fixed; EdDSA is deterministic, so an implementation with the second key can reproduce the hops byte-for-byte. Hop keys: a5*32 (the test key) and b6*32.",
+      "note": "a two-hop actor chain both verifiers (funduq.identity.verify_actor_chain and funduq_provider_sdk.verify_chain) must accept, yielding exactly these actor keys in order \u2014 the first is the chain's head, the responsibility segment's authority. A chain carries keys and nothing else. exp is far-future so the vector stays valid; iat is fixed; EdDSA is deterministic, so an implementation with the keys can reproduce the hops byte-for-byte. Hop keys: a5*32 (the test key) and b6*32.",
       "inputs": {
-        "subject": {
-          "type": "user",
-          "id": "employee_x"
-        },
         "hop_private_keys_hex": [
           "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
           "b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6"
@@ -170,13 +182,9 @@
         "exp": 9999999999
       },
       "chain": [
-        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWJqZWN0Ijp7InR5cGUiOiJ1c2VyIiwiaWQiOiJlbXBsb3llZV94In0sImFjdG9yUHVibGljS2V5IjoiMjllNTgzM2E5MTVhNjQyOWE0ZTNhNzk0ODQ3NWMzMzhlZjQzNmViODJiZTg5YzkyZjA1OTcwNDQwM2RiOWQ1NSIsInByZXZIYXNoIjpudWxsLCJpYXQiOjE3NTU1MDAwMDAsImV4cCI6OTk5OTk5OTk5OX0.9RjpRnlaZYkmZuL4JI0moVqpCPcgRKtwfCg8SKoN7KOZBpJqOOgYHl2hDw5gC9XLvBz_H5GIEK6Nj7E-TzE7Bg",
-        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWJqZWN0Ijp7InR5cGUiOiJ1c2VyIiwiaWQiOiJlbXBsb3llZV94In0sImFjdG9yUHVibGljS2V5IjoiODA1NDQwZWU0ODA1MWZjODJlYTY0ZDkwNWFjYWJmZjBkMjE3ODBmN2ZjYWJhNjkwMGUwZTQxMzg3YjFkNGE1NyIsInByZXZIYXNoIjoiZmFhMGEwOTY2NGZjMGJmNGZkYjAzMzdjZmVmMGM0ZTJjNmI2MjYwOTAxMGQzMThhY2VhNWFjMWM5YTU5MTlmMCIsImlhdCI6MTc1NTUwMDAwMCwiZXhwIjo5OTk5OTk5OTk5fQ.8sTKCVbiqc9tS02w7aB75PZ9xYOjAO2JJezsMoy5_SF2TIrxwAvDmqpQjx7xXkvLCRygA_ct3WAnRUvUltuyAQ"
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhY3RvclB1YmxpY0tleSI6IjI5ZTU4MzNhOTE1YTY0MjlhNGUzYTc5NDg0NzVjMzM4ZWY0MzZlYjgyYmU4OWM5MmYwNTk3MDQ0MDNkYjlkNTUiLCJwcmV2SGFzaCI6bnVsbCwiaWF0IjoxNzU1NTAwMDAwLCJleHAiOjk5OTk5OTk5OTl9.Z2YdJcLmX1G1MjU-rWtXLbX8Ek9DocWYOErm4b8Em4nS-mmf6smwVtwuHNF-seDRfEAarly37uRT3iK1P4ScCg",
+        "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhY3RvclB1YmxpY0tleSI6IjgwNTQ0MGVlNDgwNTFmYzgyZWE2NGQ5MDVhY2FiZmYwZDIxNzgwZjdmY2FiYTY5MDBlMGU0MTM4N2IxZDRhNTciLCJwcmV2SGFzaCI6IjYwZTdmNDFmZDc2NTgwZGE5OTk0YWVlYjI4NzNkNTc0OWVlMmQ5ZDdiMzZhZDdiM2NjYzY1YzM2ZjY5ZDlhNmIiLCJpYXQiOjE3NTU1MDAwMDAsImV4cCI6OTk5OTk5OTk5OX0.hgbQovYevw5IFomv-oVf0XqqSZnD3l2bh5uLQeCuZQR4TXmjQ6H7H6vKTS7Oe4FEQR4dLVf-I5aSB4cagDEQDw"
       ],
-      "subject": {
-        "type": "user",
-        "id": "employee_x"
-      },
       "actor_public_keys": [
         "29e5833a915a6429a4e3a7948475c338ef436eb82be89c92f059704403db9d55",
         "805440ee48051fc82ea64d905acabff0d21780f7fcaba6900e0e41387b1d4a57"

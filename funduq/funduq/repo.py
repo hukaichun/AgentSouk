@@ -54,6 +54,15 @@ class ThreadOwnershipMismatch(Exception):
     pass
 
 
+class ThreadMembershipRequired(Exception):
+    """The thread is bound to a responsibility segment and the writer is not a member.
+
+    A thread whose first run carried an actor chain binds {segment head,
+    serving provider} at birth; only those keys may utter on it. Members
+    interject freely — membership is the only gate. An unbound thread
+    accepts anyone, unchanged."""
+
+
 class ThreadQueueFull(Exception):
     """The thread's pending-utterance buffer is at its limit; the message was NOT accepted.
 
@@ -430,6 +439,7 @@ async def create_thread(
     agent: AgentRef,
     parent_thread_id: str | None = None,
     metadata: dict[str, Any] | None = None,
+    head_key: str | None = None,
 ) -> str:
     thread_id = new_id("thread")
     now = _utcnow()
@@ -439,6 +449,7 @@ async def create_thread(
             provider_key=agent.provider_key,
             agent_name=agent.name,
             parent_thread_id=parent_thread_id,
+            head_key=head_key,
             metadata=metadata or {},
             created_at=now,
             last_activity_at=now,
@@ -454,6 +465,7 @@ async def ensure_thread(
     parent_thread_id: str | None = None,
     metadata: dict[str, Any] | None = None,
     create_if_missing: bool = False,
+    head_key: str | None = None,
 ) -> str:
     """Resolves a thread id for `agent`, creating a new thread when `thread_id` is None.
 
@@ -465,12 +477,21 @@ async def ensure_thread(
     caller's: funduq owns its record's primary keys, and a caller-chosen
     name has no caller identity to scope it to yet (see the design
     record on conversation naming rights).
+
+    `head_key` is the writer's effective segment head (None = anonymous).
+    A thread created now binds it at birth, immutably; an existing thread
+    that was born bound admits only its members — the bound head or the
+    serving provider's own key — and raises `ThreadMembershipRequired`
+    for anyone else. A thread born unbound stays open to all, and a later
+    chained writer cannot retroactively lock it.
     """
     if thread_id is not None:
         existing = await get_thread(session, thread_id)
         if existing is None:
             if create_if_missing:
-                return await create_thread(session, agent, parent_thread_id, metadata=metadata)
+                return await create_thread(
+                    session, agent, parent_thread_id, metadata=metadata, head_key=head_key
+                )
             raise ThreadNotFound(thread_id)
         owner = AgentRef(
             provider_key=existing["provider_key"], name=existing["agent_name"]
@@ -479,12 +500,18 @@ async def ensure_thread(
             raise ThreadOwnershipMismatch(
                 f"thread '{thread_id}' belongs to agent '{owner}', not '{agent}'"
             )
+        bound_head = existing.get("head_key")
+        if bound_head is not None and head_key != bound_head and head_key != agent.provider_key:
+            raise ThreadMembershipRequired(
+                f"thread '{thread_id}' is bound to a responsibility segment; only its "
+                "head or its serving provider may write to it"
+            )
         await session.execute(
             update(threads).where(threads.c.thread_id == thread_id).values(last_activity_at=_utcnow())
         )
         return thread_id
 
-    return await create_thread(session, agent, parent_thread_id, metadata)
+    return await create_thread(session, agent, parent_thread_id, metadata, head_key=head_key)
 
 
 async def get_thread_children(session: AsyncSession, thread_id: str) -> list[dict[str, Any]]:
@@ -541,6 +568,7 @@ async def create_run(
     protocol: str,
     input_json: dict[str, Any],
     metadata: dict[str, Any] | None = None,
+    head_key: str | None = None,
 ) -> dict[str, str]:
     run_id = new_id("run")
     await session.execute(
@@ -551,6 +579,7 @@ async def create_run(
             agent_name=agent.name,
             protocol=protocol,
             status="queued",
+            head_key=head_key,
             input_json=input_json,
             metadata=metadata or {},
             last_activity_at=_utcnow(),
@@ -738,12 +767,21 @@ async def get_paused_run_for_thread(session: AsyncSession, thread_id: str) -> di
 
 
 async def get_thread_snapshot(session: AsyncSession, thread_id: str) -> dict[str, Any] | None:
+    """The thread's state as a caller may see it: its messages, and a summary
+    of the run in flight. Deliberately NOT the run's raw row — a run row
+    carries the caller's own metadata and input (actor chains included), and
+    a read surface must never hand one caller another's raw materials."""
     thread = await get_thread(session, thread_id)
     if thread is None:
         return None
     messages = await get_thread_messages(session, thread_id)
     active_run = await get_active_run_for_thread(session, thread_id)
-    return {"thread_id": thread_id, "messages": messages, "active_run": active_run}
+    summary = (
+        {"run_id": active_run["run_id"], "status": active_run["status"]}
+        if active_run
+        else None
+    )
+    return {"thread_id": thread_id, "messages": messages, "active_run": summary}
 
 
 async def touch_run_activity(session: AsyncSession, run_id: str) -> None:

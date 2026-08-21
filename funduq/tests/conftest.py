@@ -91,8 +91,8 @@ class Identity(ProviderIdentity):
     def __init__(self) -> None:
         super().__init__(Ed25519PrivateKey.generate())
 
-    def sign_chain_hop(self, subject: dict, prev_token: str | None = None, exp_offset: int = 300) -> str:
-        return self.sign_hop(subject, prev_token, ttl=exp_offset)
+    def sign_chain_hop(self, prev_token: str | None = None, exp_offset: int = 300) -> str:
+        return self.sign_hop(prev_token, ttl=exp_offset)
 
     def register_body(self, agents: list[dict]) -> dict:
         signature, timestamp = self.sign_registration([a["name"] for a in agents])
@@ -128,10 +128,10 @@ async def attach(funduq: Funduq):
 class EchoAgent:
 
     def __init__(self) -> None:
-        self.seen_caller: dict | None = None
+        self.seen_chain: list | None = None
 
     async def run_stream(self, agent_name: str, run_input):
-        self.seen_caller = (run_input.forwarded_props or {}).get("caller")
+        self.seen_chain = (run_input.forwarded_props or {}).get("actorChain")
         ids = {"threadId": run_input.thread_id, "runId": run_input.run_id}
         yield {"type": "RUN_STARTED", **ids}
         yield {"type": "TEXT_MESSAGE_START", "messageId": "m1", "role": "assistant"}

@@ -20,42 +20,29 @@ def _message(text: str) -> dict:
     return {"role": "user", "parts": [{"type": "text", "text": text}]}
 
 
-async def test_a_forged_verified_actor_chain_is_stripped_at_the_door(funduq, serve):
+async def test_funduq_authors_no_verification_summary(funduq, serve, new_identity):
+    """funduq stopped summarizing chains: no `verifiedActorChain` digest is
+    ever written, so there is no digest to forge either — a caller-supplied
+    value under that name is plain caller data, and the chain itself reaches
+    the record verbatim."""
     served = await serve(EchoAgent(), "audited")
     agent = served.agents["audited"]
-
-    sent = await A2AAdapter(funduq).send_task(
-        agent,
-        _message("hi"),
-        metadata={
-            "verifiedActorChain": {"subject": "totally-legit", "actors": []},
-            "keep": "this",
-        },
-    )
-
-    async with funduq.session() as session:
-        stored = await repo.get_run(session, sent["id"])
-    assert "verifiedActorChain" not in stored.metadata, (
-        "no chain was attached, so no verification summary may exist"
-    )
-    assert stored.metadata.get("keep") == "this", "only reserved keys are stripped"
-
-
-async def test_a_real_actor_chain_still_earns_its_summary(funduq, serve, new_identity):
-    served = await serve(EchoAgent(), "vouched")
-    agent = served.agents["vouched"]
-    chain = [new_identity().sign_chain_hop({"userId": "u-1"})]
+    chain = [new_identity().sign_chain_hop()]
 
     sent = await A2AAdapter(funduq).send_task(
         agent,
         _message("hi"),
         actor_chain=chain,
-        metadata={"verifiedActorChain": "forged-and-overridden"},
+        metadata={"verifiedActorChain": "not-funduqs-word", "keep": "this"},
     )
 
     async with funduq.session() as session:
         stored = await repo.get_run(session, sent["id"])
-    assert stored.metadata["verifiedActorChain"]["subject"] == {"userId": "u-1"}
+    assert stored.metadata.get("verifiedActorChain") == "not-funduqs-word", (
+        "funduq writes no such key, so the caller's value passes through as caller data"
+    )
+    assert stored.metadata.get("keep") == "this"
+    assert stored.metadata.get("actorChain") == chain, "the chain itself is the record"
 
 
 async def test_only_funduq_written_keys_are_stripped(funduq, serve):

@@ -107,6 +107,20 @@ class WrongFunduq(Exception):
     refusing to produce anything worth stealing for an imposter."""
 
 
+def delegation_payload(delegate_public_key: str, expires_at: int) -> bytes:
+    """The session delegation certificate's signed bytes: a durable key names an ephemeral
+    delegate key and an expiry. The independent twin of
+    `funduq.identity.delegation_signing_payload`."""
+    return f"funduq-delegate:{delegate_public_key}:{expires_at}".encode()
+
+
+def resolve_payload(run_id: str, timestamp: int) -> bytes:
+    """The bytes an authority signs to answer a paused (input-required) run. The independent
+    twin of `funduq.identity.resolve_signing_payload`; `timestamp` is checked against funduq's
+    60s freshness window."""
+    return f"funduq-resolve:{run_id}:{timestamp}".encode()
+
+
 def funduq_connect_payload(funduq_nonce: str, provider_nonce: str) -> bytes:
     """Builds the bytes funduq signs to prove itself to a connecting provider.
 
@@ -169,11 +183,36 @@ class ProviderIdentity:
         )
 
 
-    def sign_hop(
-        self, subject: dict, prev_token: str | None = None, ttl: int = ACTOR_CHAIN_TTL_SECONDS
-    ) -> str:
-        """Issues a JWT (EdDSA) hop binding `subject` to this identity's public key, optionally chained to `prev_token` via its sha256 in `prevHash`, expiring after `ttl` seconds.
+    def sign_delegation(self, delegate_public_key: str, ttl_seconds: int = 8 * 3600) -> dict:
+        """Issues a session delegation certificate: this identity (the durable authority)
+        names `delegate_public_key` to act for it until now+`ttl_seconds`. Returns the wire
+        form `{authorityPublicKey, delegatePublicKey, expiresAt, signature}` that
+        `funduq.identity.verify_delegation` accepts. The certificate alone moves nothing
+        without the delegate's private key, so it is safe to store and relay."""
+        expires_at = int(time.time()) + ttl_seconds
+        return {
+            "authorityPublicKey": self.public_key,
+            "delegatePublicKey": delegate_public_key,
+            "expiresAt": expires_at,
+            "signature": self.sign(delegation_payload(delegate_public_key, expires_at)),
+        }
 
+    def sign_resolution(self, run_id: str, timestamp: int | None = None) -> tuple[str, int]:
+        """Signs the resolution of a paused run: `(signature, timestamp)` over
+        `resolve_payload(run_id, timestamp)`. Singular operation, timestamp family — funduq
+        checks the timestamp against its 60s freshness window and the status-guarded reopen
+        consumes the signature with the win."""
+        timestamp = int(time.time()) if timestamp is None else timestamp
+        return self.sign(resolve_payload(run_id, timestamp)), timestamp
+
+    def sign_hop(
+        self, prev_token: str | None = None, ttl: int = ACTOR_CHAIN_TTL_SECONDS
+    ) -> str:
+        """Issues a JWT (EdDSA) hop under this identity's public key, optionally chained to `prev_token` via its sha256 in `prevHash`, expiring after `ttl` seconds.
+
+        A chain carries keys and nothing else — the first hop's signer is
+        the segment's head/authority; whom a key represents is a separate,
+        opt-in disclosure (a voucher), never a hop field.
         `funduq.identity.verify_actor_chain` is the verifier these hops must
         satisfy; it builds the same claim format independently, and any
         change here must stay verifiable by it.
@@ -181,7 +220,6 @@ class ProviderIdentity:
         now = int(time.time())
         return jwt.encode(
             {
-                "subject": subject,
                 "actorPublicKey": self.public_key,
                 "prevHash": hashlib.sha256(prev_token.encode()).hexdigest()
                 if prev_token is not None
@@ -193,19 +231,18 @@ class ProviderIdentity:
             algorithm="EdDSA",
         )
 
-    def new_chain(self, subject: dict) -> list[str]:
-        """Starts a new actor chain: a one-element list holding a single signed hop for `subject`."""
-        return [self.sign_hop(subject)]
+    def new_chain(self) -> list[str]:
+        """Starts a new actor chain: a one-element list holding a single signed hop — this identity is the chain's head."""
+        return [self.sign_hop()]
 
     def extend_chain(self, prev_chain: list[str]) -> list[str]:
-        """Appends a hop signed by this identity, carrying forward the subject of the chain's last hop.
+        """Appends a hop signed by this identity. Extension is provenance, not authorization: the head stays the segment's authority.
 
         Raises ValueError if `prev_chain` is empty — use `new_chain` to start one.
         """
         if not prev_chain:
             raise ValueError("extend_chain requires a non-empty chain — use new_chain to start one")
-        subject = jwt.decode(prev_chain[-1], options={"verify_signature": False})["subject"]
-        return [*prev_chain, self.sign_hop(subject, prev_chain[-1])]
+        return [*prev_chain, self.sign_hop(prev_chain[-1])]
 
 
 class InvalidChain(Exception):
@@ -214,14 +251,18 @@ class InvalidChain(Exception):
 
 @dataclass(frozen=True)
 class VerifiedChain:
-    """What a verified chain vouches for: its subject, and each hop's signing key in order."""
+    """A verified chain: each hop's signing key in order, head first."""
 
-    subject: dict
     actor_public_keys: list[str]
+
+    @property
+    def head(self) -> str:
+        """The first hop's signer: the responsibility segment's authority."""
+        return self.actor_public_keys[0]
 
 
 def verify_chain(chain: list[str]) -> VerifiedChain:
-    """Verifies an actor chain without funduq: each hop's signature under its own embedded key, `prevHash` linkage, one subject throughout, expiry enforced on the last hop only.
+    """Verifies an actor chain without funduq: each hop's signature under its own embedded key, `prevHash` linkage, expiry enforced on the last hop only.
 
     The independent twin of `funduq.identity.verify_actor_chain` — same rules,
     pinned to each other by interop tests. Unlike funduq's, it does not resolve
@@ -232,7 +273,6 @@ def verify_chain(chain: list[str]) -> VerifiedChain:
     if not chain:
         raise InvalidChain("empty actor chain")
 
-    subject: dict | None = None
     actor_public_keys: list[str] = []
     prev_token: str | None = None
 
@@ -268,15 +308,7 @@ def verify_chain(chain: list[str]) -> VerifiedChain:
         if payload.get("prevHash") != expected_prev_hash:
             raise InvalidChain(f"hop {i}: prevHash doesn't match — chain reordered, truncated, or spliced")
 
-        if i == 0:
-            subject = payload.get("subject")
-            if not isinstance(subject, dict):
-                raise InvalidChain("hop 0: missing subject")
-        elif payload.get("subject") != subject:
-            raise InvalidChain(f"hop {i}: subject changed partway through the chain")
-
         actor_public_keys.append(actor_public_key)
         prev_token = token
 
-    assert subject is not None
-    return VerifiedChain(subject=subject, actor_public_keys=actor_public_keys)
+    return VerifiedChain(actor_public_keys=actor_public_keys)

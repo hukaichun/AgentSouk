@@ -73,6 +73,9 @@ threads = Table(
     Column("provider_key", String, nullable=False),
     Column("agent_name", String, nullable=False),
     Column("parent_thread_id", String, ForeignKey("threads.thread_id"), nullable=True),
+    # The responsibility segment's head, copied from the first run's chain at
+    # the thread's birth; NULL = unbound (today's open behavior). Immutable.
+    Column("head_key", String, nullable=True),
     Column("metadata", _JSON, nullable=False, default=dict),
     Column("created_at", _TS, nullable=False, default=_utcnow),
     Column("last_activity_at", _TS, nullable=False, default=_utcnow),
@@ -93,6 +96,10 @@ runs = Table(
     Column("agent_name", String, nullable=False),
     Column("protocol", String, nullable=False),
     Column("status", String, nullable=False),
+    # The chain head this run arrived under (after delegation-certificate
+    # resolution); NULL = anonymous. A paused run's ask may be resolved only
+    # by this key or the agent's own provider key.
+    Column("head_key", String, nullable=True),
     Column("input_json", _JSON, nullable=False),
     Column("started_at", _TS, nullable=True),
     Column("completed_at", _TS, nullable=True),

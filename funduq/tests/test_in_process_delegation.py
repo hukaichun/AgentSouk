@@ -31,15 +31,14 @@ async def test_delegate_without_building_a_json_rpc_envelope(funduq, serve):
     assert task["id"].startswith("run_")
 
 
-async def test_the_caller_is_the_declared_shape_on_both_roads(funduq, serve):
+async def test_the_callers_chain_reaches_the_agent_verbatim_on_both_roads(funduq, serve):
     from ag_ui.core import RunAgentInput, UserMessage
 
-    from funduq.props import CallerProps
     from funduq.protocols.agui import AGUIAdapter
 
     agui_served = await serve(EchoAgent(), "agui-callee")
     a2a_served = await serve(EchoAgent(), "a2a-callee")
-    chain = new_actor_chain(Ed25519PrivateKey.generate(), USER)
+    chain = new_actor_chain(Ed25519PrivateKey.generate())
 
     stream = await AGUIAdapter(funduq).run(
         agui_served.agents["agui-callee"],
@@ -58,10 +57,10 @@ async def test_the_caller_is_the_declared_shape_on_both_roads(funduq, serve):
         pass
     await A2AAdapter(funduq).send_task(a2a_served.agents["a2a-callee"], _message("hi"), actor_chain=chain)
 
-    caller = agui_served.provider.seen_caller
-    assert caller is not None
-    assert a2a_served.provider.seen_caller == caller
-    assert CallerProps.model_validate(caller).model_dump(mode="json", by_alias=True) == caller
+    # No funduq-authored digest exists: both doors relay the caller's own
+    # chain, byte-identical, and the agent verifies it for itself.
+    assert agui_served.provider.seen_chain == chain
+    assert a2a_served.provider.seen_chain == chain
 
 
 async def test_identity_is_carried_through_an_in_process_hop(funduq, serve):
@@ -69,22 +68,25 @@ async def test_identity_is_carried_through_an_in_process_hop(funduq, serve):
     callee, provider = served.agents["callee"], served.provider
 
     agency, relaying_agent = Ed25519PrivateKey.generate(), Ed25519PrivateKey.generate()
-    chain = extend_actor_chain(relaying_agent, new_actor_chain(agency, USER))
+    chain = extend_actor_chain(relaying_agent, new_actor_chain(agency))
 
     await A2AAdapter(funduq).send_task(callee, _message("hi"), actor_chain=chain)
 
-    assert provider.seen_caller["subject"] == USER
-    assert [a["publicKey"] for a in provider.seen_caller["actors"]] == [
+    assert provider.seen_chain == chain
+    from funduq_provider_sdk import verify_chain
+
+    result = verify_chain(provider.seen_chain)
+    assert result.actor_public_keys == [
         agency.public_key().public_bytes_raw().hex(),
         relaying_agent.public_key().public_bytes_raw().hex(),
     ]
-    assert provider.seen_caller["chain"] == chain
+    assert result.head == agency.public_key().public_bytes_raw().hex()
 
 
 async def test_a_tampered_chain_is_rejected_on_this_path_too(funduq, serve):
     callee = (await serve(EchoAgent(), "callee")).agents["callee"]
 
-    chain = new_actor_chain(Ed25519PrivateKey.generate(), USER)
+    chain = new_actor_chain(Ed25519PrivateKey.generate())
     tampered = [chain[0][:-4] + "AAAA"]
 
     with pytest.raises(InvalidActorChain):

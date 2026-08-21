@@ -14,6 +14,7 @@ from funduq import repo
 from funduq.agui import build_run_agent_input
 from funduq.errors import AgentNotFound, InvalidRunInput, LlmProviderNotFound, RunNotFound
 from funduq.kyok import KyokBinding, parse_kyok_opt_in, strip_kyok_context
+from funduq.identity import verify_resolution
 from funduq.props import ADDRESSED_RUN_METADATA_KEY, build_forwarded_props
 from funduq.models import AgentRef
 from funduq.protocols.a2a_translate import (
@@ -320,12 +321,11 @@ class A2AAdapter:
             parent_thread_id = await _lineage_parent(session, params)
             context_id = params.get("contextId") or await _context_of_task(session, params.get("taskId"))
 
-            metadata, verified_subject, verified_actors, actor_chain = await verify_caller(
-                session, metadata
-            )
+            metadata, head_key, actor_chain = await verify_caller(session, metadata)
 
             thread_id = await repo.ensure_thread(
-                session, agent, context_id, parent_thread_id, metadata=metadata
+                session, agent, context_id, parent_thread_id,
+                metadata=metadata, head_key=head_key,
             )
 
             messages = a2a_message_to_agui_messages(params.get("message", {}))
@@ -347,6 +347,20 @@ class A2AAdapter:
             # target's state.
             task_id = params.get("taskId")
             addressed = await repo.get_run(session, task_id) if task_id else None
+            if (
+                addressed is not None
+                and addressed.thread_id == thread_id
+                and addressed.status == "input-required"
+                and addressed.head_key is not None
+            ):
+                # A chained ask names its authorities; the resolution must be
+                # signed by one of them. Raises InvalidResolution otherwise.
+                verify_resolution(
+                    metadata.get("resolution") or {},
+                    task_id,
+                    {addressed.head_key, agent.provider_key},
+                    metadata.get("delegation"),
+                )
             reopened = (
                 addressed is not None
                 and addressed.thread_id == thread_id
@@ -367,7 +381,8 @@ class A2AAdapter:
                     session, thread_id, funduq.settings.thread_queue_limit
                 )
                 created = await repo.create_run(
-                    session, thread_id, agent, "a2a", run_input, metadata=metadata
+                    session, thread_id, agent, "a2a", run_input,
+                    metadata=metadata, head_key=head_key,
                 )
                 run_id = created["run_id"]
                 starting_seq = 0
@@ -393,8 +408,6 @@ class A2AAdapter:
                 agent,
                 kyok_ref is not None or inherited,
                 None,
-                verified_subject,
-                verified_actors,
                 actor_chain,
                 # The extension convention puts the key in the Message's own
                 # metadata map; the request-level map is accepted too.
@@ -404,6 +417,7 @@ class A2AAdapter:
                     )
                     or metadata.get(ADDRESSED_RUN_METADATA_KEY)
                 ),
+                delegation=metadata.get("delegation"),
             )
 
             try:

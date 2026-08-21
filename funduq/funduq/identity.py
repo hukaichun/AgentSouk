@@ -42,6 +42,8 @@ _DELETE_LLM = "funduq-delete-llm"
 _KYOK_CALL = "funduq-kyok-call"
 _CONNECT_PROVIDER = "funduq-connect-provider"
 _CONNECT_FUNDUQ = "funduq-connect-funduq"
+_DELEGATE = "funduq-delegate"
+_RESOLVE = "funduq-resolve"
 
 
 def _roster_registration_payload(tag: str, names: list[str], timestamp: int) -> bytes:
@@ -143,14 +145,111 @@ def kyok_call_signing_payload(bearer: str, timestamp: int, body_hash: str) -> by
     return f"{_KYOK_CALL}:{bearer}:{timestamp}:{body_hash}".encode()
 
 
+def delegation_signing_payload(delegate_public_key: str, expires_at: int) -> bytes:
+    """The bytes a durable key signs to name a session key: "SK acts for me until T".
+
+    The session delegation certificate is custody's bridge (a passkey or an
+    SSO-custodied key signs once per session; the ephemeral key signs
+    everything after). It exists because chain *extension* is provenance
+    anyone may perform — delegating authority to a named key takes this
+    explicit statement. `expires_at` is the session's lifetime (hours), a
+    different layer from a hop's presentation freshness (minutes).
+    """
+    return f"{_DELEGATE}:{delegate_public_key}:{expires_at}".encode()
+
+
+class InvalidDelegation(ValueError):
+    pass
+
+
+def verify_delegation(certificate: dict) -> str:
+    """Verifies a session delegation certificate and returns the authority's public key.
+
+    `certificate` is `{"authorityPublicKey", "delegatePublicKey",
+    "expiresAt", "signature"}`: the authority signed
+    `delegation_signing_payload(delegatePublicKey, expiresAt)`. Raises
+    `InvalidDelegation` if the signature fails or the certificate has
+    expired. The certificate alone moves nothing — only the named delegate's
+    own signatures gain the authority — so it is safe to store and to relay.
+    """
+    try:
+        authority = certificate["authorityPublicKey"]
+        delegate = certificate["delegatePublicKey"]
+        expires_at = int(certificate["expiresAt"])
+        signature = certificate["signature"]
+    except (KeyError, TypeError, ValueError) as e:
+        raise InvalidDelegation(f"malformed delegation certificate: {e}") from e
+    if time.time() > expires_at:
+        raise InvalidDelegation("delegation certificate has expired")
+    if not verify_signature(
+        authority, signature, delegation_signing_payload(delegate, expires_at)
+    ):
+        raise InvalidDelegation("delegation certificate signature does not verify")
+    return authority
+
+
+def resolve_signing_payload(run_id: str, timestamp: int) -> bytes:
+    """The bytes an authority signs to answer a paused ask: "I resolve this run, now".
+
+    A resolution is singular — the status-guarded reopen picks one winner and
+    consumes the signature with it — so it belongs to the timestamp family
+    (like registration), not the challenge family: `timestamp` is checked
+    against the 60s freshness window, and a stored signature is spent by the
+    time anyone can read it.
+    """
+    return f"{_RESOLVE}:{run_id}:{timestamp}".encode()
+
+
+class InvalidResolution(ValueError):
+    pass
+
+
+def verify_resolution(
+    resolution: dict,
+    run_id: str,
+    allowed_keys: set[str],
+    delegation: dict | None = None,
+) -> str:
+    """Verifies a resolution proof for a paused run and returns the effective authority.
+
+    `resolution` is `{"publicKey", "timestamp", "signature"}`: the signer
+    signed `resolve_signing_payload(run_id, timestamp)`. With a delegation
+    certificate naming the signer, the certificate's authority is the
+    effective key; otherwise the signer stands for itself. The effective key
+    must be in `allowed_keys` (the ask's authority set: the run's chain head
+    and the agent's own provider key). The timestamp is checked against the
+    60s freshness window. Raises `InvalidResolution` on any failure.
+    """
+    try:
+        signer = resolution["publicKey"]
+        timestamp = int(resolution["timestamp"])
+        signature = resolution["signature"]
+    except (KeyError, TypeError, ValueError) as e:
+        raise InvalidResolution(f"malformed resolution proof: {e}") from e
+    effective = signer
+    if delegation is not None:
+        authority = verify_delegation(delegation)
+        if delegation.get("delegatePublicKey") == signer:
+            effective = authority
+    if effective not in allowed_keys:
+        raise InvalidResolution(
+            "the resolver is not an authority for this ask — neither the run's "
+            "segment head nor its provider"
+        )
+    if not is_timestamp_fresh(timestamp):
+        raise InvalidResolution("resolution timestamp outside the freshness window")
+    if not verify_signature(signer, signature, resolve_signing_payload(run_id, timestamp)):
+        raise InvalidResolution("resolution signature does not verify")
+    return effective
+
+
 ACTOR_CHAIN_TTL_SECONDS = 300
 
 
-def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | None) -> str:
+def _sign_hop(private_key: Ed25519PrivateKey, prev_token: str | None) -> str:
     now = int(time.time())
     return jwt.encode(
         {
-            "subject": subject,
             "actorPublicKey": private_key.public_key().public_bytes_raw().hex(),
             "prevHash": _hop_hash(prev_token) if prev_token is not None else None,
             "iat": now,
@@ -161,30 +260,37 @@ def _sign_hop(private_key: Ed25519PrivateKey, subject: dict, prev_token: str | N
     )
 
 
-def new_actor_chain(private_key: Ed25519PrivateKey, subject: dict) -> list[str]:
-    """Starts a new actor chain: a single hop, signed by `private_key`, vouching for `subject`."""
-    return [_sign_hop(private_key, subject, None)]
+def new_actor_chain(private_key: Ed25519PrivateKey) -> list[str]:
+    """Starts a new actor chain: a single hop signed by `private_key` — the signer is the
+    chain's head, the responsibility segment's authority. A chain carries keys and nothing
+    else; whom a key represents is a separate, opt-in disclosure (a voucher), never a field
+    on the chain."""
+    return [_sign_hop(private_key, None)]
 
 
 def extend_actor_chain(private_key: Ed25519PrivateKey, prev_chain: list[str]) -> list[str]:
-    """Appends a new hop signed by `private_key` to `prev_chain`, carrying the same subject forward.
+    """Appends a new hop signed by `private_key` to `prev_chain`.
 
     The new hop links to the chain's last hop via a hash of that token, so
-    the chain records who acted on whose behalf, in order. Raises
-    `ValueError` if `prev_chain` is empty.
+    the chain records who acted downstream of whom, in order. Extending is
+    provenance, not authorization: the head stays the segment's authority.
+    Raises `ValueError` if `prev_chain` is empty.
     """
     if not prev_chain:
         raise ValueError(
             "extend_actor_chain requires a non-empty prev_chain — use new_actor_chain to originate one"
         )
-    subject = jwt.decode(prev_chain[-1], options={"verify_signature": False})["subject"]
-    return [*prev_chain, _sign_hop(private_key, subject, prev_chain[-1])]
+    return [*prev_chain, _sign_hop(private_key, prev_chain[-1])]
 
 
 @dataclass
 class ChainResult:
-    subject: dict
     actor_public_keys: list[str]
+
+    @property
+    def head(self) -> str:
+        """The first hop's signer: the responsibility segment's authority."""
+        return self.actor_public_keys[0]
 
 
 class InvalidActorChain(ValueError):
@@ -196,16 +302,17 @@ def _hop_hash(token: str) -> str:
 
 
 def verify_actor_chain(chain: list[str]) -> ChainResult:
-    """Verifies an actor chain and returns the subject it vouches for plus each hop's actor key, in order.
+    """Verifies an actor chain and returns each hop's actor key, in order (head first).
 
     Each hop's signature must verify under its own embedded public key, and
     each hop after the first must link to the previous hop via a matching
     `prevHash` — reordering, truncating, or splicing in a hop from a
-    different chain breaks this and is rejected. Every hop must vouch for
-    the same `subject`. Only the last hop's expiry is enforced; earlier
-    hops may have expired since they were signed. Raises
-    `InvalidActorChain` on any of these failures, including an empty chain
-    or an unparseable/forged token.
+    different chain breaks this and is rejected. Only the last hop's expiry
+    is enforced; earlier hops may have expired since they were signed.
+    Unknown claims on a hop are ignored (a chain from a signer still
+    stamping the retired `subject` field verifies; the field carries no
+    meaning). Raises `InvalidActorChain` on any of these failures,
+    including an empty chain or an unparseable/forged token.
 
     Hops also arrive from out-of-process providers:
     `funduq_provider_sdk.identity.ProviderIdentity.sign_hop` builds the same
@@ -215,7 +322,6 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
     if not chain:
         raise InvalidActorChain("empty actor chain")
 
-    subject: dict | None = None
     actor_public_keys: list[str] = []
     prev_token: str | None = None
 
@@ -249,18 +355,10 @@ def verify_actor_chain(chain: list[str]) -> ChainResult:
         if payload.get("prevHash") != expected_prev_hash:
             raise InvalidActorChain(f"hop {i}: prevHash doesn't match — chain reordered, truncated, or spliced")
 
-        if i == 0:
-            subject = payload.get("subject")
-            if not isinstance(subject, dict):
-                raise InvalidActorChain("hop 0: missing subject")
-        elif payload.get("subject") != subject:
-            raise InvalidActorChain(f"hop {i}: subject changed partway through the chain")
-
         actor_public_keys.append(actor_public_key)
         prev_token = token
 
-    assert subject is not None
-    return ChainResult(subject=subject, actor_public_keys=actor_public_keys)
+    return ChainResult(actor_public_keys=actor_public_keys)
 
 
 def verify_signature(public_key_hex: str, signature_hex: str, payload: bytes) -> bool:
