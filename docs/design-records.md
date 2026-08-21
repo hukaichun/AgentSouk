@@ -92,6 +92,42 @@ types.
 See [The dispatch trunk](core-components/dispatch.md) →
 [full record](https://github.com/hukaichun/funduq/blob/d78d0638c0ec2126167240c62471651b5468d35b/design/library-architecture.md#typed-data-and-where-typing-stops)
 
+### What A2A cannot say lands in one named place, exhaustively
+
+AG-UI says more than A2A can hear. Tool calls, reasoning, state patches,
+step boundaries — a third of AG-UI's event types have no A2A
+representation at all, because A2A's agents are black boxes by
+construction and those events describe an inside.
+
+A translator therefore has to decide what happens to them, and there is
+no neutral answer available: dropping them is a disclosure decision, and
+forwarding them is a disclosure decision. The official `@ag-ui/a2a`
+converter drops silently (ag-ui#1938, #2091); funduq forwarded verbatim.
+Neither is a bug — **both are guesses standing in for a declaration that
+neither protocol has a field for.** AG-UI never needed one (one owner, so
+there is no "to whom"); A2A never needed one (nothing gets out).
+
+funduq does not make that decision either, and the reason is the
+invariant: who may read what through funduq is enforced *outside*
+funduq, by whoever actually holds that responsibility, and what funduq
+owes them is a record they can attach to. So the rule is not a policy but
+a **location**: every event with no A2A representation is carried
+verbatim under one metadata key — `agui_event` on a status update,
+`agui_events` on a whole task — and nowhere else.
+
+The load-bearing property is that the seam is **exhaustive**, because a
+filter can only attach to something it knows is complete. A route that
+leaks by another path, or drops instead, is silently invisible to the
+layer that is supposed to be deciding.
+`test_every_ag_ui_event_type_is_mapped_or_reaches_the_overflow_seam`
+walks `EventType` and fails when a new AG-UI type escapes both routes.
+
+Two paths had disagreed. The live stream carried the overflow; `GetTask`
+merged text deltas and dropped everything else, so **the auditing reader
+saw less than the live subscriber** — backwards, for the one reader whose
+whole purpose is the record. `build_task` now carries the same overflow
+the stream does.
+
 ### A provider is its key, and has no other id
 
 Registration once carried an `sdk_client_id`, a string the client picked

@@ -125,3 +125,77 @@ def test_build_task_merges_a_message_into_one_artifact():
             {"artifactId": "m2", "parts": [{"text": "and again"}]},
         ],
     }
+
+
+def test_run_finished_on_an_interrupt_is_input_required_not_completed():
+    """A run that finished on an interrupt is asking, not done. The persisted status is
+    `input-required`, which is what `GetTask` answers with, so the stream must agree."""
+    update = agui_event_to_a2a_update(
+        {
+            "type": "RUN_FINISHED",
+            "outcome": {"type": "interrupt", "interrupts": [{"id": "i1", "reason": "approve"}]},
+        },
+        "task_1",
+        "session_1",
+    )
+
+    assert update["statusUpdate"]["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+    assert update["statusUpdate"]["metadata"] == {"interrupts": [{"id": "i1", "reason": "approve"}]}
+
+
+def test_every_ag_ui_event_type_is_mapped_or_reaches_the_overflow_seam():
+    """The overflow key is what an outside layer attaches to — to strip, allow or audit what
+    A2A has no vocabulary for. That only works if it is exhaustive, so a new AG-UI event type
+    that leaves by neither route fails here rather than becoming invisible."""
+    from ag_ui.core import EventType
+
+    from funduq.protocols.a2a_translate import (
+        MAPPED_EVENT_TYPES,
+        OVERFLOW_METADATA_KEY,
+        is_mapped,
+    )
+
+    for event_type in EventType:
+        event = {"type": event_type.value}
+        update = agui_event_to_a2a_update(event, "task_1", "session_1")
+
+        if event_type.value in MAPPED_EVENT_TYPES:
+            assert is_mapped(event)
+            continue
+
+        assert not is_mapped(event)
+        metadata = update["statusUpdate"]["metadata"]
+        assert metadata[OVERFLOW_METADATA_KEY] == event, event_type.value
+
+
+def test_get_task_carries_the_same_overflow_the_stream_does():
+    """An audit that sees less than the live subscriber saw is the wrong way round."""
+    from funduq.protocols.a2a_translate import OVERFLOW_METADATA_LIST_KEY
+
+    unmapped = [
+        {"type": "TOOL_CALL_ARGS", "toolCallId": "tc1", "delta": '{"q":"x"}'},
+        {"type": "STATE_DELTA", "delta": [{"op": "replace", "path": "/m", "value": 1}]},
+    ]
+    events = [
+        {"type": "RUN_STARTED"},
+        *unmapped,
+        {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "hi"},
+        {"type": "RUN_FINISHED"},
+    ]
+
+    task = build_task("task_1", "session_1", "agent", "completed", events)
+
+    assert task["metadata"][OVERFLOW_METADATA_LIST_KEY] == unmapped
+    assert task["artifacts"] == [{"artifactId": "m1", "parts": [{"text": "hi"}]}]
+
+
+def test_a_task_with_nothing_unmapped_carries_no_overflow_metadata():
+    task = build_task(
+        "task_1",
+        "session_1",
+        "agent",
+        "completed",
+        [{"type": "RUN_STARTED"}, {"type": "TEXT_MESSAGE_CONTENT", "messageId": "m1", "delta": "hi"}],
+    )
+
+    assert "metadata" not in task
