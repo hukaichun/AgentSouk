@@ -65,13 +65,23 @@ class ProviderQuality:
 @dataclass
 class _Capacity:
     """Tracks one provider's in-flight run count against its declared limit.
-    `declared=None` means the provider accepts unlimited concurrent runs."""
+    `declared=None` means the provider accepts unlimited concurrent runs —
+    a declaration like any other, and one a decline contradicts. `withheld`
+    is set when that contradiction happens: funduq stops offering to a
+    provider whose own words don't add up, until the provider next does
+    something observable (finishes a run, answers late, reconnects). Not a
+    back-off — pacing a provider's intake is the provider's job, via a
+    declared limit; this is funduq declining to keep asking an abnormal
+    one."""
 
     declared: int | None
     in_flight: int = 0
+    withheld: bool = False
 
     @property
     def has_room(self) -> bool:
+        if self.withheld:
+            return False
         return self.declared is None or self.in_flight < self.declared
 
 
@@ -311,9 +321,11 @@ class RunBroker:
         for agent in mapping:
             self._unserved_since.pop(agent, None)
         for provider in mapping.values():
-            self._capacity.setdefault(
+            capacity = self._capacity.setdefault(
                 provider.public_key, _Capacity(declared=provider.max_concurrent_runs)
             )
+            # A (re)connection is the provider acting; stop withholding.
+            capacity.withheld = False
         self._work_to_do.set()
 
     def serving(self, agent: AgentRef) -> ConnectedProvider | None:
@@ -412,14 +424,28 @@ class RunBroker:
         if not accepted:
             if capacity is not None and capacity.has_room:
                 self._live.note(provider.public_key, "misdeclared")
-                capacity.in_flight = capacity.declared or capacity.in_flight
-                logger.warning(
-                    "provider %s declined a run while funduq believed it had room "
-                    "(now %d/%s in flight); treating it as full",
-                    provider.public_key[:16],
-                    capacity.in_flight,
-                    capacity.declared,
-                )
+                if capacity.declared is None:
+                    # Claiming no limit and declining is abnormal behaviour,
+                    # recorded once — not re-asked every sweep, which only
+                    # inflated the counter into noise (funduq#128). Offers
+                    # resume when the provider next acts.
+                    capacity.withheld = True
+                    logger.warning(
+                        "provider %s declared unlimited concurrency yet declined run %s; "
+                        "withholding further offers until it acts (misdeclared: %d)",
+                        provider.public_key[:16],
+                        run.run_id,
+                        self._live.count(provider.public_key, "misdeclared"),
+                    )
+                else:
+                    capacity.in_flight = capacity.declared
+                    logger.warning(
+                        "provider %s declined a run while funduq believed it had room "
+                        "(now %d/%s in flight); treating it as full",
+                        provider.public_key[:16],
+                        capacity.in_flight,
+                        capacity.declared,
+                    )
             return False
         run.claimed_by = provider.public_key
         run.cancel_notify = provider.cancel
@@ -560,6 +586,7 @@ class RunBroker:
         capacity = self._capacity.get(claimed_by)
         if capacity is not None:
             capacity.in_flight += 1
+            capacity.withheld = False
         self._live.note(claimed_by, "answered_late")
         logger.warning(
             "provider %s answered late for run %s (%d so far): already producing for "
@@ -601,6 +628,7 @@ class RunBroker:
             capacity = self._capacity.get(run.claimed_by)
             if capacity is not None and capacity.in_flight > 0:
                 capacity.in_flight -= 1
+                capacity.withheld = False
                 self._work_to_do.set()
         for listener in self._forget_listeners:
             listener(run_id)

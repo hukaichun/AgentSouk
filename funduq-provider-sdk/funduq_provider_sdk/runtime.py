@@ -28,7 +28,15 @@ class ProviderRuntime:
         self.identity = identity
         self.provider = provider
         self.link: "FunduqLink | None" = None
-        self._jobs: asyncio.Queue = asyncio.Queue(maxsize=max_queued_runs)
+        # Claiming no limit (max_concurrent_runs=None, the default) is a
+        # declaration funduq takes at its word: a decline from an unlimited
+        # provider is abnormal behaviour, counted against it, and stops
+        # offers until it acts. So an unlimited runtime must never decline
+        # by accident — its intake queue is unbounded, and pacing (if the
+        # author wants any) is declared via max_concurrent_runs instead.
+        self._jobs: asyncio.Queue = asyncio.Queue(
+            maxsize=max_queued_runs if max_concurrent_runs is not None else 0
+        )
         self._output: asyncio.Queue = asyncio.Queue()
         self.max_concurrent_runs = max_concurrent_runs
         self._in_flight: dict[str, asyncio.Task] = {}

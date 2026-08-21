@@ -168,13 +168,20 @@ the only capacity figure funduq has and the decline is the more recent
 fact. This is also what makes self-delegation deadlock — see
 [the design record](../design-records.md#self-delegation-deadlocks-a-capacity-capped-provider).
 
-Treating-as-full only has anything to set, though, when the provider
-declared a finite limit. A provider that declared **unlimited**
-concurrency and then declines is counted `misdeclared` and re-offered
-immediately, every sweep, for as long as it keeps declining — the
-counter records the discourtesy, but nothing backs off. Declaring no
-limit and meaning it is the contract; declaring no limit and declining
-is the one misdeclaration funduq cannot act on.
+A provider that declared **unlimited** concurrency and then declines
+has contradicted its own declaration outright — there is no finite
+figure to fall back to. funduq records the `misdeclared` event once and
+**withholds further offers until the provider next does something
+observable** (finishes a run, answers late, reconnects). This is not a
+back-off funduq runs on the provider's behalf: keeping intake sane is
+the provider's own job, done by declaring a real limit — funduq helps
+queue against a declared throughput, and declines to keep asking a
+provider whose words don't add up (the old behaviour re-offered every
+sweep forever, inflating the counter into noise — funduq#128). New work
+arriving does not lift the withhold; only the provider acting does.
+The provider SDK keeps the default coherent: a runtime that claims no
+limit accepts every delivered run, so it can never be branded abnormal
+by its own transport plumbing.
 
 ## One substrate under both
 
