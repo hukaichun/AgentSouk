@@ -39,6 +39,7 @@ markdown_extensions:
 nav:
   - Overview: index.md
   - The integration contract: integration-contract.md
+  - The agent loop: agent-loop.md
   - Mechanisms:
       - mechanisms.md
       - Identity is an Ed25519 keypair: mechanisms/identity.md
