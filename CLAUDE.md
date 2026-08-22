@@ -35,8 +35,14 @@ times over.
   `attach_provider`
 - providers could be attached with no identity proof at all
 - one provider attached to two agents couldn't tell its runs apart
-- AG-UI has no cancelled event or outcome — checked against the installed
-  package before designing around it, which changed the design
+- AG-UI has no cancelled event — checked against the installed package before
+  designing around it, which changed the design. It *does* have an outcome:
+  this note used to say "no cancelled event or outcome", and by 0.1.19 the
+  second half was false. `RunFinishedEvent.outcome` is `success | interrupt`,
+  `Interrupt` carries `id`/`reason`/`response_schema`/`expires_at`, and the
+  reply rides `RunAgentInput.resume`. `pause.py` had been reading it for a
+  while — the note, not the code, was the thing lagging. Re-read the package
+  before repeating anything here about what a protocol lacks.
 - `docker compose up` didn't start, a provider failure reached callers as an
   empty 200, and A2A answered `-32601` to every spec-current client. All
   three were live the whole time 204 tests were green — see Testing below
