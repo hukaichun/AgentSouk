@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "funduq core — the network-free library: agents, threads, runs, and the protocol adapters"
 requires-python = ">=3.12"
 # No fastapi, uvicorn, sse-starlette or grpcio here, and that is the point:
-# core knows a database and nothing else, so it cannot import a transport
-# even by accident (see docs/library-architecture.md). Serving lives in the
-# funduq-server repository, which consumes this package via a submodule.
+# this repo implements no transport — its code neither listens nor dials —
+# so no serving framework is asked for (see docs/library-architecture.md).
+# Serving lives in the funduq-server repository, which consumes this package
+# via a submodule. Dependencies whose bellies contain network code are fine
+# (a2a-sdk ships httpx unconditionally); the defense forbids verbs, not
+# nouns — see tests/test_core_is_network_free.py.
 dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     # SQLite is funduq's zero-config default backend (see funduq/config.py's
@@ -23,21 +26,20 @@ dependencies = [
     # versions after they were renamed, and nothing failed until a real
     # client got -32601.
     #
-    # Only the types are used (a2a.types.a2a_pb2 — the v1.0 protobuf
+    # Quoting the SDK is the shortcut to staying current, so its vocabulary
+    # half is welcome anywhere in funduq: a2a.types (the v1.0 protobuf
     # definitions and the A2AService descriptor the method names are read
-    # from). None of the SDK's client, server or transport code is imported;
-    # those live behind extras (`http-server`, `grpc`, `fastapi`) that are
-    # deliberately not requested, so core stays free of a framework. Its base
-    # install does bring httpx and protobuf along, which is the one real cost
-    # here — see tests/test_core_is_network_free.py, which is now the only
-    # thing keeping core from importing them.
+    # from), a2a.utils (error tables, task folding), a2a.extensions. Its I/O
+    # half — a2a.client and the serving stack — is forbidden to our code,
+    # and the serving extras (`http-server`, `grpc`, `fastapi`) are
+    # deliberately not requested. The base install brings httpx along; that
+    # is a noun in a wheel, not a verb in our code — see
+    # tests/test_core_is_network_free.py for the line and its enforcement.
     "a2a-sdk>=1.1,<2",
     # KYOK's wire shapes are OpenAI chat-completions, and funduq hand-writes
     # no protocol (same rule as ag-ui-protocol and a2a-sdk above). Only
-    # openai.types.* is imported — no client is ever constructed; like
-    # a2a-sdk, the base install drags httpx along, and
-    # tests/test_core_is_network_free.py is what keeps core from importing
-    # it.
+    # openai.types.* is imported — the package's client half is a dialing
+    # verb and tests/test_core_is_network_free.py forbids it to our code.
     "openai>=1.50",
     "cryptography>=42.0",
     "pyjwt>=2.9",
@@ -59,10 +61,10 @@ postgres = ["psycopg[binary,pool]>=3.2"]
 # out of the box; set FUNDUQ_DATABASE_URL to a Postgres DSN (and install the
 # `postgres` extra) to run it against Postgres too — see CONTRIBUTING.md.
 # psycopg is pulled into the dev group so the Postgres path is always
-# testable locally without the extra. No httpx or grpcio-tools: nothing here
-# speaks a protocol, and the test that enforces that (tests/
-# test_core_is_network_free.py) would have nothing to catch if a transport
-# were installed alongside anyway.
+# testable locally without the extra. Nothing here speaks a protocol on the
+# wire; tests/test_core_is_network_free.py is what enforces that, and it
+# checks what our code does, not what happens to be installed (httpx is
+# installed regardless — a2a-sdk brings it).
 [dependency-groups]
 dev = [
     # funduq's own suite registers through the provider SDK rather than through
