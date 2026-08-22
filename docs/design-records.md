@@ -311,6 +311,52 @@ never branch) relays it verbatim, which is exactly the provider-authored
 timestamp a coherent cross-party history needs and the relay could never
 honestly write itself.
 
+### Quoting a third-party package is the shortcut to staying current, so the defense forbids verbs, not nouns
+
+Every protocol funduq ever hand-wrote rotted silently: it was still
+answering `tasks/send` and emitting `{"type": "text"}` parts two spec
+renames after both had moved, and nothing failed until a real client got
+-32601. The cure was importing the protocol's own package — method names
+read off the `A2AService` descriptor, shapes from `a2a.types` — so a
+rename breaks at import instead of in production. **Quoting the package
+is the shortcut that keeps funduq current with the protocol.**
+
+The old defense taxed exactly that shortcut. It banned dependency *nouns*
+— seven package names in an import scan, plus a pyproject rule that no
+transport be "even installable" — which was fiction from the day a2a-sdk
+was installed: its base wheel ships httpx unconditionally, so the tree was
+never network-free, and the rule's only real effect was making the SDK's
+pure vocabulary (error tables, `apply_history_length`, the extension
+header convention) feel out of bounds when it is precisely the part that
+must be imported rather than transcribed.
+
+What the invariant actually protects is a *verb*: **this repo implements
+no transport — funduq's own code neither listens nor dials.** Measured
+before rewriting: importing `a2a.utils.errors`, `a2a.utils.task` and
+`a2a.extensions.common` performs zero socket operations and pulls in zero
+transport modules; even `a2a.server.tasks.task_manager` (useful as a
+conformance oracle in tests) imports httpx into `sys.modules` without a
+single socket verb. A noun in a wheel is not a verb in our code.
+
+So the defense now has three layers, each aimed at the verb
+(`tests/test_core_is_network_free.py`):
+
+- **Behavioral** — a subprocess imports every funduq module under a
+  `sys.addaudithook` watching `socket.connect`/`bind`/`listen`/
+  `getaddrinfo`/…; any network verb during import fails the suite,
+  whoever's code performed it.
+- **Static, ours only** — funduq's modules may not import a transport or
+  a protocol SDK's I/O half (`a2a.client`, `a2a.server.routes`,
+  `a2a.server.request_handlers`, bare `openai`); the vocabulary half
+  (`a2a.types`, `a2a.utils`, `a2a.extensions`, `openai.types`) is
+  welcome. The line falls where the SDKs themselves draw it.
+- **Intent** — no serving framework as a direct dependency, and no
+  serving extra (`a2a-sdk[http-server]` etc.) requested: a framework in
+  our pyproject would say this repo intends to listen.
+
+This is a strengthening, not a loosening: the noun scan could never see a
+dependency dialing out on its own, the audit hook can.
+
 ## Designed, not built
 
 ### Rule zero: identifiers are never credentials

@@ -69,6 +69,11 @@ transport-specific", write eight lines that prove it instead.
   imports.
 - `tests/test_core_is_network_free.py` is a hard constraint, not a
   suggestion. If it fails, the fix is almost never to widen its allow-list.
+  It forbids verbs, not nouns: our code programming against a transport or
+  a SDK's I/O layer fails it, a dependency merely *containing* network code
+  does not (a2a-sdk ships httpx unconditionally — vocabulary imports like
+  `a2a.utils.errors` are welcome, that's how the protocol stays quoted
+  instead of transcribed).
 - **Every test provider is a stub, so nothing here proves funduq works.** The
   suite has never called a model. The check that does is the demo stack —
   `docker compose up` with a real key in `.env` — which now lives in
@@ -92,13 +97,18 @@ transport-specific", write eight lines that prove it instead.
 
 These are load-bearing; breaking one has caused a real bug here.
 
-- **Core is network-free — including its vocabulary.** It knows a database
-  and nothing else. Which protocol something arrives over is a serving-layer
-  choice, so core must not *name* one either: `broker.py`, `identity.py`,
-  `repo.py` and `kyok.py` all described themselves in terms of `PollForWork`
-  and `AgentSession` until the transport changed and every one of those
-  sentences became a lie. The contract is `claim_work` / `report_event` /
-  `finish_run` plus a cancel notification; a transport frames those.
+- **This repo implements no transport: our code neither listens nor dials.**
+  Third-party wheels may carry network code in their bellies; the invariant
+  is about funduq's own verbs, enforced behaviorally (importing the package
+  performs no socket operation) and statically (no import of a transport or
+  a SDK's I/O layer) — see the design record "forbids verbs, not nouns".
+  Core additionally stays protocol-free *in vocabulary*: which protocol
+  something arrives over is a serving-layer choice, so `broker.py`,
+  `identity.py`, `repo.py` and `kyok.py` must not name one — they all
+  described themselves in terms of `PollForWork` and `AgentSession` until
+  the transport changed and every one of those sentences became a lie. The
+  contract is `claim_work` / `report_event` / `finish_run` plus a cancel
+  notification; a transport frames those.
 - **funduq never decides on a provider's behalf.** It can *ask* an agent to
   stop; it cannot make it. Never record an outcome funduq hasn't observed —
   recording `cancelled` at request time was a lie the run's own output could
