@@ -265,8 +265,52 @@ pydantic-ai 的 `AgentRun.enqueue`、a2a-python 的 `ActiveTask._request_queue`
 去」給了不同答案：前兩個有兩個動詞，第三個只有一種行為。這是規範缺口最強的
 證據形式——**A2A 自己的參考伺服器不得不私下做了一個。**
 
-## 為什麼這頁對 funduq 有用
+## funduq 的位置
 
 funduq 站在兩扇門後面、provider 前面，所以它是那個**必須持有空隙**的東西：
 訊息在 caller 選的時刻抵達，provider 的迴圈在它自己選的時刻受理，中間那段由
 funduq 拿著。上面那四題不是 funduq 多做的功能，是站在這個位置就必須回答的。
+
+把這頁的模型套回 funduq 自己的詞彙：
+
+| funduq 的東西 | 落點 |
+| --- | --- |
+| 遞給 provider 的 `RunAgentInput` | ①——**兩扇門都翻譯成這一個形狀**，協定差異在抵達 provider 之前就已經消失 |
+| `forwardedProps`（`caller`／`kyok`／`actorChain`） | ① 不透明夾帶 |
+| thread queue（`thread_queue_limit`，預設 8） | **入向空隙的持有者** |
+| `addressedRunId`（插話擴充） | 入向空隙，帶宣告的意圖——funduq 只轉，判斷在 agent 自己的迴圈裡 |
+| `parentRunId`（AG-UI 自己的欄位） | 接在後面，下一輪 |
+| `input-required` ＋ `resume`／`ResumeEntry` | ②／③——結果落在待決的那個問題上 |
+| `Interrupt.expires_at`、`paused_no_resume` | **出向空隙**的過期 |
+| `cancel_run`／`CancelTask` | 中止，不屬於任何 ● |
+| `run_events`（存下來的 AG-UI 事件流） | 出向觀察，**也是兩個出口唯一的翻譯來源** |
+| — | **④：看不到，也不該看到** |
+
+最後一列是這個座位的邊界。`check(...)` 在 provider 的盒子裡，所以一個 run
+裡有幾次 ① 對 funduq 不可觀察——run ≠ turn，funduq 因此不去定址「這一輪」。
+它不 pace 對話（[the thread gate is
+retired](design-records.md#the-thread-gate-is-retired-funduq-does-not-pace-a-providers-conversation)），
+不猜一個插話該不該進得去（目標的 agent 才是判斷者），對 ④ 沒有任何意見。
+
+### 由此得出 core 的邊界
+
+- **core 做的決定，只有這個座位逼它做的那些**：空隙四題、身分，以及一個 run
+  的結局是什麼——而那是觀察，不是意圖。
+- **其餘一切協定形狀的東西都是翻譯**，而且只有一個翻譯來源：存下來的事實
+  （`runs` 的狀態與 `run_events`），入向與出向都是。
+- **wire 留在下游。** 信封、方法名、SSE framing、HTTP status 都不是翻譯，是
+  傳輸；`tests/test_core_is_network_free.py` 是守這條線的那個測試。
+
+「雙出口」因此不是兩個等價的 API，是同一份事實的兩個投影，各自在自己的方向
+有損：AG-UI 有 tools 與私有 state、沒有中止；A2A 有中止、沒有 tools 與私有
+state。A2A 講不出來的那些有一個具名的去處
+（[`agui_event`／`agui_events`](design-records.md#what-a2a-cannot-say-lands-in-one-named-place-exhaustively)），
+而不是被「補齊」成一個兩邊都不是的東西。
+
+### 為什麼空隙不能交給 SDK
+
+a2a-python 也持有一個空隙，四題的答案卻是相反的：消費點在上一個 `execute()`
+返回之後，所以插話結構上不可能。接上 `DefaultRequestHandler` ＋
+`AgentExecutor` ＋ `ActiveTask` 那一疊，等於默默改採那一組答案，而且不會有
+任何東西變紅。要用的是 `RequestHandler` 這個**介面**（在下游實作），不是它
+的迴圈持有者。
